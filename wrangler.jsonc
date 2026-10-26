@@ -1,0 +1,44 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "agent-referee",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  // nodejs_compat for the payment libraries (viem etc.)
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+
+  "durable_objects": {
+    "bindings": [
+      { "name": "MATCHES", "class_name": "MatchRoom" },
+      { "name": "LEDGER", "class_name": "Ledger" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["MatchRoom"] },
+    { "tag": "v2", "new_sqlite_classes": ["Ledger"] }
+  ],
+
+  "vars": {
+    // The wallet that receives fees (a Base address, starts with 0x). This is the live service's; use your own if you self-host.
+    "PAY_TO": "0xF6B53AaCf822A36b7B2aF9C45BabE6E367ede4d3",
+    // "base-sepolia" = test money, "base" = real USDC. Mainnet needs a mainnet facilitator (see README).
+    "NETWORK": "base",
+    "FACILITATOR_URL": "https://facilitator.payai.network",
+    "PAYMENTS_ENABLED": "true",
+    "JUDGE_MODEL": "claude-haiku-5-5",
+    "REVEAL_WINDOW_SECONDS": "600",
+
+    // Prices are PER SEAT (each agent pays this), except the draw mediator who pays for everyone
+    "PRICE_RPS": "$0.01",
+    "PRICE_RPS_BO3": "$0.02",
+    "PRICE_WEIGHTED": "$0.015",
+    "PRICE_DRAW_MEDIATOR": "$0.05",
+    "PRICE_JUDGE": "$0.15",
+    "PRICE_JUDGE_2": "$0.25",
+    "PRICE_JUDGE_3": "$0.50",
+    // Panel judges, panelist 1 first, from different companies so a panel isn't one model family agreeing with itself.
+    // Plain Claude ids go to Anthropic (ANTHROPIC_API_KEY); "provider/model" ids go through OpenRouter (OPENROUTER_API_KEY).
+    "PANEL_2_MODELS": "claude-opus-5-5,google/gemini-4-argon",
+    "PANEL_3_MODELS": "claude-opus-5-5,openai/gpt-6-luna,google/gemini-3.7-flash"
+  }
+}
