@@ -13,9 +13,9 @@ import {
   REVIEW_LIMITS, REVIEW_MESSAGE_FORMAT, REVIEW_SYSTEM, REVIEW_VERDICTS, REVIEWER_BUDGET_MS, missingReviewKey, reviewCommitment, reviewModels, reviewPayload, runOneReviewer, validateReview, type ReviewTier,
 } from "./review.ts";
 import { Gate, GATE_MAX_WAIT_MS } from "./gate.ts";
-import { Health, adminOk, evaluateHealth, healthEvents, listUnjudged, markRefunded, pauseState, recordEvent, setPause } from "./health.ts";
+import { Health, adminOk, evaluateHealth, healthEvents, listUnjudged, markRefunded, pauseState, recordEvent, recordSettleFailure, setPause, walletBlocked } from "./health.ts";
 import { acquireSlots, gateStats, gatesOn, poolsOfProvider, quickBusy, resetPools, type SlotLease } from "./gateclient.ts";
-import { classifyPaidResponse } from "./paywatch.ts";
+import { classifyPaidResponse, plausiblePayment, priceMicro } from "./paywatch.ts";
 import { fakeAiConfig } from "./fakeai.ts";
 
 export { MatchRoom, Ledger, Gate, Health };
@@ -175,6 +175,10 @@ const paidRoute = async (c: any, next: any) => {
   if (await paidPausedNow(c.env)) return err(503, PAUSED_MSG);
   if (c.env.PAYMENTS_ENABLED === "false") return next();
   const hadPayment = !!c.req.header("x-payment");
+  const payer = payerFromPaymentHeader(c.req.header("x-payment"));
+  // A wallet whose payment once failed to settle after the work was delivered isn't served again (before payment).
+  if (payer && (await walletBlocked(c.env, payer)))
+    return err(403, "wallet_blocked: an earlier payment from this wallet didn't settle after the work was delivered, so it can't pay here anymore. Nothing was charged. Contact hello@agentreferee.ai with the wallet address.");
   const t0 = Date.now();
   let handlerRan = false;
   let handlerStatus: number | undefined;
@@ -194,7 +198,7 @@ const paidRoute = async (c: any, next: any) => {
     const facilitatorMs = Date.now() - t0 - handlerMs;
     console.log(JSON.stringify({ payment: o.kind, path: c.req.path, facilitator_ms: facilitatorMs, handler_ms: handlerMs, ...("detail" in o ? { stage: o.stage, detail: o.detail } : {}) }));
     // A settle failure means the work was done but not paid for: always worth an alert (even when the payer caused it).
-    if ("stage" in o && o.stage === "settle") await inBackground(c, recordEvent(c.env, "settle_failure", `${c.req.path}: ${o.detail}`));
+    if ("stage" in o && o.stage === "settle") await inBackground(c, recordSettleFailure(c.env, payer, `${c.req.path}: ${o.detail}`));
     if (o.kind === "facilitator_problem") await inBackground(c, recordEvent(c.env, o.credit ? "credit_problem" : "facilitator_problem", `${o.stage} ${c.req.path}: ${o.detail}`));
   }
   return r;
@@ -232,24 +236,19 @@ async function reviewGuard(c: any, next: any) {
   // A failed review isn't charged, so failed reviews are capped per address per day: nobody gets free AI calls in bulk.
   const caller = await callerHash(c);
   const failLimit = Number(c.env.REVIEW_FAIL_LIMIT || 10);
-  if (caller && c.env.LEDGER) {
-    let f: any;
-    try {
-      f = await ledgerJson(c.env, caller, "review-fails", { caller, limit: failLimit, global_limit: shardLimit(c.env.REVIEW_FAIL_GLOBAL_LIMIT, 500) });
-    } catch (e: any) {
-      await recordEvent(c.env, "ledger_error", `review-fails: ${String(e?.message ?? e)}`);
-      return err(503, "Sealed review is temporarily unavailable (its usage limits can't be checked right now). Nothing was charged; try again in a minute.");
-    }
-    if (f.blocked)
-      return err(
-        429,
-        f.count >= failLimit + (f.ok ?? 0)
-          ? `review_fail_limit: too many failed reviews from your IP address today (${failLimit}, plus one per successful review). Resets at 00:00 UTC. Nothing was charged.`
-          : `free_failure_ceiling: failed reviews across all users hit today's ceiling, so addresses without a successful review today are paused until 00:00 UTC. Nothing was charged.`,
-      );
+  // Only a payment that at least claims to pay us the right amount takes slots before verification; anything else
+  // goes straight to the paywall (which refuses it), and if the facilitator accepts it anyway the handler takes its
+  // slots then. So fake payment headers can't fill the gates.
+  const price = priceMicro(reviewPrices(c.env)[tier]);
+  const plausible = c.env.PAYMENTS_ENABLED === "false" || plausiblePayment(c.req.header("x-payment"), { payTo: c.env.PAY_TO, network: c.env.NETWORK, minMicro: price });
+  if (!plausible) {
+    c.set("review", { tier, input: v.value, commitment, t0, caller, failLimit });
+    return next();
   }
+  const refused = await failLimitCheck(c, caller, failLimit);
+  if (refused) return refused;
   const slots = await acquireSlots(c.env, commitment.models, { leaseMs: REVIEWER_BUDGET_MS + 30_000, waitMs: GATE_MAX_WAIT_MS });
-  if (!slots.ok) return busy(slots.retryAfter, slots.reason === "provider_cap" ? "the AI provider's account limit was reached; reviews resume when it's lifted." : "the AI reviewers are at capacity.");
+  if (!slots.ok) return busy(slots.retryAfter, busyWhat(slots.reason));
   c.set("review", { tier, input: v.value, commitment, t0, lease: slots.lease, caller, failLimit });
   try {
     await next();
@@ -257,6 +256,28 @@ async function reviewGuard(c: any, next: any) {
     await slots.lease.release(); // normally already released by the handler; a second call does nothing
   }
 }
+
+/** The failed-review allowance for this caller; fails closed when the ledger can't answer. Null = go ahead. */
+async function failLimitCheck(c: any, caller: string | undefined, failLimit: number): Promise<Response | null> {
+  if (!caller || !c.env.LEDGER) return null;
+  let f: any;
+  try {
+    f = await ledgerJson(c.env, caller, "review-fails", { caller, limit: failLimit, global_limit: shardLimit(c.env.REVIEW_FAIL_GLOBAL_LIMIT, 500) });
+  } catch (e: any) {
+    await recordEvent(c.env, "ledger_error", `review-fails: ${String(e?.message ?? e)}`);
+    return err(503, "Sealed review is temporarily unavailable (its usage limits can't be checked right now). Nothing was charged; try again in a minute.");
+  }
+  if (!f.blocked) return null;
+  return err(
+    429,
+    f.count >= failLimit + (f.ok ?? 0)
+      ? `review_fail_limit: too many failed reviews from your IP address today (${failLimit}, plus one per successful review). Resets at 00:00 UTC. Nothing was charged.`
+      : `free_failure_ceiling: failed reviews across all users hit today's ceiling, so addresses without a successful review today are paused until 00:00 UTC. Nothing was charged.`,
+  );
+}
+
+const busyWhat = (reason: string) =>
+  reason === "provider_cap" ? "the AI provider's account limit was reached; reviews resume when it's lifted." : "the AI reviewers are at capacity.";
 
 /** Judge seats: refuse before payment when the match's judges are closed by a provider cap or their queue is full.
  * Judging itself happens later; this only avoids taking money when we already know it can't start soon. */
@@ -402,6 +423,7 @@ app.get("/health", async (c) => {
   const unjudged = await listUnjudged(env).catch(() => []);
   const verdict = evaluateHealth({ gates, events, ledger: records, unjudgedOpen: unjudged.filter((u) => !u.refunded).length });
   const pause = await pauseState(env);
+  if (pause.auto) verdict.reasons.push(`auto_paused: ${pause.auto}`), (verdict.degraded = true);
   const paused = paidPaused(env) || pause.paid;
   const reviewsPaused = env.REVIEWS_PAUSED === "true" || pause.reviews;
   const ok = signing && records !== "error";
@@ -515,8 +537,18 @@ async function callerHash(c: any): Promise<string | undefined> {
 async function handleReview(c: any, tier: ReviewTier) {
   // reviewGuard (before the paywall) already checked the input, drew the panel and took the reviewer slots.
   const g = c.get("review") as { tier: ReviewTier; input: any; commitment: any; t0: number; lease?: SlotLease; caller?: string; failLimit?: number } | undefined;
-  if (!g || g.tier !== tier || !g.lease) return err(503, "Sealed review is temporarily unavailable. Nothing was charged.");
-  const { input, commitment, lease, caller } = g;
+  if (!g || g.tier !== tier) return err(503, "Sealed review is temporarily unavailable. Nothing was charged.");
+  if (!g.lease) {
+    // The payment header didn't look right to the quick local check, but the facilitator verified it: check the
+    // allowance and take the slots now. A refusal here is still >= 400, so nothing settles.
+    const refused = await failLimitCheck(c, g.caller, g.failLimit ?? 10);
+    if (refused) return refused;
+    const late = await acquireSlots(c.env, g.commitment.models, { leaseMs: REVIEWER_BUDGET_MS + 30_000, waitMs: GATE_MAX_WAIT_MS });
+    if (!late.ok) return busy(late.retryAfter, busyWhat(late.reason));
+    g.lease = late.lease;
+  }
+  const { input, commitment, caller } = g;
+  const lease = g.lease;
   const failLimit = g.failLimit ?? 10;
   const keys = { ANTHROPIC_API_KEY: c.env.ANTHROPIC_API_KEY, OPENROUTER_API_KEY: c.env.OPENROUTER_API_KEY, fake: fakeAiConfig(c.env) };
   const started = Date.now();

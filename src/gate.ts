@@ -43,6 +43,7 @@ export class Gate {
       const saved = await this.state.storage.get<Record<string, Lease>>("leases");
       for (const [k, v] of Object.entries(saved ?? {})) this.leases.set(k, v);
       this.trip = (await this.state.storage.get<Trip>("trip")) ?? null;
+      this.throttleUntil = (await this.state.storage.get<number>("throttle_until")) ?? 0;
     })();
     return this.loaded;
   }
@@ -100,6 +101,7 @@ export class Gate {
       this.trip = null;
       this.throttleUntil = 0;
       await this.state.storage.put("trip", null);
+      await this.state.storage.put("throttle_until", 0);
       this.pump();
       return json(200, { ok: true });
     }
@@ -184,6 +186,7 @@ export class Gate {
   async release(body: any) {
     const entries: { token: string; outcome?: CallKind; rate?: RateInfo }[] = Array.isArray(body?.entries) ? body.entries : [];
     const now = this.now();
+    const throttleBefore = this.throttleUntil;
     let probeResult: CallKind | null = null;
     for (const e of entries) {
       const l = this.leases.get(e?.token);
@@ -200,6 +203,8 @@ export class Gate {
       if (r && Number.isFinite(r.remaining_frac) && r.remaining_frac < 0.1)
         this.throttleUntil = Math.max(this.throttleUntil, Math.min(Number(r.reset_at) || now + THROTTLE_MAX_MS, now + THROTTLE_MAX_MS));
     }
+    // Kept in storage like the trip, so a restarted gate doesn't forget it should go easy.
+    if (this.throttleUntil !== throttleBefore) await this.state.storage.put("throttle_until", this.throttleUntil);
     if (entries.some((e) => e?.outcome === "cap")) await this.setTrip("provider_cap");
     else if (probeResult && probeResult !== "unused" && probeResult !== "cap") {
       this.trip = null; // the probe went through: the cap is lifted

@@ -5,7 +5,7 @@ import type { DOState, Env } from "./types.ts";
 
 export type HealthEventKind = "settle_failure" | "facilitator_problem" | "credit_problem" | "ledger_error" | "provider_errors";
 export type HealthEvent = { kind: HealthEventKind; at: number; detail: string };
-export type Pause = { paid: boolean; reviews: boolean };
+export type Pause = { paid: boolean; reviews: boolean; auto?: string };
 export type UnjudgedEntry = { match_id: string; tier: string; reason: string; at: number; payers: { seat: string; wallet: string | null; payment_hash?: string }[]; refunded?: boolean };
 
 const MAX_EVENTS = 300;
@@ -26,7 +26,8 @@ export class Health {
     if (action === "pause") {
       if (req.method === "POST") {
         const p: Pause = { paid: false, reviews: false, ...((await st.get<Pause>("pause")) ?? {}) };
-        if (body?.scope === "paid" || body?.scope === "reviews") p[body.scope as keyof Pause] = !!body.on;
+        if (body?.scope === "paid" || body?.scope === "reviews") (p as any)[body.scope] = !!body.on;
+        if (body?.scope === "paid" && !body.on) delete p.auto; // the operator looked and resumed
         await st.put("pause", p);
         return json(200, p);
       }
@@ -41,6 +42,29 @@ export class Health {
       return json(200, { ok: true });
     }
     if (action === "events") return json(200, (await st.get<HealthEvent[]>("events")) ?? []);
+    if (action === "settle-failure") {
+      // Work was delivered but the payment didn't settle. Every one is counted (never throttled): the paying wallet
+      // is refused from now on, and too many in an hour pauses paid routes until the operator looks.
+      const now = this.now();
+      const wallet = typeof body?.wallet === "string" && /^0x[0-9a-f]{40}$/.test(body.wallet) ? body.wallet : null;
+      const blocked = (await st.get<string[]>("blocked_wallets")) ?? [];
+      if (wallet && !blocked.includes(wallet)) await st.put("blocked_wallets", [...blocked, wallet].slice(-2000));
+      const times = ((await st.get<number[]>("settle_failures")) ?? []).filter((t) => now - t < 3600_000);
+      times.push(now);
+      await st.put("settle_failures", times);
+      const events = (await st.get<HealthEvent[]>("events")) ?? [];
+      events.push({ kind: "settle_failure", at: now, detail: String(body?.detail ?? "").slice(0, 300) });
+      await st.put("events", events.slice(-MAX_EVENTS));
+      const limit = Number.isFinite(body?.pause_after) ? body.pause_after : 5;
+      let paused = false;
+      if (times.length >= limit) {
+        const p: Pause = { paid: false, reviews: false, ...((await st.get<Pause>("pause")) ?? {}) };
+        if (!p.paid) await st.put("pause", { ...p, paid: true, auto: `${times.length} payments failed to settle within an hour` });
+        paused = true;
+      }
+      return json(200, { ok: true, recent: times.length, paused });
+    }
+    if (action === "blocked") return json(200, (await st.get<string[]>("blocked_wallets")) ?? []);
     if (action === "unjudged") {
       const list = (await st.get<UnjudgedEntry[]>("unjudged")) ?? [];
       if (req.method === "POST") {
@@ -107,6 +131,30 @@ export async function recordEvent(env: Env, kind: HealthEventKind, detail: strin
   await healthCall(env, "event", { kind, detail }).catch(() => {});
 }
 
+/** Work delivered, payment not settled: counted every time (see the Health DO). Never throws. */
+export async function recordSettleFailure(env: Env, wallet: string | undefined, detail: string) {
+  console.error(JSON.stringify({ health_event: "settle_failure", wallet, detail: detail.slice(0, 300) }));
+  if (!env.HEALTH) return;
+  const r = await healthCall(env, "settle-failure", { wallet, detail, pause_after: Number(env.SETTLE_FAIL_PAUSE_AFTER || 5) }).catch(() => null);
+  if (r?.paused) pauseCache = null;
+  if (wallet) blockedCache?.set.add(wallet);
+}
+
+let blockedCache: { at: number; set: Set<string> } | null = null;
+/** Wallets whose payment failed to settle after the work was done: refused before payment. Cached 30 s per isolate. */
+export async function walletBlocked(env: Env, wallet: string | undefined): Promise<boolean> {
+  if (!wallet || !env.HEALTH) return false;
+  const now = Date.now();
+  if (!blockedCache || now - blockedCache.at > 30_000) {
+    try {
+      blockedCache = { at: now, set: new Set(await healthCall(env, "blocked")) };
+    } catch {
+      blockedCache = { at: now, set: blockedCache?.set ?? new Set() };
+    }
+  }
+  return blockedCache.set.has(wallet);
+}
+
 export const healthEvents = (env: Env): Promise<HealthEvent[]> => (env.HEALTH ? healthCall(env, "events") : Promise.resolve([]));
 export const listUnjudged = (env: Env): Promise<UnjudgedEntry[]> => (env.HEALTH ? healthCall(env, "unjudged") : Promise.resolve([]));
 export const addUnjudged = (env: Env, entry: Omit<UnjudgedEntry, "at">) => (env.HEALTH ? healthCall(env, "unjudged", { entry }) : Promise.resolve(null));
@@ -129,7 +177,8 @@ export function evaluateHealth(input: { gates: Record<string, any>; events: Heal
   if (recent.some((e) => e.kind === "ledger_error")) reasons.push("ledger_error_recent");
   const warnings: string[] = [];
   if (recent.some((e) => e.kind === "provider_errors")) warnings.push("provider_errors");
-  if ((input.unjudgedOpen ?? 0) > 0) warnings.push(`unjudged_to_refund:${input.unjudgedOpen}`);
+  // A paid match that couldn't be judged is waiting for a refund: that needs the operator, so it alerts.
+  if ((input.unjudgedOpen ?? 0) > 0) reasons.push(`unjudged_to_refund:${input.unjudgedOpen}`);
   return { degraded: reasons.length > 0, reasons: [...new Set(reasons)], warnings };
 }
 
@@ -149,5 +198,6 @@ export async function adminOk(env: Env, header: string | undefined): Promise<boo
 /** Tests only. */
 export function _resetHealthCaches() {
   pauseCache = null;
+  blockedCache = null;
   lastEvent.clear();
 }

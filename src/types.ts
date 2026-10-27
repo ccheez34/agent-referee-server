@@ -11,6 +11,7 @@ export interface Env {
   PAYMENTS_ENABLED?: string; // "false" turns the paywall off for local testing
   PAID_PAUSED?: string; // "true" refuses paid matches (before any payment) and points agents to demo mode
   REVIEWS_PAUSED?: string; // "true" refuses sealed reviews only (before any payment)
+  SETTLE_FAIL_PAUSE_AFTER?: string; // payments failing to settle after delivered work, per hour, before paid routes pause (default 5)
   GATES_ENABLED?: string; // "false" turns the admission gates off (they're on whenever GATES is bound)
   // GATE_SLOTS_<POOL>: concurrent AI calls per pool, e.g. GATE_SLOTS_OPENROUTER=20, GATE_SLOTS_ANTHROPIC_CLAUDE_OPUS_5_5=6
   STAGING?: string; // "true" only on the staging Worker: allows FAKE_AI and the x-test-caller header (never with NETWORK=base)

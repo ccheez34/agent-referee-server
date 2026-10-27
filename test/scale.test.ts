@@ -5,7 +5,8 @@ import { Gate } from "../src/gate.ts";
 import { acquireSlots, quickBusy, slotsFor, poolsOfProvider, _clearSnapshots } from "../src/gateclient.ts";
 import { classifyStatus, isSpendCap, poolOf, rateInfo, summarize, ProviderCapError } from "../src/providers.ts";
 import { Health, adminOk, evaluateHealth, pauseState, recordEvent, _resetHealthCaches } from "../src/health.ts";
-import { classifyPaidResponse } from "../src/paywatch.ts";
+import { classifyPaidResponse, plausiblePayment, priceMicro } from "../src/paywatch.ts";
+import { recordSettleFailure, walletBlocked } from "../src/health.ts";
 import { fakeAiConfig, fakeModelResponse } from "../src/fakeai.ts";
 import { Ledger, ledgerShardName, shardLimit, LEDGER_SHARDS } from "../src/ledger.ts";
 import { runOneReviewer } from "../src/review.ts";
@@ -336,7 +337,7 @@ test("health turns degraded for each reason and names it", () => {
   assert.equal(evaluateHealth({ gates: {}, events: fac(2), ledger: "ok", now }).degraded, false);
   assert.deepEqual(evaluateHealth({ gates: {}, events: fac(3), ledger: "ok", now }).reasons, ["facilitator_down"]);
   assert.equal(evaluateHealth({ gates: {}, events: [{ kind: "settle_failure", at: now - 16 * 60_000, detail: "" }], ledger: "ok", now }).degraded, false, "it recovers after 15 minutes");
-  assert.deepEqual(evaluateHealth({ gates: {}, events: [], ledger: "ok", now, unjudgedOpen: 2 }).warnings, ["unjudged_to_refund:2"]);
+  assert.deepEqual(evaluateHealth({ gates: {}, events: [], ledger: "ok", now, unjudgedOpen: 2 }).reasons, ["unjudged_to_refund:2"], "a refund waiting for the operator alerts");
 });
 
 test("the phone pause switch is stored, cached briefly, and survives a Health outage", async () => {
@@ -402,4 +403,62 @@ test("fake answers go through the real review and judge code paths", async () =>
   const busy = await fakeModelResponse({ ...cfg, mix: [["429", 1]] }, "claude-opus-5-5", "u");
   assert.equal(classifyStatus("claude-opus-5-5", busy.status, await busy.text()), "rate");
   await assert.rejects(fakeModelResponse({ ...cfg, mix: [["hang", 1]] }, "claude-opus-5-5", "u", AbortSignal.timeout(20)), /abort|timeout/i);
+});
+
+// ---------- second review round (panel mode): fake payment headers, persistence, settle failures ----------
+
+const PAY_TO = "0xF6B53AaCf822A36b7B2aF9C45BabE6E367ede4d3";
+const header = (o: any = {}) =>
+  btoa(JSON.stringify({ x402Version: 1, scheme: "exact", network: "base", payload: { signature: "0x" + "ab".repeat(65), authorization: { from: "0x" + "1".repeat(40), to: PAY_TO.toLowerCase(), value: "50000", validAfter: "0", validBefore: String(2_000_000_000), nonce: "0x" + "0".repeat(64), ...o } } }));
+
+test("only a payment header that claims to pay us the right amount can take gate slots before verification", () => {
+  const opts = { payTo: PAY_TO, network: "base", minMicro: priceMicro("$0.05"), nowS: 1_900_000_000 };
+  assert.equal(priceMicro("$0.20"), 200_000);
+  assert.equal(plausiblePayment(header(), opts), true);
+  assert.equal(plausiblePayment(undefined, opts), false);
+  assert.equal(plausiblePayment("garbage", opts), false);
+  assert.equal(plausiblePayment(btoa("{}"), opts), false);
+  assert.equal(plausiblePayment(header({ to: "0x" + "9".repeat(40) }), opts), false, "paying someone else");
+  assert.equal(plausiblePayment(header({ value: "10000" }), opts), false, "too little");
+  assert.equal(plausiblePayment(header({ validBefore: "1" }), opts), false, "expired");
+  assert.equal(plausiblePayment(header(), { ...opts, network: "base-sepolia" }), false, "wrong network");
+  assert.equal(plausiblePayment(header(), { ...opts, minMicro: priceMicro("$0.20") }), false, "a $0.05 payment for a $0.20 review");
+});
+
+test("a restarted gate remembers it was throttled (and tripped)", async () => {
+  const d = new Map();
+  const g = new Gate({ storage: memStorage(d) } as any);
+  let now = 7_000_000;
+  g.now = () => now;
+  const t = await gateCall(g, "acquire", { n: 1, slots: 4, lease_ms: 60_000 });
+  await gateCall(g, "release", { entries: [{ token: t.tokens[0], outcome: "ok", rate: { remaining_frac: 0.01, reset_at: now + 30_000 } }] });
+  const g2 = new Gate({ storage: memStorage(d) } as any);
+  g2.now = () => now;
+  await gateCall(g2, "acquire", { n: 1, slots: 4, lease_ms: 1000, wait_ms: 0 });
+  assert.equal((await gateCall(g2, "peek")).effective, 2, "still halved after the restart");
+  await gateCall(g2, "trip", { reason: "provider_cap" });
+  const g3 = new Gate({ storage: memStorage(d) } as any);
+  g3.now = () => now;
+  assert.equal((await gateCall(g3, "acquire", { n: 1, slots: 4, lease_ms: 1000 })).reason, "provider_cap");
+});
+
+test("work delivered but not paid: the wallet is refused from then on, and repeated failures pause paid routes", async () => {
+  _resetHealthCaches();
+  const ns = namespace(() => new Health({ storage: memStorage() } as any));
+  const env: any = { HEALTH: ns, SETTLE_FAIL_PAUSE_AFTER: "3" };
+  const w = "0x" + "c".repeat(40);
+  assert.equal(await walletBlocked(env, w), false);
+  await recordSettleFailure(env, w, "settle: insufficient_funds");
+  assert.equal(await walletBlocked(env, w), true, "refused at once in this isolate");
+  _resetHealthCaches();
+  assert.equal(await walletBlocked(env, w), true, "and everywhere else after the cache refresh");
+  assert.equal((await pauseState(env)).paid, false, "one failure doesn't pause");
+  await recordSettleFailure(env, "0x" + "d".repeat(40), "x");
+  await recordSettleFailure(env, "0x" + "e".repeat(40), "x");
+  _resetHealthCaches();
+  const p = await pauseState(env);
+  assert.equal(p.paid, true, "three within the hour pause paid routes");
+  assert.match(String(p.auto), /3 payments failed to settle/);
+  const { setPause } = await import("../src/health.ts");
+  assert.equal((await setPause(env, "paid", false)).auto, undefined, "resuming clears the automatic pause");
 });
