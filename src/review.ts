@@ -21,7 +21,8 @@ export type ReviewVerdict = (typeof REVIEW_VERDICTS)[number];
 
 export const REVIEW_LIMITS = { maxTask: 4000, maxOutput: 12000, maxIssues: 10, maxIssueLen: 300 };
 
-export const REVIEW_FORMAT_VERSION = "agent-referee-review-v2";
+// v3 (Oct 27): adds the LENGTH section, so answers fit the reply budget without changing any verdict.
+export const REVIEW_FORMAT_VERSION = "agent-referee-review-v3";
 
 export const REVIEW_SYSTEM = `You are an independent reviewer checking work produced by an AI agent.
 You will receive the TASK the agent was given and the OUTPUT it produced. You may also receive CRITERIA:
@@ -49,6 +50,12 @@ is fine for a pass.
 
 If CRITERIA are given, score the output on EVERY criterion with a whole number from 0 (fails it) to 10 (fully
 meets it), using the criterion names exactly.
+
+LENGTH: your reply has a fixed size limit, and a reply cut off by it is thrown away. Keep the whole JSON under
+about 700 words: each issue one short sentence, the reasoning 2 to 6 sentences, nothing outside the JSON. If you
+found more problems than fit, keep the most important ones. Length never changes your judgment: decide the
+verdict and confidence from your full review first, then write them up briefly. Never pick, soften or upgrade a
+verdict to save space.
 
 Respond with ONLY a JSON object, no other text, in this shape:
 {"verdict": "pass | needs_changes | fail | cannot_assess", "confidence": "high | medium | low", "issues": ["one problem per item"], "reasoning": "2 to 6 sentences", "scores": {"criterion name": 0}}
@@ -181,19 +188,59 @@ export function parseReview(text: string, criteria?: Criterion[]): Omit<ReviewVo
   };
 }
 
-/** Per-call limit: two attempts must finish well inside the 300-second payment authorization. */
+/** Per-call limit. Each call's limit is also capped at what's left of REVIEWER_BUDGET_MS, so all tries end inside it. */
 export const REVIEWER_CALL_TIMEOUT_MS = 100_000;
 
-export async function runOneReviewer(keys: JudgeKeys, model: string, reviewer: number, input: ReviewInput, timeoutMs = REVIEWER_CALL_TIMEOUT_MS): Promise<ReviewVote> {
+/** All tries for one reviewer stay inside this, so a review always finishes or fails inside the 300-second payment authorization. */
+export const REVIEWER_BUDGET_MS = 240_000;
+/** Tries for a busy or failing provider (429, 5xx, network error). A hang (timeout) or an unusable answer gets 2 tries at most. */
+export const REVIEWER_MAX_TRIES = 4;
+/** Answer budget for Claude reviewers. A careful review (up to 10 issues of 300 characters, plus reasoning) can pass
+ * 1,000 tokens, and a cut-off answer can't be parsed. OpenRouter models already get 6,000. Unused tokens cost nothing. */
+export const REVIEWER_MAX_TOKENS = 4000;
+
+/** A new try only starts if at least this much of the budget is left: a try with only a few seconds would almost surely fail. */
+export const REVIEWER_MIN_TRY_MS = 15_000;
+
+/** How long to wait before the next try: the provider's retry-after (at least 1 s, at most 10 s), else 1-2 s, 2-4 s, 4-8 s.
+ * The 1 s floor means a "retry-after: 0" never turns into an instant retry that piles onto a busy provider. */
+export function retryDelayMs(tryNumber: number, retryAfter?: string | null, rand: () => number = Math.random): number {
+  const secs = Number(retryAfter);
+  if (retryAfter && Number.isFinite(secs) && secs >= 0) return Math.min(Math.max(secs, 1), 10) * 1000;
+  const base = 1000 * 2 ** (tryNumber - 1);
+  return Math.round(base + base * rand());
+}
+
+const sleepMs = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+export async function runOneReviewer(
+  keys: JudgeKeys,
+  model: string,
+  reviewer: number,
+  input: ReviewInput,
+  timeoutMs = REVIEWER_CALL_TIMEOUT_MS,
+  opts: { budgetMs?: number; sleep?: (ms: number) => Promise<unknown>; now?: () => number } = {},
+): Promise<ReviewVote> {
   const user = buildReviewMessage(input.task, input.output, input.title, input.criteria);
+  const now = opts.now ?? Date.now;
+  const sleep = opts.sleep ?? sleepMs;
+  const deadline = now() + (opts.budgetMs ?? REVIEWER_BUDGET_MS);
   let lastErr = "unknown error";
-  for (let attempt = 0; attempt < 2; attempt++) {
+  let hangsOrBadAnswers = 0;
+  for (let tryNumber = 1; tryNumber <= REVIEWER_MAX_TRIES; tryNumber++) {
+    const left = deadline - now();
+    if (left < REVIEWER_MIN_TRY_MS && tryNumber > 1) break; // not enough time left for a real try
+    // Each call's limit is capped at the time left, so the tries together stay inside the budget.
+    const callTimeoutMs = Math.min(timeoutMs, Math.max(left, 1));
     let res: Response;
     try {
-      res = await callModel(keys, model, REVIEW_SYSTEM, user, AbortSignal.timeout(timeoutMs));
+      res = await callModel(keys, model, REVIEW_SYSTEM, user, AbortSignal.timeout(callTimeoutMs), REVIEWER_MAX_TOKENS);
     } catch (e: any) {
-      lastErr = e?.name === "TimeoutError" || e?.name === "AbortError" ? `reviewer timed out after ${Math.round(timeoutMs / 1000)}s` : `reviewer request failed: ${String(e?.message ?? e).slice(0, 150)}`;
+      const timedOut = e?.name === "TimeoutError" || e?.name === "AbortError";
+      lastErr = timedOut ? `reviewer timed out after ${Math.round(callTimeoutMs / 1000)}s` : `reviewer request failed: ${String(e?.message ?? e).slice(0, 150)}`;
       console.error(`review ${model} reviewer ${reviewer}: ${lastErr}`);
+      if (timedOut && ++hangsOrBadAnswers >= 2) break; // a provider that hangs twice won't answer a third time in time
+      if (!timedOut && !(await waitBeforeRetry(tryNumber, null))) break;
       continue;
     }
     if (!res.ok) {
@@ -203,14 +250,23 @@ export async function runOneReviewer(keys: JudgeKeys, model: string, reviewer: n
         detail = String(e?.error?.message ?? e?.error?.type ?? "").replace(/\s+/g, " ").slice(0, 200);
       } catch {}
       lastErr = `reviewer API returned ${res.status}${detail ? `: ${detail}` : ""}`;
-      console.error(`review ${model} reviewer ${reviewer}: ${lastErr}`);
-      if (res.status >= 400 && res.status < 500 && res.status !== 429) break;
+      console.error(`review ${model} reviewer ${reviewer} (try ${tryNumber}): ${lastErr}`);
+      if (res.status >= 400 && res.status < 500 && res.status !== 429) break; // won't fix itself on a retry
+      // Busy (429) or a provider error (5xx, 529 overloaded): wait, then try again.
+      if (!(await waitBeforeRetry(tryNumber, res.headers.get("retry-after")))) break;
       continue;
     }
     try {
       const data: any = await res.json();
       if (data?.error) throw new Error(`reviewer API error: ${String(data.error.message ?? data.error).slice(0, 200)}`);
-      const v = parseReview(answerText(model, data), input.criteria);
+      // Was the answer cut off at the token limit? Only matters if it then can't be parsed.
+      const cutOff = data?.stop_reason === "max_tokens" || data?.choices?.[0]?.finish_reason === "length";
+      let v;
+      try {
+        v = parseReview(answerText(model, data), input.criteria);
+      } catch (pe: any) {
+        throw new Error(cutOff ? "reviewer ran out of tokens before finishing its answer" : pe?.message ?? "reviewer returned unusable output");
+      }
       const vote: ReviewVote = { reviewer, model, ...v };
       const reported = typeof data?.model === "string" ? data.model.slice(0, 120) : undefined;
       if (reported) vote.model_reported = reported;
@@ -218,9 +274,21 @@ export async function runOneReviewer(keys: JudgeKeys, model: string, reviewer: n
       return vote;
     } catch (e: any) {
       lastErr = e?.message ?? "reviewer returned unusable output";
+      console.error(`review ${model} reviewer ${reviewer} (try ${tryNumber}): ${lastErr}`);
+      if (++hangsOrBadAnswers >= 2) break;
     }
   }
-  throw new Error(lastErr);
+  // Name the reviewer, so whoever reads the error knows which AI company's model failed.
+  throw new Error(`${model}: ${lastErr}`);
+
+  /** Waits before the next try if there's time for it after the wait. Returns false when there isn't. */
+  async function waitBeforeRetry(tryNumber: number, retryAfter: string | null): Promise<boolean> {
+    if (tryNumber >= REVIEWER_MAX_TRIES) return false;
+    const wait = retryDelayMs(tryNumber, retryAfter);
+    if (deadline - now() - wait < REVIEWER_MIN_TRY_MS) return false;
+    await sleep(wait);
+    return true;
+  }
 }
 
 /** How the verdicts combine. Pure, and mirrored in the client so anyone can recompute it from the receipt. */

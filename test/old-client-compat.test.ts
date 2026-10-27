@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { MatchRoom } from "../src/match.ts";
 import { randomToken } from "../src/logic.ts";
 // @ts-ignore plain JS
-import { AgentReferee as OldClient } from "/tmp/claude-0/-home-claude/782c48eb-e9b6-50fe-93de-6dfc23a34f36/scratchpad/old-client/src/index.mjs";
+import { AgentReferee as OldClient } from "./fixtures/agent-referee-client-0.2.0.mjs";
 
 const kp = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"])) as CryptoKeyPair;
 const b64 = (b: ArrayBuffer) => Buffer.from(b).toString("base64");

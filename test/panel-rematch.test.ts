@@ -284,6 +284,92 @@ test("a judge match created before v3 keeps running the exact v2 prompt it locke
   }
 });
 
+test("v4: new judge matches lock in the length-aware instructions; a v3 match keeps v3 byte-for-byte", async () => {
+  const judge = await import("../src/judge.ts");
+  assert.equal(judge.JUDGE_FORMAT_VERSION, "agent-referee-judge-v4");
+  assert.match(judge.JUDGE_SYSTEM, /LENGTH: your reply has a fixed size limit/);
+  assert.match(judge.JUDGE_SYSTEM, /Never pick a different winner,\ndeclare a mistrial, or change a score to save space\./);
+  assert.ok(!judge.JUDGE_SYSTEM_V3.includes("LENGTH:"), "v3 text is untouched");
+  assert.equal(judge.JUDGE_SYSTEM.replace(/\n\nLENGTH:[\s\S]*?to save space\./, ""), judge.JUDGE_SYSTEM_V3, "v4 = v3 + the LENGTH section, nothing else");
+
+  // A new match commits to v4 and its judge gets the v4 text.
+  const f = fakeJudges({ [H]: { winner: "alpha" } });
+  try {
+    const { done } = await judgeMatch(world(), { tier: "judge", seats: ["alpha", "beta"], rules: "Pick the cheaper plan." });
+    assert.equal(done.match.receipt.payload.proof.judge?.format_version ?? done.match.judge?.format_version, "agent-referee-judge-v4");
+    assert.equal(f.sent[0].system, judge.JUDGE_SYSTEM);
+  } finally {
+    f.restore();
+  }
+
+  // A match created before this change (locked to v3) keeps running v3.
+  const g = fakeJudges({ [H]: { winner: "beta" } });
+  try {
+    const w = world();
+    const id = randomToken(12);
+    await w.call(id, "create", { id, input: { tier: "judge", seats: ["alpha", "beta"], rules: "Pick the cheaper plan." } });
+    const room = w.roomFor(id);
+    const st: any = await room.state.storage.get("m");
+    st.judge = { ...st.judge, format_version: judge.JUDGE_FORMAT_VERSION_V3 };
+    await room.state.storage.put("m", st);
+    const t: Record<string, string> = {};
+    for (const s of ["alpha", "beta"]) t[s] = (await w.call(id, "join", { seat: s, tier: "judge", role: "party", paid: true })).body.seat_token;
+    await w.call(id, "submit", { seat: "alpha", seat_token: t.alpha, position: "A" });
+    const done = await w.call(id, "submit", { seat: "beta", seat_token: t.beta, position: "B" });
+    assert.equal(done.body.match.result.winner, "beta");
+    assert.equal(g.sent[0].system, judge.JUDGE_SYSTEM_V3);
+  } finally {
+    g.restore();
+  }
+});
+
+test("judges: a hung call times out and is retried; busy gets a short wait; errors name the judge", async () => {
+  const { runOneJudge, judgeRetryDelayMs, JUDGE_CALL_TIMEOUT_MS } = await import("../src/judge.ts");
+  const base = { keys: { ANTHROPIC_API_KEY: "a" }, model: "claude-haiku-5-5", formatVersion: "agent-referee-judge-v4", panelist: 1, order: "sorted" as const, rules: "Pick the cheaper plan.", submissions: { alpha: "A", beta: "B" } };
+  const orig = globalThis.fetch;
+  const keepAlive = setInterval(() => {}, 10);
+  try {
+    // Hangs: each call is cut off at its own limit, then retried once.
+    let calls = 0;
+    globalThis.fetch = ((_: any, init: any) => {
+      calls++;
+      return new Promise((_r, reject) => init.signal.addEventListener("abort", () => reject(init.signal.reason)));
+    }) as any;
+    await assert.rejects(runOneJudge({ ...base, callTimeoutMs: 20 }), /^Error: claude-haiku-5-5: judge timed out after 0s$/);
+    assert.equal(calls, 2);
+    // Busy, then fine: one short wait, honouring retry-after within 1-5 s.
+    const waits: number[] = [];
+    let n = 0;
+    globalThis.fetch = (async () =>
+      ++n === 1
+        ? new Response(JSON.stringify({ error: { message: "busy" } }), { status: 429, headers: { "retry-after": "30" } })
+        : new Response(JSON.stringify({ content: [{ type: "text", text: JSON.stringify({ winner: "alpha", confidence: "high", rule_applied: "cheaper", reasoning: "A costs less." }) }] }))) as any;
+    const v = await runOneJudge({ ...base, sleep: async (ms) => waits.push(ms) });
+    assert.equal(v.winner, "alpha");
+    assert.deepEqual(waits, [5000], "retry-after 30 s is capped at 5 s, so both tries fit the 2-minute judging limit");
+  } finally {
+    clearInterval(keepAlive);
+    globalThis.fetch = orig;
+  }
+  assert.equal(judgeRetryDelayMs("0"), 1000);
+  assert.ok(JUDGE_CALL_TIMEOUT_MS * 2 + 5000 < 120_000, "two tries plus the longest wait fit the judging limit");
+});
+
+test("a judge answer cut off at the token limit is reported as such", async () => {
+  const { runOneJudge } = await import("../src/judge.ts");
+  const orig = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    new Response(JSON.stringify({ stop_reason: "max_tokens", content: [{ type: "text", text: '{"winner": "alpha", "confidence": "high", "rule_applied": "cheaper' }] }))) as any;
+  try {
+    await assert.rejects(
+      runOneJudge({ keys: { ANTHROPIC_API_KEY: "a" }, model: "claude-haiku-5-5", formatVersion: "agent-referee-judge-v4", panelist: 1, order: "sorted", rules: "Pick the cheaper plan.", submissions: { alpha: "A", beta: "B" } }),
+      /judge ran out of tokens before finishing its answer/,
+    );
+  } finally {
+    globalThis.fetch = orig;
+  }
+});
+
 // ---------- rematch ----------
 
 async function playWeighted(w: ReturnType<typeof world>, id: string, payers?: Record<string, string>) {
@@ -451,7 +537,7 @@ test("judge-2 with Opus + Gemini 4 Argon; a judge that runs out of tokens is a c
     const w = world(MIXED);
     const { id, t, done } = await judgeMatch(w, { tier: "judge-2", seats: ["alpha", "beta"], rules: "Pick the cheaper plan." });
     assert.equal(done.match.phase, "error");
-    assert.match(done.match.error, /1 of 2 judges failed \(judge ran out of tokens before answering\)/);
+    assert.match(done.match.error, /1 of 2 judges failed \([a-z0-9./-]+: judge ran out of tokens before answering\)/);
     f.restore();
     const g = fakeMixed({ "claude-opus-5-5": { winner: "nobody-asked" }, "google/gemini-4-argon": { winner: "alpha" } });
     try {

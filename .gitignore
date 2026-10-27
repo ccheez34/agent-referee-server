@@ -1,6 +1,6 @@
- node_modules
-  .wrangler
-  .dev.vars
-  keys.txt
-  test-wallet.txt
-  *.key
+node_modules/
+.wrangler/
+.dev.vars
+keys.txt
+test-wallet.txt
+*.key
