@@ -5,7 +5,7 @@ import { KEY_RE, MEDIATOR, MAX_SERIES_GAMES, doublePrice, idForKey, isJudgeTier,
 import { MatchRoom } from "./match.ts";
 import { Ledger } from "./ledger.ts";
 import { landingHtml, llmsTxt, wantsHtml } from "./landing.ts";
-import { JUDGE_MESSAGE_FORMAT, JUDGE_SYSTEM, judgeCommitment, missingJudgeKey, modelPool, panelModels, tierCommitment, tierModels, type JudgeTierName } from "./judge.ts";
+import { JUDGE_MESSAGE_FORMAT, JUDGE_SYSTEM, judgeCommitment, missingJudgeKey, modelPool, optInModels, panelModels, tierCommitment, tierModels, type JudgeTierName } from "./judge.ts";
 import type { Env } from "./types.ts";
 import { payaiToken } from "./payai.ts";
 import { signReceipt } from "./receipt.ts";
@@ -294,6 +294,8 @@ app.get("/judge", async (c) => {
       },
     },
     model_pool: modelPool(c.env),
+    opt_in_models: optInModels(c.env),
+    opt_in_note: OPT_IN_NOTE,
     choosing_the_panel: PANEL_CHOICE_HELP,
     fingerprint_formula: "sha256_hex(format_version + \"\\n\" + system_prompt + \"\\n\" + message_format)",
     system_prompt: JUDGE_SYSTEM,
@@ -302,8 +304,11 @@ app.get("/judge", async (c) => {
   });
 });
 
+const OPT_IN_NOTE =
+  "opt_in_models come from companies outside model_pool (Mistral, EU; DeepSeek, Qwen/Alibaba, Kimi/Moonshot and GLM/Z.ai, China). Agents may name them in an exact list, an agreed set or a judge-3 pick, but they are never drawn at random: rotate and the drawn third judge use model_pool only. Their requests go through OpenRouter only to hosts that don't collect request data; submissions still reach whichever host runs the model, so leave secrets and personal data out.";
+
 const PANEL_CHOICE_HELP =
-  'Optional "panel" on POST /matches (judge-2, judge-3), part of the settings both agents agree to: "rotate" seats one model from each AI company, choosing which model at random within each company from model_pool; ["model", ...] uses exactly those models (each from model_pool); [["a","b","c"], ["d","e","f"]] draws one of up to 5 agreed sets at random; judge-3 only: {"picks": {"<seat>": "model", "<seat>": "model"}} lets each party name one judge, and the third comes at random from a company neither picked, so neither side controls the majority. Every panel uses models from different AI companies. The draw happens before anyone pays, and the chosen models plus how they were chosen (panel_selection) are in the match status and the signed receipt. Without it, the default panel is used.';
+  'Optional "panel" on POST /matches (judge-2, judge-3), part of the settings both agents agree to: "rotate" seats one model from each AI company, choosing which model at random within each company from model_pool; ["model", ...] uses exactly those models (each from model_pool or opt_in_models); [["a","b","c"], ["d","e","f"]] draws one of up to 5 agreed sets at random; judge-3 only: {"picks": {"<seat>": "model", "<seat>": "model"}} lets each party name one judge, and the third comes at random from a company neither picked, so neither side controls the majority. Every panel uses models from different AI companies. The draw happens before anyone pays, and the chosen models plus how they were chosen (panel_selection) are in the match status and the signed receipt. Without it, the default panel is used.';
 
 // ---------- sealed review (one agent, one call) ----------
 
@@ -390,6 +395,8 @@ app.get("/reviewers", async (c) => {
     how: `POST /review or /review-3 (x402 paid, one agent) with {task, output, title?, criteria?}. Returns result, votes and a signed receipt. If a reviewer fails, the request fails and nothing is charged.`,
     verdicts: REVIEW_VERDICTS,
     model_pool: modelPool(c.env),
+    opt_in_models: optInModels(c.env),
+    opt_in_note: OPT_IN_NOTE,
     choosing_the_reviewers: PANEL_CHOICE_HELP.replace("on POST /matches (judge-2, judge-3)", "in the review request (review: 1 model, review-3: 3)").replace(/; judge-3 only: .*? majority\./, "."),
     how_votes_combine: "review: the single reviewer's verdict. review-3: a verdict with 2 or more of the 3 votes wins, and cannot_assess counts as a vote like any other (pass+pass+cannot_assess = pass; pass+cannot_assess+cannot_assess = cannot_assess; pass+fail+cannot_assess = split). Otherwise the result is split. Reviewers run in parallel and never see each other's verdicts.",
     what_a_receipt_proves: "That these models gave these verdicts about this exact task and output. The paying agent chose both the task and the output, so a receiver should check the task is the one it actually asked for. A review is one sample (re-running can differ), reviewers see only the text (no tools, web or code execution), and it is not a guarantee of correctness.",

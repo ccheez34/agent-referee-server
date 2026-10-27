@@ -183,6 +183,26 @@ export function modelPool(env: { MODEL_POOL?: string }): string[] {
   return splitModels(env.MODEL_POOL || DEFAULT_MODEL_POOL);
 }
 
+/**
+ * Opt-in models from companies outside the default pool (Mistral in the EU; DeepSeek, Qwen, Kimi and GLM in China).
+ * Agents can name them in an exact list, an agreed set, or as their own pick, but they're never drawn at random:
+ * "rotate" and the drawn third judge of "picks" only use modelPool. Their calls go only to OpenRouter hosts that
+ * don't collect request data (see privacyRouting).
+ */
+export const DEFAULT_OPT_IN_MODELS = "mistralai/mistral-large-4-0,deepseek/deepseek-v4-pro-0813,qwen/qwen3.8-max-0902,moonshotai/kimi-k3,z-ai/glm-5.3";
+export function optInModels(env: { OPT_IN_MODELS?: string }): string[] {
+  return splitModels(env.OPT_IN_MODELS ?? DEFAULT_OPT_IN_MODELS);
+}
+/** Every model agents may name: the default pool plus the opt-in models. */
+export function allowedModels(env: { MODEL_POOL?: string; OPT_IN_MODELS?: string }): string[] {
+  return [...new Set([...modelPool(env), ...optInModels(env)])];
+}
+
+/** OpenRouter models outside Google and OpenAI are only sent to hosts that don't collect request data. */
+export function privacyRouting(model: string): boolean {
+  return viaOpenRouter(model) && !["google", "openai"].includes(companyOf(model));
+}
+
 /** The company behind a model id: "provider/model" ids name it; plain Claude ids are Anthropic's. */
 export function companyOf(model: string): string {
   if (model.includes("/")) return model.split("/")[0];
@@ -196,8 +216,9 @@ export const cryptoRandom = () => crypto.getRandomValues(new Uint32Array(1))[0] 
  * Pick a panel's models from a request. Throws a readable Error when a model isn't in the approved pool or the
  * pool can't supply enough companies.
  */
-export function choosePanel(req: PanelRequest, size: number, pool: string[], rand: () => number = cryptoRandom): { models: string[]; selection: PanelSelection } {
-  const notInPool = (ms: string[]) => ms.filter((m) => !pool.includes(m));
+export function choosePanel(req: PanelRequest, size: number, pool: string[], rand: () => number = cryptoRandom, allowed: string[] = pool): { models: string[]; selection: PanelSelection } {
+  // `pool` is what random draws use; `allowed` (pool + opt-in models) is what agents may name themselves.
+  const notInPool = (ms: string[]) => ms.filter((m) => !allowed.includes(m));
   // Panels promise judges from different AI companies, so an agreed set can't repeat one.
   const sameCompany = (ms: string[]) => new Set(ms.map(companyOf)).size !== ms.length;
   const companyError = "Each panel must use models from different AI companies (for example one Anthropic, one OpenAI, one Google). GET /judge lists the pool.";
@@ -206,7 +227,7 @@ export function choosePanel(req: PanelRequest, size: number, pool: string[], ran
     // random, and the seat order is shuffled so neither pick is always the panelist who sees the parties reversed.
     const picked = Object.values(req.picks);
     const bad = notInPool(picked);
-    if (bad.length) throw new Error(`Not in the approved model pool: ${[...new Set(bad)].join(", ")}. GET /judge lists the pool.`);
+    if (bad.length) throw new Error(`Not in the approved model pool: ${[...new Set(bad)].join(", ")}. GET /judge lists the pool and the opt-in models.`);
     if (sameCompany(picked)) throw new Error("The two picks must come from different AI companies, so the drawn third judge can come from a third one.");
     const used = new Set(picked.map(companyOf));
     const rest = pool.filter((m) => !used.has(companyOf(m)));
@@ -238,13 +259,13 @@ export function choosePanel(req: PanelRequest, size: number, pool: string[], ran
   if ((req as unknown[]).every((x) => typeof x === "string")) {
     const ms = req as string[];
     const bad = notInPool(ms);
-    if (bad.length) throw new Error(`Not in the approved model pool: ${bad.join(", ")}. GET /judge lists the pool.`);
+    if (bad.length) throw new Error(`Not in the approved model pool: ${bad.join(", ")}. GET /judge lists the pool and the opt-in models.`);
     if (sameCompany(ms)) throw new Error(companyError);
     return { models: ms, selection: { mode: "custom" } };
   }
   const sets = req as string[][];
   const bad = sets.flatMap(notInPool);
-  if (bad.length) throw new Error(`Not in the approved model pool: ${[...new Set(bad)].join(", ")}. GET /judge lists the pool.`);
+  if (bad.length) throw new Error(`Not in the approved model pool: ${[...new Set(bad)].join(", ")}. GET /judge lists the pool and the opt-in models.`);
   if (sets.some(sameCompany)) throw new Error(companyError);
   return { models: sets[randomIndex(sets.length, rand)], selection: { mode: "random_set", options: sets } };
 }
@@ -403,6 +424,7 @@ export async function callModel(keys: JudgeKeys, model: string, system: string, 
         // Reasoning models spend part of max_tokens thinking; keep effort low and leave room for the JSON answer.
         max_tokens: 6000,
         reasoning: { effort: "low", exclude: true },
+        ...(privacyRouting(model) ? { provider: { data_collection: "deny" } } : {}),
         messages: [
           { role: "system", content: system },
           { role: "user", content: user },

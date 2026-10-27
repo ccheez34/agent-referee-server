@@ -10,7 +10,7 @@
 // payment settles, so a failed review is never charged.
 
 import { LIMITS, canonicalJson, panelShapeError, sha256Hex, validateCriteria } from "./logic.ts";
-import { answerText, callModel, choosePanel, modelPool, panelModels, viaOpenRouter, JUDGE_TEMPERATURE, type Confidence, type Criterion, type JudgeKeys, type PanelEnv, type PanelRequest, type PanelSelection } from "./judge.ts";
+import { allowedModels, answerText, callModel, choosePanel, modelPool, panelModels, viaOpenRouter, JUDGE_TEMPERATURE, type Confidence, type Criterion, type JudgeKeys, type PanelEnv, type PanelRequest, type PanelSelection } from "./judge.ts";
 
 export type ReviewTier = "review" | "review-3";
 export const REVIEW_TIERS: ReviewTier[] = ["review", "review-3"];
@@ -90,9 +90,9 @@ export type ReviewCommitment = {
   panel_selection?: PanelSelection; // how the reviewers were chosen, when the request asked for something other than the default
 };
 
-export async function reviewCommitment(tier: ReviewTier, env: PanelEnv & { REVIEW_MODEL?: string; MODEL_POOL?: string }, panel?: PanelRequest, rand?: () => number): Promise<ReviewCommitment> {
+export async function reviewCommitment(tier: ReviewTier, env: PanelEnv & { REVIEW_MODEL?: string; MODEL_POOL?: string; OPT_IN_MODELS?: string }, panel?: PanelRequest, rand?: () => number): Promise<ReviewCommitment> {
   // Throws a readable Error if the request names a model outside the pool.
-  const picked = panel ? choosePanel(panel, REVIEW_SIZE[tier], modelPool(env), rand) : undefined;
+  const picked = panel ? choosePanel(panel, REVIEW_SIZE[tier], modelPool(env), rand, allowedModels(env)) : undefined;
   return {
     ...(picked ? { panel_selection: picked.selection } : {}),
     models: picked ? picked.models : reviewModels(tier, env),

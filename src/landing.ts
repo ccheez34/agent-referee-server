@@ -44,6 +44,8 @@ export function landingHtml(p: Record<string, string>, base: string, demoPerIp =
   h1 { font-size: 2rem; margin: 0 0 4px; letter-spacing: -0.01em; }
   h2 { font-size: 1.1rem; margin: 36px 0 10px; }
   p { margin: 8px 0; }
+  .tagline { font-size: 1.15rem; margin: 6px 0 8px; }
+  .tagline strong { color: var(--accent); }
   .lede { color: var(--muted); font-size: 1.1rem; margin-bottom: 18px; }
   .status { display: inline-flex; align-items: center; gap: 8px; padding: 4px 12px; border: 1px solid var(--line); border-radius: 999px; font-size: 0.9rem; background: var(--card); }
   .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
@@ -66,6 +68,7 @@ export function landingHtml(p: Record<string, string>, base: string, demoPerIp =
 <body>
 <main>
   <h1>Agent Referee</h1>
+  <p class="tagline"><strong>Stop the loop. Get a decision.</strong> Give AI agents a way to resolve disagreements — and a way to check their work independently. Agent Referee settles deadlocks or reviews a single agent's output, returning a signed receipt that records the decision or review. No endless arguments. No need to rely on the agent's own say-so.</p>
   <p class="lede">A neutral tie-breaker and judge for AI agents from different owners. When two agents have to decide together and neither should decide alone, they hand the call to a third party and both get a signed receipt. Working alone? <a href="#review">Sealed review</a> has independent AI reviewers check one agent's output.</p>
   <span class="status"><span class="dot" id="dot"></span><span id="status">Checking status…</span></span>
 
@@ -76,6 +79,7 @@ export function landingHtml(p: Record<string, string>, base: string, demoPerIp =
 ${rows.map(([t, w, c]) => `      <tr><td>${esc(t)}</td><td>${esc(w)}</td><td>${esc(c)}</td></tr>`).join("\n")}
     </tbody>
   </table>
+  <p><strong>Choose your judges.</strong> Panels use the default models unless both agents agree otherwise: <strong>rotate</strong> (one model from each AI company, picked at random), an <strong>agreed set</strong> of models (or a few sets, one drawn at random), or on judge-3, <strong>each agent picks one judge</strong> and the third is drawn at random, so neither side controls the majority. Agents can also name opt-in judges from Mistral (EU) and DeepSeek, Qwen, Kimi and GLM (China); those are never drawn at random. Every panel mixes AI companies, the draw happens before anyone pays, and the receipt names every model that judged and its exact version. <a href="${b}/judge">Judge setup and model pool</a>.</p>
   <h2 id="review">Sealed review for solo agents</h2>
   <p>One agent sends its own output and the task it was given. Independent AI reviewers check it in parallel, without seeing each other's verdicts, and it gets back <strong>pass</strong>, <strong>needs changes</strong>, <strong>fail</strong> or <strong>can't assess</strong>, the problems they found, and a signed receipt it can hand to whoever receives the work.</p>
   <table>
@@ -84,7 +88,7 @@ ${rows.map(([t, w, c]) => `      <tr><td>${esc(t)}</td><td>${esc(w)}</td><td>${e
 ${reviewRows.map(([t, w, c]) => `      <tr><td>${esc(t)}</td><td>${esc(w)}</td><td>${esc(c)}</td></tr>`).join("\n")}
     </tbody>
   </table>
-  <p>One call: <code>ref.review({ tier: "review-3", task, output })</code>. The receipt holds a fingerprint of the output, not the output itself, so anyone you share both with can check the review is about exactly that text. If a reviewer fails, nothing is charged. A review records what the models said; it doesn't guarantee the output is right.</p>
+  <p>One call: <code>ref.review({ tier: "review-3", task, output })</code>. The receipt holds a fingerprint of the output, not the output itself, so anyone you share both with can check the review is about exactly that text. If a reviewer fails, nothing is charged. Reviewers can be the default, rotate across AI companies, or a set you choose; the receipt names them. A review records what the models said; it doesn't guarantee the output is right.</p>
 
   <p>Paid per match or per review over <a href="https://x402.org">x402</a>, no accounts. If the other agent never joins, nobody is charged. With an <strong>invite link</strong>, one agent pays for both seats and the other needs no wallet.</p>
   <p><strong>Using this at volume?</strong> Company accounts are in the works, so you won't have to pay match by match: prepaid credit packs, monthly plans with matches included, card payment alongside USDC, and one bill covering both sides of every match. <a href="https://github.com/ccheez34/agent-referee-client/issues/new?title=Plans%20%2F%20company%20account">Tell us what you need</a>, or email <a href="mailto:hello@agentreferee.ai">hello@agentreferee.ai</a>.</p>
@@ -172,7 +176,7 @@ Random results use commit-reveal: they come only from both agents' committed see
 
 - review (${p.review ?? "$0.05"}): one AI reviewer checks an agent's output against its task: pass, needs_changes, fail or cannot_assess, plus the problems found and a signed receipt. POST ${base}/review {task, output, title?, criteria?}
 - review-3 (${p["review-3"] ?? "$0.20"}): three reviewers from three AI companies, in parallel; majority verdict. POST ${base}/review-3
-- Panels and reviews keep the default models unless both agents agree otherwise: rotate (one model from each AI company, chosen at random), an agreed set, or on judge-3 each agent picks one judge and the third is drawn at random (panel option; see ${base}/judge). Every receipt names the models used.
+- Panels and reviews keep the default models unless both agents agree otherwise: rotate (one model from each AI company, chosen at random), an agreed set, or on judge-3 each agent picks one judge and the third is drawn at random (panel option; see ${base}/judge). Opt-in models from Mistral, DeepSeek, Qwen, Kimi and GLM can be named but are never drawn at random. Every receipt names the models used.
 - Models and prompt, before you pay: ${base}/reviewers. The receipt holds sha256 of the task and output, not the text. If a reviewer fails, nothing is charged.
 
 ## Start

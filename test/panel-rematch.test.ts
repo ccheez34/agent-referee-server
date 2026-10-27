@@ -621,3 +621,62 @@ test("a judge-3 match with picks: both agents send the same picks (in any key or
   assert.equal(swapped.status, 200, JSON.stringify(swapped.body));
   assert.deepEqual(swapped.body.judge.panel.map((p: any) => p.model), models);
 });
+
+test("opt-in models: agents may name them, but random draws never pick them, and their calls deny data collection", async () => {
+  const { allowedModels, modelPool, optInModels, privacyRouting, callModel } = await import("../src/judge.ts");
+  const env = {};
+  const pool = modelPool(env);
+  const allowed = allowedModels(env);
+  const optIn = optInModels(env);
+  assert.ok(optIn.includes("deepseek/deepseek-v4-pro-0813") && optIn.includes("mistralai/mistral-large-4-0"));
+  // Named on purpose: fine (custom, sets, and as a pick).
+  assert.deepEqual(choosePanel(["deepseek/deepseek-v4-pro-0813", "mistralai/mistral-large-4-0", "claude-opus-5-5"], 3, pool, undefined, allowed).models.length, 3);
+  assert.equal(choosePanel([["z-ai/glm-5.3", "openai/gpt-6-luna"]], 2, pool, undefined, allowed).selection.mode, "random_set");
+  for (let i = 0; i < 200; i++) {
+    const r = choosePanel({ picks: { a: "deepseek/deepseek-v4-pro-0813", b: "mistralai/mistral-large-4-0" } }, 3, pool, undefined, allowed);
+    const third = r.models.find((m) => !m.startsWith("deepseek/") && !m.startsWith("mistralai/"))!;
+    assert.ok(pool.includes(third), "the drawn third judge comes from the default pool only");
+    const rot = choosePanel("rotate", 3, pool, undefined, allowed);
+    assert.ok(rot.models.every((m) => pool.includes(m)), "rotate never draws an opt-in model");
+  }
+  // Without the opt-in list (old callers), they're refused.
+  assert.throws(() => choosePanel(["deepseek/deepseek-v4-pro-0813", "claude-opus-5-5"], 2, pool), /Not in the approved model pool/);
+  // Still one company per seat.
+  assert.throws(() => choosePanel(["deepseek/deepseek-v4-pro-0813", "deepseek/deepseek-v4-pro"], 2, pool, undefined, [...allowed, "deepseek/deepseek-v4-pro"]), /different AI companies/);
+  // Privacy routing: on for opt-in providers, off for Google/OpenAI and Claude.
+  assert.equal(privacyRouting("deepseek/deepseek-v4-pro-0813"), true);
+  assert.equal(privacyRouting("mistralai/mistral-large-4-0"), true);
+  assert.equal(privacyRouting("google/gemini-4-argon"), false);
+  assert.equal(privacyRouting("claude-opus-5-5"), false);
+  const sent: any[] = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (_u: any, init: any) => { sent.push(JSON.parse(init.body)); return new Response("{}"); }) as any;
+  try {
+    await callModel({ OPENROUTER_API_KEY: "k" }, "qwen/qwen3.8-max-0902", "s", "u");
+    await callModel({ OPENROUTER_API_KEY: "k" }, "openai/gpt-6-luna", "s", "u");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  assert.deepEqual(sent[0].provider, { data_collection: "deny" });
+  assert.equal(sent[1].provider, undefined);
+});
+
+test("a review can use an opt-in model when named, and not when opt-in models are turned off", async () => {
+  const { reviewCommitment } = await import("../src/review.ts");
+  const c = await reviewCommitment("review", {}, ["moonshotai/kimi-k3"]);
+  assert.deepEqual(c.models, ["moonshotai/kimi-k3"]);
+  await assert.rejects(() => reviewCommitment("review", { OPT_IN_MODELS: "" }, ["moonshotai/kimi-k3"]), /Not in the approved model pool/);
+});
+
+test("a judge-3 match where both agents pick opt-in judges is created, with a default-pool third judge", async () => {
+  const { MatchRoom } = await import("../src/match.ts");
+  const data = new Map();
+  const state = { storage: { async get(k: string) { return structuredClone(data.get(k)); }, async put(k: string, v: unknown) { data.set(k, structuredClone(v)); }, async deleteAll() { data.clear(); }, async setAlarm() {} } };
+  const r = new MatchRoom(state as any, { ANTHROPIC_API_KEY: "a", OPENROUTER_API_KEY: "o" } as any);
+  const res = await r.fetch(new Request("https://match/create", { method: "POST", body: JSON.stringify({ id: "o1", input: { tier: "judge-3", seats: ["a", "b"], rules: "The cheaper plan wins.", panel: { picks: { a: "mistralai/mistral-large-4-0", b: "deepseek/deepseek-v4-pro-0813" } } } }) }));
+  const body = (await res.json()) as any;
+  assert.equal(res.status, 201, JSON.stringify(body));
+  const models = body.judge.panel.map((p: any) => p.model);
+  assert.ok(models.includes("mistralai/mistral-large-4-0") && models.includes("deepseek/deepseek-v4-pro-0813"));
+  assert.ok(models.some((m: string) => DEFAULT_MODEL_POOL.split(",").includes(m)));
+});

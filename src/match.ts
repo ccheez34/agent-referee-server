@@ -27,6 +27,7 @@ import {
   missingJudgeKey,
   tierModels,
   choosePanel,
+  allowedModels,
   modelPool,
   PANEL_SIZE,
   runOneJudge,
@@ -248,7 +249,7 @@ export class MatchRoom {
       if (input.panel) {
         let picked;
         try {
-          picked = choosePanel(input.panel, PANEL_SIZE[tier], modelPool(this.env));
+          picked = choosePanel(input.panel, PANEL_SIZE[tier], modelPool(this.env), undefined, allowedModels(this.env));
         } catch (e: any) {
           return bad(400, String(e?.message ?? e));
         }
