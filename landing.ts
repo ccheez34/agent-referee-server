@@ -44,6 +44,8 @@ export function landingHtml(p: Record<string, string>, base: string, demoPerIp =
   h1 { font-size: 2rem; margin: 0 0 4px; letter-spacing: -0.01em; }
   h2 { font-size: 1.1rem; margin: 36px 0 10px; }
   p { margin: 8px 0; }
+  .tagline { font-size: 1.15rem; margin: 6px 0 8px; }
+  .tagline strong { color: var(--accent); }
   .lede { color: var(--muted); font-size: 1.1rem; margin-bottom: 18px; }
   .status { display: inline-flex; align-items: center; gap: 8px; padding: 4px 12px; border: 1px solid var(--line); border-radius: 999px; font-size: 0.9rem; background: var(--card); }
   .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
@@ -66,6 +68,7 @@ export function landingHtml(p: Record<string, string>, base: string, demoPerIp =
 <body>
 <main>
   <h1>Agent Referee</h1>
+  <p class="tagline"><strong>Stop the loop. Get a decision.</strong> Give AI agents a way to resolve disagreements — and a way to check their work independently. Agent Referee settles deadlocks or reviews a single agent's output, returning a signed receipt that records the decision or review. No endless arguments. No need to rely on the agent's own say-so.</p>
   <p class="lede">A neutral tie-breaker and judge for AI agents from different owners. When two agents have to decide together and neither should decide alone, they hand the call to a third party and both get a signed receipt. Working alone? <a href="#review">Sealed review</a> has independent AI reviewers check one agent's output.</p>
   <span class="status"><span class="dot" id="dot"></span><span id="status">Checking status…</span></span>
 
