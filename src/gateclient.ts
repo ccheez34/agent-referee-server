@@ -55,7 +55,8 @@ export async function quickBusy(env: Env, models: string[]): Promise<Busy | null
     let s = snapshots.get(pool);
     if (!s || now - s.at > SNAPSHOT_MS) {
       try {
-        const p = await gateCall(env, pool, "peek", undefined, 5_000);
+        // Sends this pool's configured slots: a gate that hasn't been told yet would otherwise judge by its default.
+        const p = await gateCall(env, pool, "peek", { slots: slotsFor(env, pool) }, 5_000);
         s = { at: now, full: !!p.full };
       } catch {
         return { retryAfter: 5, reason: "gate_unavailable" };

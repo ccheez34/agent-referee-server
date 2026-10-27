@@ -399,9 +399,11 @@ app.get("/llms.txt", (c) => {
 // Health check for uptime monitors (free, no AI calls, no payments). 200 + "status":"ok" = all good; "degraded" names
 // the reasons (a provider cap, high failure rate, payment facilitator problems, ledger errors); 503 = can't run at all.
 // The full answer is cached for 30 s per isolate, so a monitor (or anyone) polling it costs almost nothing.
-let healthCache: { at: number; body: any; status: number } | null = null;
+// Keyed by the environment object (one per deployment; tests make their own), so a cached answer never leaks across.
+const healthCaches = new WeakMap<object, { at: number; body: any; status: number }>();
 app.get("/health", async (c) => {
   const env = c.env;
+  const healthCache = healthCaches.get(env);
   if (healthCache && Date.now() - healthCache.at < 30_000) return c.json(healthCache.body, healthCache.status as any);
   const signing = !!env.SIGNING_KEY && !!env.PUBLIC_KEY;
   let records: "ok" | "error" | "off" = !env.LEDGER ? "off" : "ok";
@@ -446,7 +448,7 @@ app.get("/health", async (c) => {
     },
     time: new Date().toISOString(),
   };
-  healthCache = { at: Date.now(), body, status: ok ? 200 : 503 };
+  healthCaches.set(env, { at: Date.now(), body, status: ok ? 200 : 503 });
   return c.json(body, ok ? 200 : 503);
 });
 
@@ -464,7 +466,7 @@ app.post("/admin/pause", async (c) => {
   if (denied) return denied;
   const body: any = await c.req.json().catch(() => null);
   if (!["paid", "reviews"].includes(body?.scope) || typeof body?.on !== "boolean") return err(400, 'Send {"scope":"paid"|"reviews","on":true|false}.');
-  healthCache = null;
+  healthCaches.delete(c.env);
   return c.json(await setPause(c.env, body.scope, body.on));
 });
 
@@ -483,7 +485,7 @@ app.post("/admin/gate-reset", async (c) => {
   if (denied) return denied;
   const pools = gatesOn(c.env) ? [...new Set([...poolsOfProvider(c.env, "anthropic"), "openrouter"])] : [];
   await resetPools(c.env, pools);
-  healthCache = null;
+  healthCaches.delete(c.env);
   return c.json({ ok: true, reset: pools });
 });
 
