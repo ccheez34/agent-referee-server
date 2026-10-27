@@ -26,6 +26,9 @@ import {
   tierCommitment,
   missingJudgeKey,
   tierModels,
+  choosePanel,
+  modelPool,
+  PANEL_SIZE,
   runOneJudge,
   decide,
   votePick,
@@ -78,6 +81,7 @@ export type MatchState = {
   judging_since?: number; // if the judge call never comes back (e.g. a restart), the match becomes retryable
   submissions?: Record<string, string>;
   criteria?: Criterion[]; // judge tiers: agreed weighted criteria; the winner is computed from the scores
+  panel?: "rotate" | string[] | string[][] | { picks: Record<string, string> }; // judge-2 / judge-3: the panel request both agents agreed to (see choosePanel)
   panel_votes?: (JudgeVote | null)[]; // judge tiers: each panelist's verdict (kept across a retry, so only missing ones rerun)
   series?: SeriesInfo; // set when this match is a rematch
   tally_after?: Tally; // rematch tiers: the series tally including this match
@@ -237,6 +241,22 @@ export class MatchRoom {
       return bad(409, "Match already exists.");
     }
     const now = this.now();
+    // Panel tiers: the agreed models (fixed, rotating, or one of several sets) are drawn now, before anyone pays.
+    let judge: JudgeCommitment | undefined;
+    if (isJudgeTier(input.tier)) {
+      const tier = input.tier as JudgeTierName;
+      if (input.panel) {
+        let picked;
+        try {
+          picked = choosePanel(input.panel, PANEL_SIZE[tier], modelPool(this.env));
+        } catch (e: any) {
+          return bad(400, String(e?.message ?? e));
+        }
+        const missing = missingJudgeKey(this.env, picked.models);
+        if (missing) return bad(503, "This judge tier is temporarily unavailable.");
+        judge = { ...(await tierCommitment(tier, picked.models)), panel_selection: picked.selection };
+      } else judge = await tierCommitment(tier, tierModels(this.env, tier));
+    }
     this.m = {
       id: body.id,
       key: input.key,
@@ -254,10 +274,9 @@ export class MatchRoom {
       step_seconds: input.step_seconds,
       demo: input.demo || undefined,
       criteria: input.criteria,
+      panel: input.panel,
       host_pays: input.host_pays,
-      judge: isJudgeTier(input.tier)
-        ? await tierCommitment(input.tier as JudgeTierName, tierModels(this.env, input.tier as JudgeTierName))
-        : undefined,
+      judge,
       series: body.series, // only set by an internal rematch call; the public POST /matches never passes it
       joined: {},
       phase: "joining",
@@ -642,6 +661,7 @@ export class MatchRoom {
         rule_applied: v.rule_applied,
         reasoning: v.reasoning,
         judge_model: v.model,
+        ...(v.model_reported ? { judge_model_reported: v.model_reported } : {}),
         ...(v.scores ? { scores: v.scores, totals: v.totals, criteria } : {}),
       };
     } else {
@@ -927,6 +947,7 @@ export class MatchRoom {
       options: m.options,
       rules: m.rules,
       criteria: m.criteria,
+      panel: m.panel, // the panel request both agents agreed to (the drawn result is judge.panel)
       judge: m.judge,
       seat_wallets: m.seat_wallets,
       host_pays: m.host_pays,

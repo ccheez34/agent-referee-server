@@ -23,7 +23,7 @@ export function landingHtml(p: Record<string, string>, base: string, demoPerIp =
   ];
   const reviewRows: [string, string, string][] = [
     ["review", "One AI reviewer checks your agent's output against its task.", `${p.review ?? "$0.05"} per review`],
-    ["review-3", "Three reviewers from three AI companies; majority verdict.", `${p["review-3"] ?? "$0.25"} per review`],
+    ["review-3", "Three reviewers from three AI companies; majority verdict.", `${p["review-3"] ?? "$0.20"} per review`],
   ];
   const b = esc(base);
   return `<!doctype html>
@@ -76,7 +76,7 @@ export function landingHtml(p: Record<string, string>, base: string, demoPerIp =
 ${rows.map(([t, w, c]) => `      <tr><td>${esc(t)}</td><td>${esc(w)}</td><td>${esc(c)}</td></tr>`).join("\n")}
     </tbody>
   </table>
-  <h2 id="review">No second agent? Sealed review</h2>
+  <h2 id="review">Sealed review for solo agents</h2>
   <p>One agent sends its own output and the task it was given. Independent AI reviewers check it in parallel, without seeing each other's verdicts, and it gets back <strong>pass</strong>, <strong>needs changes</strong>, <strong>fail</strong> or <strong>can't assess</strong>, the problems they found, and a signed receipt it can hand to whoever receives the work.</p>
   <table>
     <thead><tr><th>Tier</th><th>Use it for</th><th>Cost (USDC on Base)</th></tr></thead>
@@ -171,7 +171,8 @@ Random results use commit-reveal: they come only from both agents' committed see
 ## Sealed review (one agent, no counterparty; price per review)
 
 - review (${p.review ?? "$0.05"}): one AI reviewer checks an agent's output against its task: pass, needs_changes, fail or cannot_assess, plus the problems found and a signed receipt. POST ${base}/review {task, output, title?, criteria?}
-- review-3 (${p["review-3"] ?? "$0.25"}): three reviewers from three AI companies, in parallel; majority verdict. POST ${base}/review-3
+- review-3 (${p["review-3"] ?? "$0.20"}): three reviewers from three AI companies, in parallel; majority verdict. POST ${base}/review-3
+- Panels and reviews keep the default models unless both agents agree otherwise: rotate (one model from each AI company, chosen at random), an agreed set, or on judge-3 each agent picks one judge and the third is drawn at random (panel option; see ${base}/judge). Every receipt names the models used.
 - Models and prompt, before you pay: ${base}/reviewers. The receipt holds sha256 of the task and output, not the text. If a reviewer fails, nothing is charged.
 
 ## Start

@@ -9,8 +9,8 @@
 // The request is stateless: nothing about it is stored. If any reviewer fails, the request fails before the
 // payment settles, so a failed review is never charged.
 
-import { LIMITS, canonicalJson, sha256Hex, validateCriteria } from "./logic.ts";
-import { answerText, callModel, panelModels, viaOpenRouter, JUDGE_TEMPERATURE, type Confidence, type Criterion, type JudgeKeys, type PanelEnv } from "./judge.ts";
+import { LIMITS, canonicalJson, panelShapeError, sha256Hex, validateCriteria } from "./logic.ts";
+import { answerText, callModel, choosePanel, modelPool, panelModels, viaOpenRouter, JUDGE_TEMPERATURE, type Confidence, type Criterion, type JudgeKeys, type PanelEnv, type PanelRequest, type PanelSelection } from "./judge.ts";
 
 export type ReviewTier = "review" | "review-3";
 export const REVIEW_TIERS: ReviewTier[] = ["review", "review-3"];
@@ -87,11 +87,15 @@ export type ReviewCommitment = {
   format_version: string;
   prompt_sha256: string; // sha256 of format_version + system prompt + message format
   decision_rule: ReviewDecisionRule;
+  panel_selection?: PanelSelection; // how the reviewers were chosen, when the request asked for something other than the default
 };
 
-export async function reviewCommitment(tier: ReviewTier, env: PanelEnv & { REVIEW_MODEL?: string }): Promise<ReviewCommitment> {
+export async function reviewCommitment(tier: ReviewTier, env: PanelEnv & { REVIEW_MODEL?: string; MODEL_POOL?: string }, panel?: PanelRequest, rand?: () => number): Promise<ReviewCommitment> {
+  // Throws a readable Error if the request names a model outside the pool.
+  const picked = panel ? choosePanel(panel, REVIEW_SIZE[tier], modelPool(env), rand) : undefined;
   return {
-    models: reviewModels(tier, env),
+    ...(picked ? { panel_selection: picked.selection } : {}),
+    models: picked ? picked.models : reviewModels(tier, env),
     temperature: JUDGE_TEMPERATURE,
     format_version: REVIEW_FORMAT_VERSION,
     prompt_sha256: await sha256Hex(`${REVIEW_FORMAT_VERSION}\n${REVIEW_SYSTEM}\n${REVIEW_MESSAGE_FORMAT}`),
@@ -105,11 +109,11 @@ export function reviewModels(tier: ReviewTier, env: PanelEnv & { REVIEW_MODEL?: 
   return panelModels(env, "judge-3").slice(0, 3);
 }
 
-export type ReviewInput = { task: string; output: string; title?: string; criteria?: Criterion[] };
+export type ReviewInput = { task: string; output: string; title?: string; criteria?: Criterion[]; panel?: PanelRequest };
 
-export function validateReview(body: any): { ok: true; value: ReviewInput } | { ok: false; error: string } {
-  if (!body || typeof body !== "object") return { ok: false, error: "Send JSON: {task, output, title?, criteria?}." };
-  const { task, output, title, criteria } = body;
+export function validateReview(body: any, tier: ReviewTier = "review-3"): { ok: true; value: ReviewInput } | { ok: false; error: string } {
+  if (!body || typeof body !== "object") return { ok: false, error: "Send JSON: {task, output, title?, criteria?, panel?}." };
+  const { task, output, title, criteria, panel } = body;
   if (typeof task !== "string" || task.trim().length < 10 || task.length > REVIEW_LIMITS.maxTask)
     return { ok: false, error: `task must be what the agent was asked to do, 10 to ${REVIEW_LIMITS.maxTask} characters.` };
   if (typeof output !== "string" || !output.trim() || output.length > REVIEW_LIMITS.maxOutput)
@@ -117,6 +121,11 @@ export function validateReview(body: any): { ok: true; value: ReviewInput } | { 
   if (title !== undefined && (typeof title !== "string" || title.length > LIMITS.maxTitle))
     return { ok: false, error: `title must be a string up to ${LIMITS.maxTitle} characters.` };
   const out: ReviewInput = { task, output, title };
+  if (panel !== undefined) {
+    const e = panelShapeError(panel, REVIEW_SIZE[tier]);
+    if (e) return { ok: false, error: e.replace("panel must be", "panel (the reviewers) must be") };
+    out.panel = panel;
+  }
   if (criteria !== undefined) {
     const c = validateCriteria(criteria);
     if (typeof c === "string") return { ok: false, error: c };

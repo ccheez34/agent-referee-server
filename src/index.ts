@@ -5,7 +5,7 @@ import { KEY_RE, MEDIATOR, MAX_SERIES_GAMES, doublePrice, idForKey, isJudgeTier,
 import { MatchRoom } from "./match.ts";
 import { Ledger } from "./ledger.ts";
 import { landingHtml, llmsTxt, wantsHtml } from "./landing.ts";
-import { JUDGE_MESSAGE_FORMAT, JUDGE_SYSTEM, judgeCommitment, missingJudgeKey, panelModels, tierCommitment, tierModels, type JudgeTierName } from "./judge.ts";
+import { JUDGE_MESSAGE_FORMAT, JUDGE_SYSTEM, judgeCommitment, missingJudgeKey, modelPool, panelModels, tierCommitment, tierModels, type JudgeTierName } from "./judge.ts";
 import type { Env } from "./types.ts";
 import { payaiToken } from "./payai.ts";
 import { signReceipt } from "./receipt.ts";
@@ -28,15 +28,15 @@ function prices(env: Env) {
     "rps-bo3": env.PRICE_RPS_BO3 || "$0.02",
     weighted: env.PRICE_WEIGHTED || "$0.015",
     draw: env.PRICE_DRAW_MEDIATOR || "$0.05",
-    judge: env.PRICE_JUDGE || "$0.15",
-    "judge-2": env.PRICE_JUDGE_2 || "$0.25",
-    "judge-3": env.PRICE_JUDGE_3 || "$0.50",
+    judge: env.PRICE_JUDGE || "$0.10",
+    "judge-2": env.PRICE_JUDGE_2 || "$0.20",
+    "judge-3": env.PRICE_JUDGE_3 || "$0.35",
   } satisfies Record<Tier, string>;
 }
 
 // Sealed review: one agent, one paid call, priced per review (not per seat).
 function reviewPrices(env: Env): Record<ReviewTier, string> {
-  return { review: env.PRICE_REVIEW || "$0.05", "review-3": env.PRICE_REVIEW_3 || "$0.25" };
+  return { review: env.PRICE_REVIEW || "$0.05", "review-3": env.PRICE_REVIEW_3 || "$0.20" };
 }
 
 // The 2-seat tiers an invite match (host pays for both seats) is available for.
@@ -293,12 +293,17 @@ app.get("/judge", async (c) => {
         independence: "Panelists run in parallel and never see each other's verdicts. Panelist 2 sees the parties in reverse order.",
       },
     },
+    model_pool: modelPool(c.env),
+    choosing_the_panel: PANEL_CHOICE_HELP,
     fingerprint_formula: "sha256_hex(format_version + \"\\n\" + system_prompt + \"\\n\" + message_format)",
     system_prompt: JUDGE_SYSTEM,
     message_format: JUDGE_MESSAGE_FORMAT,
     note: "Each judge match locks in these values when it is created, before anyone pays. They appear in the match status and the signed receipt. AI output can vary slightly even with identical inputs, so verdicts are auditable rather than bit-for-bit reproducible.",
   });
 });
+
+const PANEL_CHOICE_HELP =
+  'Optional "panel" on POST /matches (judge-2, judge-3), part of the settings both agents agree to: "rotate" seats one model from each AI company, choosing which model at random within each company from model_pool; ["model", ...] uses exactly those models (each from model_pool); [["a","b","c"], ["d","e","f"]] draws one of up to 5 agreed sets at random; judge-3 only: {"picks": {"<seat>": "model", "<seat>": "model"}} lets each party name one judge, and the third comes at random from a company neither picked, so neither side controls the majority. Every panel uses models from different AI companies. The draw happens before anyone pays, and the chosen models plus how they were chosen (panel_selection) are in the match status and the signed receipt. Without it, the default panel is used.';
 
 // ---------- sealed review (one agent, one call) ----------
 
@@ -314,9 +319,14 @@ async function callerHash(c: any): Promise<string | undefined> {
 
 async function handleReview(c: any, tier: ReviewTier) {
   const body = await c.req.json().catch(() => null);
-  const v = validateReview(body);
+  const v = validateReview(body, tier);
   if (!v.ok) return err(400, `${v.error} Nothing was charged.`);
-  const commitment = await reviewCommitment(tier, c.env);
+  let commitment;
+  try {
+    commitment = await reviewCommitment(tier, c.env, v.value.panel);
+  } catch (e: any) {
+    return err(400, `${String(e?.message ?? e)} Nothing was charged.`);
+  }
   const missing = missingReviewKey(c.env, commitment.models);
   if (missing) return err(503, "Sealed review is temporarily unavailable. Nothing was charged.");
   const keys = { ANTHROPIC_API_KEY: c.env.ANTHROPIC_API_KEY, OPENROUTER_API_KEY: c.env.OPENROUTER_API_KEY };
@@ -379,6 +389,8 @@ app.get("/reviewers", async (c) => {
     },
     how: `POST /review or /review-3 (x402 paid, one agent) with {task, output, title?, criteria?}. Returns result, votes and a signed receipt. If a reviewer fails, the request fails and nothing is charged.`,
     verdicts: REVIEW_VERDICTS,
+    model_pool: modelPool(c.env),
+    choosing_the_reviewers: PANEL_CHOICE_HELP.replace("on POST /matches (judge-2, judge-3)", "in the review request (review: 1 model, review-3: 3)").replace(/; judge-3 only: .*? majority\./, "."),
     how_votes_combine: "review: the single reviewer's verdict. review-3: a verdict with 2 or more of the 3 votes wins, and cannot_assess counts as a vote like any other (pass+pass+cannot_assess = pass; pass+cannot_assess+cannot_assess = cannot_assess; pass+fail+cannot_assess = split). Otherwise the result is split. Reviewers run in parallel and never see each other's verdicts.",
     what_a_receipt_proves: "That these models gave these verdicts about this exact task and output. The paying agent chose both the task and the output, so a receiver should check the task is the one it actually asked for. A review is one sample (re-running can differ), reviewers see only the text (no tools, web or code execution), and it is not a guarantee of correctness.",
     hashing: "task_sha256 and output_sha256 are sha256 of the exact UTF-8 text sent, with no trimming or normalization. Inputs over the limits are refused, never truncated.",

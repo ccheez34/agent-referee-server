@@ -123,6 +123,7 @@ export type CreateInput = {
   criteria?: Criterion[]; // judge tiers: agreed, weighted scoring criteria; the winner is computed from the scores
   demo?: boolean; // free practice match: no payment, receipts marked demo, never recorded
   host_pays?: string; // invite match: this seat pays for both seats; the other agent joins free with an invite token
+  panel?: "rotate" | string[] | string[][] | { picks: Record<string, string> }; // judge-2 / judge-3: which models judge (see choosePanel in judge.ts)
 };
 
 export function validateCreate(body: any): { ok: true; value: CreateInput } | { ok: false; error: string } {
@@ -235,6 +236,13 @@ export function validateCreate(body: any): { ok: true; value: CreateInput } | { 
     return { ok: false, error: "criteria are only for the judge tiers (judge, judge-2, judge-3)." };
   }
 
+  if (body.panel !== undefined) {
+    if (tier !== "judge-2" && tier !== "judge-3") return { ok: false, error: "panel is only for the panel tiers (judge-2, judge-3)." };
+    const e = isPicks(body.panel) ? picksError(body.panel, tier, out.seats) : panelShapeError(body.panel, tier === "judge-2" ? 2 : 3);
+    if (e) return { ok: false, error: e };
+    out.panel = body.panel;
+  }
+
   return { ok: true, value: out };
 }
 
@@ -271,8 +279,8 @@ export async function idForKey(key: string, demo = false): Promise<string> {
 }
 
 /** The settings both agents must agree on. Seat order and title don't matter. */
-export function specFingerprint(i: { tier: string; seats: string[]; weights?: unknown; options?: unknown; rules?: unknown; criteria?: unknown; seat_wallets?: unknown; step_seconds?: unknown; demo?: unknown }) {
-  return canonicalJson({ tier: i.tier, seats: [...i.seats].sort(), weights: i.weights, options: i.options, rules: i.rules, criteria: i.criteria, seat_wallets: i.seat_wallets, step_seconds: i.step_seconds, demo: i.demo ? true : undefined });
+export function specFingerprint(i: { tier: string; seats: string[]; weights?: unknown; options?: unknown; rules?: unknown; criteria?: unknown; seat_wallets?: unknown; step_seconds?: unknown; demo?: unknown; panel?: unknown }) {
+  return canonicalJson({ tier: i.tier, seats: [...i.seats].sort(), weights: i.weights, options: i.options, rules: i.rules, criteria: i.criteria, seat_wallets: i.seat_wallets, step_seconds: i.step_seconds, demo: i.demo ? true : undefined, panel: i.panel });
 }
 
 /** Pull the paying wallet out of an x402 "exact" EVM payment header (already verified by the paywall). */
@@ -294,8 +302,8 @@ export async function keyId(publicKeyB64: string): Promise<string> {
 
 /** Field-by-field differences between two match settings, so a mismatch (e.g. a typo'd wallet) is easy to spot. */
 export function specDifferences(
-  has: { tier: string; seats: string[]; weights?: any; options?: any; rules?: any; criteria?: any; seat_wallets?: any; step_seconds?: any; demo?: any },
-  sent: { tier: string; seats: string[]; weights?: any; options?: any; rules?: any; criteria?: any; seat_wallets?: any; step_seconds?: any; demo?: any },
+  has: { tier: string; seats: string[]; weights?: any; options?: any; rules?: any; criteria?: any; seat_wallets?: any; step_seconds?: any; demo?: any; panel?: any },
+  sent: { tier: string; seats: string[]; weights?: any; options?: any; rules?: any; criteria?: any; seat_wallets?: any; step_seconds?: any; demo?: any; panel?: any },
 ) {
   const out: { field: string; match_has: unknown; you_sent: unknown }[] = [];
   const cmp = (field: string, a: unknown, b: unknown) => {
@@ -306,6 +314,7 @@ export function specDifferences(
   cmp("options", has.options, sent.options);
   cmp("rules", has.rules, sent.rules);
   cmp("criteria", has.criteria, sent.criteria);
+  cmp("panel", has.panel, sent.panel);
   cmp("step_seconds", has.step_seconds, sent.step_seconds);
   cmp("demo", has.demo ? true : undefined, sent.demo ? true : undefined);
   for (const k of new Set([...Object.keys(has.weights ?? {}), ...Object.keys(sent.weights ?? {})])) cmp(`weights.${k}`, has.weights?.[k], sent.weights?.[k]);
@@ -321,4 +330,29 @@ export function ipv6Prefix64(ip: string): string {
   const t = tail ? tail.split(":") : [];
   const groups = ip.includes("::") ? [...h, ...Array(Math.max(0, 8 - h.length - t.length)).fill("0"), ...t] : h;
   return groups.slice(0, 4).map((g) => (g || "0").toLowerCase().replace(/^0+(?=.)/, "")).join(":") + "::/64";
+}
+
+/** Shape check, no pool needed (used when validating settings). Returns an error message, or null if fine. */
+export function panelShapeError(v: unknown, size: number): string | null {
+  const err = `panel must be "rotate", an array of ${size} model ids, or an array of up to 5 such arrays (one is drawn at random).`;
+  if (v === "rotate") return null;
+  if (!Array.isArray(v) || !v.length) return err;
+  const isSet = (x: unknown) => Array.isArray(x) && x.length === size && x.every((m) => typeof m === "string" && m.length > 0 && m.length <= 80) && new Set(x).size === x.length;
+  if (v.every((x) => typeof x === "string")) return isSet(v) ? null : err;
+  if (v.length > 5 || !v.every(isSet)) return err;
+  return null;
+}
+
+const isPicks = (v: unknown): v is { picks: Record<string, string> } => !!v && typeof v === "object" && !Array.isArray(v);
+
+/** judge-3 { picks: { seatA: model, seatB: model } }: each of the two parties names one judge; the third is drawn. */
+function picksError(v: { picks?: unknown }, tier: string, seats: string[]): string | null {
+  const err = 'panel {"picks": {...}} is for judge-3 with two parties: one model id per party, like {"picks": {"buyer": "claude-opus-5-5", "seller": "openai/gpt-6-luna"}}. The third judge is drawn at random.';
+  const p = v.picks;
+  if (tier !== "judge-3" || seats.length !== 2 || Object.keys(v).length !== 1 || !p || typeof p !== "object" || Array.isArray(p)) return err;
+  const keys = Object.keys(p);
+  if (keys.length !== 2 || !seats.every((s) => keys.includes(s))) return err;
+  const ms = Object.values(p);
+  if (!ms.every((m) => typeof m === "string" && m.length > 0 && m.length <= 80) || ms[0] === ms[1]) return err;
+  return null;
 }

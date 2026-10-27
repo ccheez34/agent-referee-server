@@ -10,6 +10,7 @@
 // so anyone can recompute the panel's decision from the receipt.
 
 import { sha256Hex } from "./logic.ts";
+export { panelShapeError } from "./logic.ts";
 
 export type JudgeTierName = "judge" | "judge-2" | "judge-3";
 export const PANEL_SIZE: Record<JudgeTierName, number> = { judge: 1, "judge-2": 2, "judge-3": 3 };
@@ -32,6 +33,7 @@ export type JudgeVote = {
   reasoning: string;
   scores?: Record<string, Record<string, number>>; // party -> criterion -> 0..10 (only with criteria)
   totals?: Record<string, number>; // party -> weighted total (computed by the service from scores)
+  model_reported?: string; // the exact model id the provider says answered (can differ from an alias)
 };
 /** Kept for code and tests written against the v2 judge. */
 export type JudgeVerdict = JudgeVote;
@@ -160,7 +162,92 @@ export type JudgeCommitment = {
   prompt_sha256: string; // sha256 of format_version + system prompt + message format
   panel?: PanelSeat[]; // judge-2 / judge-3: every panelist's model and party order
   decision_rule?: DecisionRule; // how votes combine: unanimous (else mistrial) or majority (else mistrial)
+  panel_selection?: PanelSelection; // how the panel's models were chosen (only when the agents asked for something other than the default)
 };
+
+// ---------- choosing a panel's models ----------
+//
+// By default a panel uses the service's fixed models. Agents can instead agree (in the settings both sides
+// create the match with) on:
+//   panel: "rotate"                       one model per AI company, drawn at random from the approved pool
+//   panel: ["model-a", "model-b", ...]    exactly these models (each from the approved pool)
+//   panel: [["a","b","c"], ["d","e","f"]] one of these sets, drawn at random
+// The draw happens when the match is created, before anyone pays or submits, and the result (with the
+// options it was drawn from) is fixed in the commitment, shown in the match status and signed into the receipt.
+
+export const DEFAULT_MODEL_POOL = "claude-opus-5-5,claude-sonnet-5-5,claude-haiku-5-5,openai/gpt-6-luna,google/gemini-4-argon,google/gemini-3.7-flash";
+export type PanelRequest = "rotate" | string[] | string[][] | { picks: Record<string, string> };
+export type PanelSelection = { mode: "rotate" | "custom" | "random_set" | "picks"; pool?: string[]; options?: string[][]; picks?: Record<string, string> };
+
+export function modelPool(env: { MODEL_POOL?: string }): string[] {
+  return splitModels(env.MODEL_POOL || DEFAULT_MODEL_POOL);
+}
+
+/** The company behind a model id: "provider/model" ids name it; plain Claude ids are Anthropic's. */
+export function companyOf(model: string): string {
+  if (model.includes("/")) return model.split("/")[0];
+  return model.startsWith("claude") ? "anthropic" : "other";
+}
+
+const randomIndex = (n: number, rand: () => number) => Math.min(n - 1, Math.floor(rand() * n));
+export const cryptoRandom = () => crypto.getRandomValues(new Uint32Array(1))[0] / 2 ** 32;
+
+/**
+ * Pick a panel's models from a request. Throws a readable Error when a model isn't in the approved pool or the
+ * pool can't supply enough companies.
+ */
+export function choosePanel(req: PanelRequest, size: number, pool: string[], rand: () => number = cryptoRandom): { models: string[]; selection: PanelSelection } {
+  const notInPool = (ms: string[]) => ms.filter((m) => !pool.includes(m));
+  // Panels promise judges from different AI companies, so an agreed set can't repeat one.
+  const sameCompany = (ms: string[]) => new Set(ms.map(companyOf)).size !== ms.length;
+  const companyError = "Each panel must use models from different AI companies (for example one Anthropic, one OpenAI, one Google). GET /judge lists the pool.";
+  if (typeof req === "object" && !Array.isArray(req)) {
+    // judge-3 "each picks one": each party names one judge; the third comes from a company neither picked, at
+    // random, and the seat order is shuffled so neither pick is always the panelist who sees the parties reversed.
+    const picked = Object.values(req.picks);
+    const bad = notInPool(picked);
+    if (bad.length) throw new Error(`Not in the approved model pool: ${[...new Set(bad)].join(", ")}. GET /judge lists the pool.`);
+    if (sameCompany(picked)) throw new Error("The two picks must come from different AI companies, so the drawn third judge can come from a third one.");
+    const used = new Set(picked.map(companyOf));
+    const rest = pool.filter((m) => !used.has(companyOf(m)));
+    const companies = [...new Set(rest.map(companyOf))];
+    if (!companies.length || picked.length + 1 !== size) throw new Error(`"picks" needs one judge per party plus one drawn at random (a panel of ${size}).`);
+    const company = companies[randomIndex(companies.length, rand)];
+    const options = rest.filter((m) => companyOf(m) === company);
+    const models = [...picked, options[randomIndex(options.length, rand)]];
+    for (let i = models.length - 1; i > 0; i--) {
+      const j = randomIndex(i + 1, rand);
+      [models[i], models[j]] = [models[j], models[i]];
+    }
+    return { models, selection: { mode: "picks", picks: req.picks, pool } };
+  }
+  if (req === "rotate") {
+    const byCompany = new Map<string, string[]>();
+    for (const m of pool) byCompany.set(companyOf(m), [...(byCompany.get(companyOf(m)) ?? []), m]);
+    const companies = [...byCompany.keys()];
+    if (companies.length < size) throw new Error(`The model pool has only ${companies.length} AI companies; a rotating panel of ${size} needs ${size}.`);
+    const chosen: string[] = [];
+    const left = [...companies];
+    for (let i = 0; i < size; i++) {
+      const company = left.splice(randomIndex(left.length, rand), 1)[0];
+      const ms = byCompany.get(company)!;
+      chosen.push(ms[randomIndex(ms.length, rand)]);
+    }
+    return { models: chosen, selection: { mode: "rotate", pool } };
+  }
+  if ((req as unknown[]).every((x) => typeof x === "string")) {
+    const ms = req as string[];
+    const bad = notInPool(ms);
+    if (bad.length) throw new Error(`Not in the approved model pool: ${bad.join(", ")}. GET /judge lists the pool.`);
+    if (sameCompany(ms)) throw new Error(companyError);
+    return { models: ms, selection: { mode: "custom" } };
+  }
+  const sets = req as string[][];
+  const bad = sets.flatMap(notInPool);
+  if (bad.length) throw new Error(`Not in the approved model pool: ${[...new Set(bad)].join(", ")}. GET /judge lists the pool.`);
+  if (sets.some(sameCompany)) throw new Error(companyError);
+  return { models: sets[randomIndex(sets.length, rand)], selection: { mode: "random_set", options: sets } };
+}
 
 const promptSha = (version: string, system: string, format: string) => sha256Hex(`${version}\n${system}\n${format}`);
 
@@ -388,6 +475,7 @@ export async function runOneJudge(opts: {
       const text = answerText(opts.model, data);
       const v = parseVote(text, seats, opts.criteria, v3);
       const vote: JudgeVote = { panelist: opts.panelist, model: opts.model, order: opts.order, ...v };
+      if (typeof data?.model === "string") vote.model_reported = data.model.slice(0, 120);
       if (v.scores && opts.criteria?.length) vote.totals = criteriaTotals(v.scores, opts.criteria);
       return vote;
     } catch (e: any) {

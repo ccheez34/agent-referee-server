@@ -214,3 +214,24 @@ test("IPv6 callers are counted per /64 block; a global ceiling stops address rot
   assert.equal((await call({ caller: "fresh", limit: 10, global_limit: 3 })).blocked, true, "a new address can't keep failing past the ceiling");
   assert.equal((await call({ caller: "payer", limit: 10, global_limit: 3 })).blocked, false, "a proven payer keeps going");
 });
+
+test("review-3 with panel: rotate draws one reviewer per company; the client checks the receipt honoured it", async () => {
+  const answers: Record<string, string> = {};
+  for (const m of ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "openai/gpt-6-luna", "google/gemini-4-argon", "google/gemini-3.7-flash"]) answers[m] = ans("pass");
+  const f = fakeApis(answers);
+  try {
+    const c = await reviewCommitment("review-3", {}, "rotate");
+    assert.equal(c.panel_selection?.mode, "rotate");
+    const votes = await Promise.all(c.models.map((m, i) => runOneReviewer({ ANTHROPIC_API_KEY: "a", OPENROUTER_API_KEY: "o" }, m, i + 1, input)));
+    const receipt = await signReceipt(await reviewPayload({ tier: "review-3", input, commitment: c, votes, id: "r9" }), SIGNING_KEY, PUBLIC_KEY);
+    assert.equal((await verifyReviewOutcome(receipt, { ...input, panel: "rotate" })).ok, true);
+    // Asked for exact models, got something else: caught.
+    const wrong = await verifyReviewOutcome(receipt, { ...input, panel: ["claude-opus-5-5", "openai/gpt-6-luna", "google/gemini-3.7-flash"].filter((m) => !c.models.includes(m)).length ? ["claude-opus-5-5", "openai/gpt-6-luna", "google/gemini-3.7-flash"] : ["claude-sonnet-5-5", "openai/gpt-6-luna", "google/gemini-4-argon"] });
+    assert.equal(wrong.ok, false);
+  } finally {
+    f.restore();
+  }
+  await assert.rejects(reviewCommitment("review-3", {}, ["claude-opus-5-5", "openai/gpt-6-luna", "nope/model"]), /Not in the approved model pool/);
+  assert.equal(validateReview({ task: "A task long enough", output: "ok", panel: ["claude-opus-5-5"] }, "review-3").ok, false);
+  assert.equal(validateReview({ task: "A task long enough", output: "ok", panel: ["claude-sonnet-5-5"] }, "review").ok, true);
+});

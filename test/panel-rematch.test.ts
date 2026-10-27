@@ -477,3 +477,147 @@ test("a panel that needs OpenRouter but has no key never judges with a missing m
     f.restore();
   }
 });
+
+// ---------- choosing the panel: rotate, exact models, or a random pick among agreed sets ----------
+import { choosePanel, companyOf, DEFAULT_MODEL_POOL } from "../src/judge.ts";
+import { panelShapeError } from "../src/logic.ts";
+
+const POOL = DEFAULT_MODEL_POOL.split(",");
+
+test("panel choice: shape checks", () => {
+  assert.equal(panelShapeError("rotate", 3), null);
+  assert.equal(panelShapeError(["claude-opus-5-5", "openai/gpt-6-luna", "google/gemini-3.7-flash"], 3), null);
+  assert.equal(panelShapeError([["claude-opus-5-5", "openai/gpt-6-luna"], ["claude-sonnet-5-5", "google/gemini-4-argon"]], 2), null);
+  assert.ok(panelShapeError(["claude-opus-5-5"], 3), "wrong size");
+  assert.ok(panelShapeError(["claude-opus-5-5", "claude-opus-5-5"], 2), "repeated model");
+  assert.ok(panelShapeError("random", 3));
+  assert.ok(panelShapeError(Array(6).fill(["claude-opus-5-5", "openai/gpt-6-luna"]), 2), "too many sets");
+});
+
+test("rotate draws one model per AI company from the pool, and the draw varies", () => {
+  const seen = new Set<string>();
+  for (let i = 0; i < 40; i++) {
+    const { models, selection } = choosePanel("rotate", 3, POOL);
+    assert.equal(selection.mode, "rotate");
+    assert.equal(new Set(models.map(companyOf)).size, 3, "three different companies");
+    assert.ok(models.every((m) => POOL.includes(m)));
+    seen.add(models.join("|"));
+  }
+  assert.ok(seen.size > 1, "different panels over time");
+  const two = choosePanel("rotate", 2, POOL, () => 0.99);
+  assert.equal(new Set(two.models.map(companyOf)).size, 2);
+  assert.throws(() => choosePanel("rotate", 3, ["claude-opus-5-5", "claude-sonnet-5-5", "openai/gpt-6-luna"]), /needs 3/);
+});
+
+test("exact models and random sets must come from the pool", () => {
+  assert.deepEqual(choosePanel(["claude-sonnet-5-5", "google/gemini-4-argon"], 2, POOL).models, ["claude-sonnet-5-5", "google/gemini-4-argon"]);
+  assert.throws(() => choosePanel(["claude-opus-5-5", "someone/unknown-model"], 2, POOL), /Not in the approved model pool: someone\/unknown-model/);
+  const sets = [["claude-opus-5-5", "openai/gpt-6-luna", "google/gemini-3.7-flash"], ["claude-sonnet-5-5", "openai/gpt-6-luna", "google/gemini-4-argon"]];
+  assert.deepEqual(choosePanel(sets, 3, POOL, () => 0).models, sets[0]);
+  const second = choosePanel(sets, 3, POOL, () => 0.9);
+  assert.deepEqual(second.models, sets[1]);
+  assert.deepEqual(second.selection, { mode: "random_set", options: sets });
+});
+
+test("a judge-3 match created with panel: rotate commits the drawn panel before payment; both agents must agree on it", async () => {
+  const { MatchRoom } = await import("../src/match.ts");
+  const data = new Map();
+  const state = { storage: { async get(k: string) { return structuredClone(data.get(k)); }, async put(k: string, v: unknown) { data.set(k, structuredClone(v)); }, async deleteAll() { data.clear(); }, async setAlarm() {} } };
+  const r = new MatchRoom(state as any, { ANTHROPIC_API_KEY: "a", OPENROUTER_API_KEY: "o" } as any);
+  const call = async (action: string, body: unknown) => {
+    const res = await r.fetch(new Request(`https://match/${action}`, { method: "POST", body: JSON.stringify(body) }));
+    return { status: res.status, body: (await res.json()) as any };
+  };
+  const input = { tier: "judge-3", seats: ["a", "b"], rules: "The cheaper plan wins.", key: "panel-key-1", panel: "rotate" };
+  const created = await call("create", { id: "m1", input });
+  assert.equal(created.status, 201, JSON.stringify(created.body));
+  const panel = created.body.judge.panel.map((p: any) => p.model);
+  assert.equal(new Set(panel.map(companyOf)).size, 3);
+  assert.equal(created.body.judge.panel_selection.mode, "rotate");
+  // Same settings: same match and same panel. Different panel request: refused, with the difference named.
+  const again = await call("create", { id: "m1", input });
+  assert.deepEqual(again.body.judge.panel.map((p: any) => p.model), panel);
+  const other = await call("create", { id: "m1", input: { ...input, panel: ["claude-opus-5-5", "openai/gpt-6-luna", "google/gemini-3.7-flash"] } });
+  assert.equal(other.status, 409);
+  assert.ok(other.body.differences.some((d: any) => d.field === "panel"));
+});
+
+test("panel is refused outside the panel tiers and for models outside the pool", async () => {
+  const { validateCreate } = await import("../src/logic.ts");
+  assert.equal(validateCreate({ tier: "judge", seats: ["a", "b"], rules: "The cheaper plan wins.", panel: "rotate" }).ok, false);
+  assert.equal(validateCreate({ tier: "weighted", seats: ["a", "b"], weights: { a: 1, b: 1 }, panel: "rotate" }).ok, false);
+  const { MatchRoom } = await import("../src/match.ts");
+  const data = new Map();
+  const state = { storage: { async get(k: string) { return structuredClone(data.get(k)); }, async put(k: string, v: unknown) { data.set(k, structuredClone(v)); }, async deleteAll() { data.clear(); }, async setAlarm() {} } };
+  const r = new MatchRoom(state as any, { ANTHROPIC_API_KEY: "a", OPENROUTER_API_KEY: "o" } as any);
+  const res = await r.fetch(new Request("https://match/create", { method: "POST", body: JSON.stringify({ id: "m2", input: { tier: "judge-2", seats: ["a", "b"], rules: "The cheaper plan wins.", panel: ["claude-opus-5-5", "evil/expensive-model"] } }) }));
+  assert.equal(res.status, 400);
+  assert.match(((await res.json()) as any).error, /Not in the approved model pool/);
+});
+
+test("an agreed panel can't repeat an AI company (so 'different companies' stays true)", () => {
+  const POOL = DEFAULT_MODEL_POOL.split(",");
+  assert.throws(() => choosePanel(["claude-opus-5-5", "claude-sonnet-5-5"], 2, POOL), /different AI companies/);
+  assert.throws(() => choosePanel([["claude-opus-5-5", "openai/gpt-6-luna"], ["google/gemini-4-argon", "google/gemini-3.7-flash"]], 2, POOL), /different AI companies/);
+  assert.deepEqual(choosePanel(["claude-haiku-5-5"], 1, POOL).models, ["claude-haiku-5-5"]); // a single review is one model
+});
+
+test("picks: each party names one judge, the third comes from the remaining company, seat order shuffled", () => {
+  const POOL = DEFAULT_MODEL_POOL.split(",");
+  const picks = { buyer: "claude-opus-5-5", seller: "openai/gpt-6-luna" };
+  const seen = new Set<string>();
+  const firstSeat = new Set<string>();
+  for (let i = 0; i < 300; i++) {
+    const r = choosePanel({ picks }, 3, POOL);
+    assert.equal(r.models.length, 3);
+    assert.ok(r.models.includes("claude-opus-5-5") && r.models.includes("openai/gpt-6-luna"));
+    const third = r.models.find((m) => !Object.values(picks).includes(m))!;
+    assert.equal(companyOf(third), "google");
+    seen.add(third);
+    firstSeat.add(r.models[0]);
+    assert.equal(r.selection.mode, "picks");
+  }
+  assert.equal(seen.size, 2, "both Google models get drawn");
+  assert.ok(firstSeat.has("claude-opus-5-5") && firstSeat.has("openai/gpt-6-luna") && [...firstSeat].some((m) => companyOf(m) === "google"), "any judge can sit first");
+  assert.throws(() => choosePanel({ picks: { buyer: "claude-opus-5-5", seller: "claude-haiku-5-5" } }, 3, POOL), /different AI companies/);
+  assert.throws(() => choosePanel({ picks: { buyer: "claude-opus-5-5", seller: "x/unknown" } }, 3, POOL), /Not in the approved model pool/);
+});
+
+test("picks validation: judge-3 only, exactly the two seats", () => {
+  const base = { seats: ["buyer", "seller"], rules: "The cheaper plan wins if quality is equal." };
+  const ok = { picks: { buyer: "claude-opus-5-5", seller: "openai/gpt-6-luna" } };
+  assert.equal(validateCreate({ ...base, tier: "judge-3", panel: ok }).ok, true);
+  assert.equal(validateCreate({ ...base, tier: "judge-2", panel: ok }).ok, false);
+  assert.equal(validateCreate({ ...base, tier: "judge-3", panel: { picks: { buyer: "claude-opus-5-5", someone: "openai/gpt-6-luna" } } }).ok, false);
+  assert.equal(validateCreate({ ...base, tier: "judge-3", panel: { picks: { buyer: "claude-opus-5-5", seller: "claude-opus-5-5" } } }).ok, false);
+  assert.equal(validateCreate({ ...base, tier: "judge-3", panel: { ...ok, extra: 1 } }).ok, false);
+});
+
+test("rotate always seats three different companies (10,000 draws)", () => {
+  const POOL = DEFAULT_MODEL_POOL.split(",");
+  for (let i = 0; i < 10000; i++) {
+    const r = choosePanel("rotate", 3, POOL);
+    assert.equal(new Set(r.models.map(companyOf)).size, 3);
+  }
+});
+
+test("a judge-3 match with picks: both agents send the same picks (in any key order) and land in one match", async () => {
+  const { MatchRoom } = await import("../src/match.ts");
+  const data = new Map();
+  const state = { storage: { async get(k: string) { return structuredClone(data.get(k)); }, async put(k: string, v: unknown) { data.set(k, structuredClone(v)); }, async deleteAll() { data.clear(); }, async setAlarm() {} } };
+  const r = new MatchRoom(state as any, { ANTHROPIC_API_KEY: "a", OPENROUTER_API_KEY: "o" } as any);
+  const call = async (action: string, body: unknown) => {
+    const res = await r.fetch(new Request(`https://match/${action}`, { method: "POST", body: JSON.stringify(body) }));
+    return { status: res.status, body: (await res.json()) as any };
+  };
+  const input = { tier: "judge-3", seats: ["a", "b"], rules: "The cheaper plan wins.", key: "picks-key", panel: { picks: { a: "claude-opus-5-5", b: "openai/gpt-6-luna" } } };
+  const created = await call("create", { id: "p1", input });
+  assert.equal(created.status, 201, JSON.stringify(created.body));
+  const models = created.body.judge.panel.map((p: any) => p.model);
+  assert.ok(models.includes("claude-opus-5-5") && models.includes("openai/gpt-6-luna"));
+  assert.equal(new Set(models.map(companyOf)).size, 3);
+  assert.equal(created.body.judge.panel_selection.mode, "picks");
+  const swapped = await call("create", { id: "p1", input: { ...input, seats: ["b", "a"], panel: { picks: { b: "openai/gpt-6-luna", a: "claude-opus-5-5" } } } });
+  assert.equal(swapped.status, 200, JSON.stringify(swapped.body));
+  assert.deepEqual(swapped.body.judge.panel.map((p: any) => p.model), models);
+});

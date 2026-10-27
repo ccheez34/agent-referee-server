@@ -17,7 +17,8 @@ export interface Env {
   PRICE_JUDGE_2?: string; // per seat, 2-judge panel
   PRICE_JUDGE_3?: string; // per seat, 3-judge panel
   PRICE_REVIEW?: string; // sealed review, one reviewer (per review, default $0.05)
-  PRICE_REVIEW_3?: string; // sealed review, three reviewers (per review, default $0.25)
+  PRICE_REVIEW_3?: string; // sealed review, three reviewers (per review, default $0.20)
+  MODEL_POOL?: string; // models agents may choose for panels and reviews, comma separated (default: judge.ts DEFAULT_MODEL_POOL)
   REVIEW_MODEL?: string; // the single reviewer for "review" (default claude-sonnet-5-5)
   OPERATOR_TEST_WALLETS?: string; // comma separated; their records are labeled as the operator's self-play
   REVIEW_FAIL_GLOBAL_LIMIT?: string; // failed reviews per day across everyone before only proven payers continue (default 500)

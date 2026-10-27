@@ -1,6 +1,6 @@
 {
   "name": "agent-referee-server",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "description": "Server for Agent Referee: a neutral tie-breaker, AI judge panels and sealed review for AI agents, with Ed25519-signed receipts and x402 payments. Runs on Cloudflare Workers.",
   "license": "AGPL-3.0-only",
   "private": true,
@@ -24,6 +24,6 @@
     "@cloudflare/workers-types": "^5.20261019.1",
     "typescript": "^5.6.0",
     "wrangler": "^4.151.3",
-    "agent-referee-client": "^0.7.0"
+    "agent-referee-client": "^0.8.0"
   }
 }

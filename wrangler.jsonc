@@ -33,9 +33,12 @@
     "PRICE_RPS_BO3": "$0.02",
     "PRICE_WEIGHTED": "$0.015",
     "PRICE_DRAW_MEDIATOR": "$0.05",
-    "PRICE_JUDGE": "$0.15",
-    "PRICE_JUDGE_2": "$0.25",
-    "PRICE_JUDGE_3": "$0.50",
+    "PRICE_JUDGE": "$0.10",
+    "PRICE_JUDGE_2": "$0.20",
+    "PRICE_JUDGE_3": "$0.35",
+    // Sealed review, per review (one agent pays)
+    "PRICE_REVIEW": "$0.05",
+    "PRICE_REVIEW_3": "$0.20",
     // Panel judges, panelist 1 first, from different companies so a panel isn't one model family agreeing with itself.
     // Plain Claude ids go to Anthropic (ANTHROPIC_API_KEY); "provider/model" ids go through OpenRouter (OPENROUTER_API_KEY).
     "PANEL_2_MODELS": "claude-opus-5-5,google/gemini-4-argon",
