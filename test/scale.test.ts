@@ -386,6 +386,8 @@ test("fake AI only ever runs on staging, never with real money", () => {
   assert.equal(fakeAiConfig({ FAKE_AI: "true", STAGING: "true" }), null, "network not set: off");
   assert.equal(fakeAiConfig({ FAKE_AI: "false", STAGING: "true", NETWORK: "base-sepolia" }), null);
   assert.deepEqual(fakeAiConfig({ FAKE_AI: "true", STAGING: "true", NETWORK: "base-sepolia", FAKE_AI_DELAY_MS: "10-20", FAKE_AI_MIX: "429:0.1,cap:0.05" }), { minMs: 10, maxMs: 20, mix: [["429", 0.1], ["cap", 0.05]] });
+  assert.deepEqual(fakeAiConfig({ FAKE_AI: "true", STAGING: "true", NETWORK: "base-sepolia" }, { mix: "hang:0.3", delay: "1-2" }), { minMs: 1, maxMs: 2, mix: [["hang", 0.3]] }, "a staging test can pick its own mix");
+  assert.equal(fakeAiConfig({ STAGING: "true", NETWORK: "base-sepolia" }, { mix: "cap:1" }), null, "the headers can't turn fake AI on");
 });
 
 test("fake answers go through the real review and judge code paths", async () => {

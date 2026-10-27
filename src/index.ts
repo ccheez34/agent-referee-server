@@ -581,7 +581,8 @@ async function handleReview(c: any, tier: ReviewTier) {
     // What's left of the reviewers' budget, never past the payment authorization's own deadline.
     const budgetMs = reviewBudget({ budgetMs: REVIEWER_BUDGET_MS, elapsedMs: started - g.t0, header: c.req.header("x-payment") });
     if (budgetMs === null) return busy(10, "not enough time was left in this payment's window for a full review.");
-    const keys = { ANTHROPIC_API_KEY: c.env.ANTHROPIC_API_KEY, OPENROUTER_API_KEY: c.env.OPENROUTER_API_KEY, fake: fakeAiConfig(c.env) };
+    const fake = fakeAiConfig(c.env, { mix: c.req.header("x-test-fake-mix"), delay: c.req.header("x-test-fake-delay") });
+    const keys = { ANTHROPIC_API_KEY: c.env.ANTHROPIC_API_KEY, OPENROUTER_API_KEY: c.env.OPENROUTER_API_KEY, fake };
     // In parallel, so no reviewer sees another's verdict. All are waited for before the slots go back.
     settled = await Promise.allSettled(
       commitment.models.map((m: string, i: number) => runOneReviewer(keys, m, i + 1, input, undefined, { budgetMs, observe: (o) => lease.observe(i, o) })),

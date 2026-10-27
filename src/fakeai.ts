@@ -7,12 +7,17 @@
 
 export type FakeAi = { minMs: number; maxMs: number; mix: [kind: string, share: number][] };
 
-export function fakeAiConfig(env: { FAKE_AI?: string; STAGING?: string; NETWORK?: string; FAKE_AI_DELAY_MS?: string; FAKE_AI_MIX?: string }): FakeAi | null {
+/** override: staging load tests may send x-test-fake-mix / x-test-fake-delay headers to pick a failure mix per request
+ * (no redeploy between scenarios). Only ever read when fake AI is already on, so production never sees them. */
+export function fakeAiConfig(
+  env: { FAKE_AI?: string; STAGING?: string; NETWORK?: string; FAKE_AI_DELAY_MS?: string; FAKE_AI_MIX?: string },
+  override: { mix?: string | null; delay?: string | null } = {},
+): FakeAi | null {
   if (env.FAKE_AI !== "true" || env.STAGING !== "true" || !env.NETWORK || env.NETWORK === "base") return null;
-  const [a, b] = String(env.FAKE_AI_DELAY_MS || "2000-30000").split("-").map(Number);
+  const [a, b] = String(override.delay || env.FAKE_AI_DELAY_MS || "2000-30000").split("-").map(Number);
   const minMs = Number.isFinite(a) ? a : 2000;
   const maxMs = Number.isFinite(b) ? Math.max(b, minMs) : minMs;
-  const mix: [string, number][] = String(env.FAKE_AI_MIX || "")
+  const mix: [string, number][] = String(override.mix ?? env.FAKE_AI_MIX ?? "")
     .split(",")
     .map((p) => p.split(":"))
     .filter(([k, v]) => k && Number.isFinite(Number(v)))

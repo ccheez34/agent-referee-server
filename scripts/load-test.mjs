@@ -11,6 +11,8 @@
 // --spread S: start the N requests evenly over S seconds instead of all in the same instant. One PC can't open
 // thousands of TLS connections at once (its own network stack refuses: "fetch failed" before the request leaves);
 // real bursts come from many machines. Requests that never left this PC are reported separately and don't count.
+//   add --mix "429:0.5" (or "500:0.3", "hang:0.3", "cap:1", "cut:0.2") to make the fake AI misbehave. A failed review is
+//   a 502 "didn't return a usable verdict" (uncharged), which counts as expected when --mix is set.
 // Pass: only 200, 503 "busy" (with Retry-After), 429 (limits) and nothing slower than 300 s; no 5xx other than busy.
 const args = Object.fromEntries(
   process.argv.slice(2).reduce((a, v, i, all) => (v.startsWith("--") ? [...a, [v.slice(2), all[i + 1]?.startsWith("--") ? "true" : all[i + 1]]] : a), []),
@@ -40,12 +42,14 @@ if (health.checks?.payments !== "off") {
 
 const results = [];
 const task = "Add 2 and 2 and give only the number.";
+// --mix "429:0.5" / --delay "1000-5000": staging-only headers choosing the fake AI's behaviour for this run.
+const fakeHeaders = { ...(args.mix ? { "x-test-fake-mix": args.mix } : {}), ...(args.delay ? { "x-test-fake-delay": args.delay } : {}) };
 async function one(kind, i) {
   const t0 = Date.now();
   const caller = String(i % callers);
   let req;
   if (kind === "review" || kind === "review-3")
-    req = fetch(`${url}/${kind}`, { method: "POST", headers: { "content-type": "application/json", "x-test-caller": caller }, body: JSON.stringify({ task, output: "4" }) });
+    req = fetch(`${url}/${kind}`, { method: "POST", headers: { "content-type": "application/json", "x-test-caller": caller, ...fakeHeaders }, body: JSON.stringify({ task, output: "4" }) });
   else if (kind === "demo")
     req = fetch(`${url}/matches`, { method: "POST", headers: { "content-type": "application/json", "x-test-caller": caller }, body: JSON.stringify({ tier: "rps", seats: ["a", "b"], demo: true }) });
   else req = fetch(`${url}/health`);
@@ -95,7 +99,8 @@ for (const kind of [...new Set(results.map((r) => r.kind))]) {
   console.log(`  ${kind}: ${JSON.stringify(by)}  p50 ${pct(ms, 50)} ms, p95 ${pct(ms, 95)} ms, p99 ${pct(ms, 99)} ms, max ${ms[ms.length - 1]} ms`);
 }
 const neverSent = results.filter((r) => r.status === 0 && r.local);
-const unexpected = results.filter((r) => !r.local && !(r.status === 200 || r.status === 201 || r.status === 429 || (r.status === 503 && r.busy && r.retryAfter)));
+const expectedFailure = (r) => args.mix && r.status === 502 && /usable verdict/.test(r.error);
+const unexpected = results.filter((r) => !r.local && !expectedFailure(r) && !(r.status === 200 || r.status === 201 || r.status === 429 || (r.status === 503 && r.busy && r.retryAfter)));
 const slow = results.filter((r) => r.ms > 300_000);
 const examples = [...new Set(unexpected.map((r) => `${r.status} ${r.error}`))].slice(0, 8);
 if (neverSent.length)
