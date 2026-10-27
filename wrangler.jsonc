@@ -10,12 +10,16 @@
   "durable_objects": {
     "bindings": [
       { "name": "MATCHES", "class_name": "MatchRoom" },
-      { "name": "LEDGER", "class_name": "Ledger" }
+      { "name": "LEDGER", "class_name": "Ledger" },
+      // Admission gates (one per AI provider pool) and the health/pause object. See src/gate.ts and src/health.ts.
+      { "name": "GATES", "class_name": "Gate" },
+      { "name": "HEALTH", "class_name": "Health" }
     ]
   },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["MatchRoom"] },
-    { "tag": "v2", "new_sqlite_classes": ["Ledger"] }
+    { "tag": "v2", "new_sqlite_classes": ["Ledger"] },
+    { "tag": "v3", "new_sqlite_classes": ["Gate", "Health"] }
   ],
 
   "vars": {
@@ -43,5 +47,37 @@
     // Plain Claude ids go to Anthropic (ANTHROPIC_API_KEY); "provider/model" ids go through OpenRouter (OPENROUTER_API_KEY).
     "PANEL_2_MODELS": "claude-opus-5-5,google/gemini-4-argon",
     "PANEL_3_MODELS": "claude-opus-5-5,openai/gpt-6-luna,google/gemini-3.7-flash"
+    // Concurrent AI calls per provider pool (defaults: Opus 6, Sonnet 12, Haiku 12, OpenRouter 20). Set from measurements, e.g.
+    // "GATE_SLOTS_ANTHROPIC_CLAUDE_OPUS_5_5": "6", "GATE_SLOTS_OPENROUTER": "20"
+  },
+
+  // Staging copy for free load tests: npx wrangler deploy --env staging. Own Worker (agent-referee-staging), own
+  // Durable Objects, no payments, fake AI answers. Give it its own secrets: SIGNING_KEY/PUBLIC_KEY (a NEW key pair,
+  // never the live one), ADMIN_TOKEN, and dummy ANTHROPIC_API_KEY / OPENROUTER_API_KEY (e.g. "fake": never called).
+  "env": {
+    "staging": {
+      "durable_objects": {
+        "bindings": [
+          { "name": "MATCHES", "class_name": "MatchRoom" },
+          { "name": "LEDGER", "class_name": "Ledger" },
+          { "name": "GATES", "class_name": "Gate" },
+          { "name": "HEALTH", "class_name": "Health" }
+        ]
+      },
+      "vars": {
+        "PAY_TO": "0x0000000000000000000000000000000000000001",
+        "NETWORK": "base-sepolia",
+        "PAYMENTS_ENABLED": "false",
+        "STAGING": "true",
+        "FAKE_AI": "true",
+        "FAKE_AI_DELAY_MS": "2000-30000",
+        "FAKE_AI_MIX": "",
+        "JUDGE_MODEL": "claude-haiku-5-5",
+        "REVEAL_WINDOW_SECONDS": "600",
+        "PANEL_2_MODELS": "claude-opus-5-5,google/gemini-4-argon",
+        "PANEL_3_MODELS": "claude-opus-5-5,openai/gpt-6-luna,google/gemini-3.7-flash",
+        "DEMO_PER_IP_LIMIT": "20"
+      }
+    }
   }
 }

@@ -5,6 +5,22 @@
 // by joining a paid match with "private_record": true (and public again with false).
 import type { DOState, Env } from "./types.ts";
 
+export const LEDGER_SHARDS = 16;
+
+/** Which ledger object holds a caller's daily counters: one of 16 shards by the caller hash's first hex digit.
+ * Without a caller (no IP header: local tests) the global ledger is used. */
+export function ledgerShardName(caller?: string): string {
+  if (!caller) return "global";
+  const n = parseInt(caller[0], 16);
+  return `shard-${(Number.isFinite(n) ? n : caller.charCodeAt(0)) % LEDGER_SHARDS}`;
+}
+
+/** A global daily ceiling split across the shards, rounding down so the shards together never allow more than the total. */
+export function shardLimit(v: string | undefined, fallback: number): number {
+  const total = Number(v || fallback);
+  return Math.floor((Number.isFinite(total) ? total : fallback) / LEDGER_SHARDS);
+}
+
 export type Outcome = "win" | "loss" | "completed" | "forfeit";
 export type Kind = "judge" | "luck";
 
@@ -120,6 +136,34 @@ export class Ledger {
     return this.state.storage.get<AgentRecord>(this.key(wallet));
   }
 
+  /** First counter request of a new UTC day: schedule cleanup of older days' counters. Today's keys carry the day,
+   * so an old count can never affect today even before the cleanup runs. */
+  private async newDay(day: string) {
+    const st = this.state.storage;
+    if ((await st.get<string>("counters_day")) === day) return;
+    await st.put("counters_day", day);
+    await st.setAlarm(this.now() + 5_000);
+  }
+
+  /** Deletes counter keys from earlier days (and the old one-map-per-day layout), up to 5,000 per run. */
+  async alarm() {
+    const st = this.state.storage;
+    if (!st.list || !st.delete) return;
+    const today = (await st.get<string>("counters_day")) ?? new Date(this.now()).toISOString().slice(0, 10);
+    let deleted = 0;
+    for (const prefix of ["rf:", "ro:", "rft:", "dm:", "dmc:", "reviewfail:", "reviewok:", "reviewfailtotal:", "demo:", "demoip:"]) {
+      while (deleted < 5_000) {
+        const found = await st.list({ prefix, limit: 128 });
+        const old = [...found.keys()].filter((k) => !k.slice(prefix.length).startsWith(today) || prefix.startsWith("review") || prefix.startsWith("demo"));
+        if (!old.length) break;
+        await st.delete(old);
+        deleted += old.length;
+        if (found.size < 128) break;
+      }
+    }
+    if (deleted >= 5_000) await st.setAlarm(this.now() + 1_000);
+  }
+
   async fetch(req: Request): Promise<Response> {
     const url = new URL(req.url);
     const action = url.pathname.replace(/^\//, "");
@@ -150,38 +194,23 @@ export class Ledger {
     }
 
     if (action === "review-fails") {
-      // body: { caller, limit, record? } -> counts failed paid reviews per address today (UTC). A failed review isn't
-      // charged, so this stops one address from getting free AI calls by making reviews fail on purpose.
-      // The caller is a daily-salted one-way hash (see index.ts); no IP address is stored.
+      // body: { caller, limit, global_limit?, record?, record_ok? } -> counts failed paid reviews per address today (UTC).
+      // A failed review isn't charged, so this stops one address from getting free AI calls by making reviews fail on
+      // purpose. The caller is a daily-salted one-way hash (see index.ts); no IP address is stored. One small key per
+      // caller per day (not one growing map), and the Worker spreads callers over 16 ledger shards.
       const day = nowIso.slice(0, 10);
-      const k = `reviewfail:${day}`;
+      await this.newDay(day);
       const who = typeof body?.caller === "string" ? body.caller : "";
       const limit = Number.isFinite(body?.limit) ? body.limit : 10;
-      const fails = (await this.state.storage.get<Record<string, number>>(k)) ?? {};
-      const okKey = `reviewok:${day}`;
-      const oks = (await this.state.storage.get<Record<string, number>>(okKey)) ?? {};
-      if (body?.record_ok && who) {
-        if (!Object.keys(oks).length) {
-          const prev = new Date(Date.parse(day) - 86400_000).toISOString().slice(0, 10);
-          await (this.state.storage as any).delete?.(`reviewok:${prev}`);
-        }
-        oks[who] = (oks[who] ?? 0) + 1;
-        await this.state.storage.put(okKey, oks);
-      }
-      const totalKey = `reviewfailtotal:${day}`;
-      let total = (await this.state.storage.get<number>(totalKey)) ?? 0;
+      const st = this.state.storage;
+      let ok = who ? ((await st.get<number>(`ro:${day}:${who}`)) ?? 0) : 0;
+      if (body?.record_ok && who) await st.put(`ro:${day}:${who}`, ++ok);
+      let total = (await st.get<number>(`rft:${day}`)) ?? 0;
+      let count = who ? ((await st.get<number>(`rf:${day}:${who}`)) ?? 0) : 0;
       if (body?.record && who) {
-        total++;
-        await this.state.storage.put(totalKey, total);
-        if (!Object.keys(fails).length) {
-          const prev = new Date(Date.parse(day) - 86400_000).toISOString().slice(0, 10);
-          await (this.state.storage as any).delete?.(`reviewfail:${prev}`);
-        }
-        fails[who] = (fails[who] ?? 0) + 1;
-        await this.state.storage.put(k, fails);
+        await st.put(`rft:${day}`, ++total);
+        await st.put(`rf:${day}:${who}`, ++count);
       }
-      const count = who ? (fails[who] ?? 0) : 0;
-      const ok = who ? (oks[who] ?? 0) : 0;
       // Each successful (paid) review today earns one more allowed failure, so a paying user isn't locked out
       // by a bad provider hour, while free failures stay capped.
       // A ceiling on free failures across everyone (bounded by money, not by how many addresses someone controls):
@@ -192,33 +221,22 @@ export class Ledger {
     }
 
     if (action === "demo-quota") {
-      // body: { limit }  -> counts one demo match for today (UTC); refuses once today's limit is reached.
+      // body: { limit, per_caller?, caller? } -> counts one demo match for today (UTC); refuses once today's limit is reached.
       const day = nowIso.slice(0, 10);
-      const k = `demo:${day}`;
-      const used = (await this.state.storage.get<number>(k)) ?? 0;
+      await this.newDay(day);
+      const st = this.state.storage;
+      const used = (await st.get<number>(`dm:${day}`)) ?? 0;
       const limit = Number.isFinite(body?.limit) ? body.limit : 2000;
       if (used >= limit) return json(429, { error: `Today's free demo matches are used up (${limit} per day). They reset at 00:00 UTC.`, limit });
       // Per-caller cap, so one script can't use up everyone's demos. The caller arrives as a one-way hash
       // that changes every day (see index.ts); no IP address is ever stored.
       const who = typeof body?.caller === "string" && body.caller ? body.caller : null;
       const perCaller = Number.isFinite(body?.per_caller) ? body.per_caller : 20;
-      const ck = `demoip:${day}`;
-      let callers: Record<string, number> | undefined;
-      if (who) {
-        callers = (await this.state.storage.get<Record<string, number>>(ck)) ?? {};
-        if ((callers[who] ?? 0) >= perCaller)
-          return json(429, { error: `You've used today's free demo matches (${perCaller} per day from one address). They reset at 00:00 UTC. Paid matches are not limited.`, limit: perCaller });
-      }
-      if (used === 0) {
-        // First demo of a new day: drop yesterday's per-caller counts.
-        const prev = new Date(Date.parse(day) - 86400_000).toISOString().slice(0, 10);
-        await (this.state.storage as any).delete?.(`demoip:${prev}`);
-      }
-      await this.state.storage.put(k, used + 1);
-      if (who && callers) {
-        callers[who] = (callers[who] ?? 0) + 1;
-        await this.state.storage.put(ck, callers);
-      }
+      const mine = who ? ((await st.get<number>(`dmc:${day}:${who}`)) ?? 0) : 0;
+      if (who && mine >= perCaller)
+        return json(429, { error: `You've used today's free demo matches (${perCaller} per day from one address). They reset at 00:00 UTC. Paid matches are not limited.`, limit: perCaller });
+      await st.put(`dm:${day}`, used + 1);
+      if (who) await st.put(`dmc:${day}:${who}`, mine + 1);
       return json(200, { ok: true, used: used + 1, limit });
     }
 

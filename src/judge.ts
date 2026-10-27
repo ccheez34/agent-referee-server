@@ -10,6 +10,8 @@
 // so anyone can recompute the panel's decision from the receipt.
 
 import { sha256Hex } from "./logic.ts";
+import { fakeModelResponse, type FakeAi } from "./fakeai.ts";
+import { ProviderCapError, classifyStatus, rateInfo, type CallObservation } from "./providers.ts";
 export { panelShapeError } from "./logic.ts";
 
 export type JudgeTierName = "judge" | "judge-2" | "judge-3";
@@ -337,7 +339,8 @@ export function tierModels(env: PanelEnv, tier: JudgeTierName): string[] {
 }
 
 export const viaOpenRouter = (model: string) => model.includes("/");
-export type JudgeKeys = { ANTHROPIC_API_KEY?: string; OPENROUTER_API_KEY?: string };
+/** fake: staging only (see fakeai.ts); when set, no provider is called at all. */
+export type JudgeKeys = { ANTHROPIC_API_KEY?: string; OPENROUTER_API_KEY?: string; fake?: FakeAi | null };
 
 /** Null if every model can be called; otherwise which key is missing. */
 export function missingJudgeKey(env: JudgeKeys, models: string[]): string | null {
@@ -437,6 +440,7 @@ export const JUDGE_MAX_TOKENS = 4000;
 
 /** anthropicMaxTokens: the answer budget for Claude models (judges and reviewers both get 4000). */
 export async function callModel(keys: JudgeKeys, model: string, system: string, user: string, signal?: AbortSignal, anthropicMaxTokens = JUDGE_MAX_TOKENS): Promise<Response> {
+  if (keys.fake) return fakeModelResponse(keys.fake, model, user, signal);
   if (viaOpenRouter(model)) {
     return fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
@@ -499,6 +503,8 @@ export async function runOneJudge(opts: {
   /** Tests only: a shorter per-call limit, and a fake sleep. */
   callTimeoutMs?: number;
   sleep?: (ms: number) => Promise<unknown>;
+  /** Told about every provider call (for the admission gate's outcome counts and self-throttling). */
+  observe?: (o: CallObservation) => void;
 }): Promise<JudgeVote> {
   const v3 = opts.formatVersion !== JUDGE_FORMAT_VERSION_V2;
   const seats = Object.keys(opts.submissions).sort();
@@ -506,6 +512,7 @@ export async function runOneJudge(opts: {
   const user = v3 ? buildJudgeMessage(opts.rules, opts.submissions, opts.title, opts.criteria, opts.order) : buildJudgeMessageV2(opts.rules, opts.submissions, opts.title);
 
   const keys: JudgeKeys = { ANTHROPIC_API_KEY: opts.apiKey, ...opts.keys };
+  const observe = opts.observe ?? (() => {});
   const sleep = opts.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
   const callTimeoutMs = opts.callTimeoutMs ?? JUDGE_CALL_TIMEOUT_MS;
   let lastErr = "unknown error";
@@ -516,24 +523,30 @@ export async function runOneJudge(opts: {
       res = await callModel(keys, opts.model, system, user, AbortSignal.timeout(callTimeoutMs));
     } catch (e: any) {
       const timedOut = e?.name === "TimeoutError" || e?.name === "AbortError";
+      observe({ kind: timedOut ? "timeout" : "network" });
       lastErr = timedOut ? `judge timed out after ${Math.round(callTimeoutMs / 1000)}s` : `judge request failed: ${String(e?.message ?? e).slice(0, 150)}`;
       console.error(`judge ${opts.model} panelist ${opts.panelist}: ${lastErr}`);
       continue;
     }
     if (!res.ok) {
       // Keep the provider's own explanation (e.g. low credit balance, unknown model), never the request itself.
+      const raw = await res.text().catch(() => "");
       let detail = "";
       try {
-        const e: any = await res.json();
+        const e: any = JSON.parse(raw);
         detail = String(e?.error?.message ?? e?.error?.type ?? "").replace(/\s+/g, " ").slice(0, 200);
       } catch {}
+      const kind = classifyStatus(opts.model, res.status, raw);
+      observe({ kind, status: res.status, rate: rateInfo(res.headers) });
       lastErr = `judge API returned ${res.status}${detail ? `: ${detail}` : ""}`;
       console.error(`judge ${opts.model} panelist ${opts.panelist}: ${lastErr}`);
+      if (kind === "cap") throw new ProviderCapError(opts.model, res.status, detail || raw.slice(0, 160)); // account-wide; a retry can't help
       if (res.status >= 400 && res.status < 500 && res.status !== 429) break; // won't fix itself on a retry
       // Busy (429) or a provider error (5xx, 529): a short wait before the one retry, so it doesn't pile on.
       if (attempt === 0) await sleep(judgeRetryDelayMs(res.headers.get("retry-after")));
       continue;
     }
+    observe({ kind: "ok", status: res.status, rate: rateInfo(res.headers) });
     try {
       const data: any = await res.json();
       if (data?.error) throw new Error(`judge API error: ${String(data.error.message ?? data.error).slice(0, 200)}`);

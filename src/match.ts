@@ -41,6 +41,10 @@ import {
 import { signReceipt, type Receipt } from "./receipt.ts";
 import type { RecordUpdate } from "./ledger.ts";
 import type { DOState, Env } from "./types.ts";
+import { acquireSlots } from "./gateclient.ts";
+import { fakeAiConfig } from "./fakeai.ts";
+import { addUnjudged } from "./health.ts";
+import { GATE_MAX_WAIT_MS } from "./gate.ts";
 
 type Phase = "joining" | "commit" | "reveal" | "submit" | "judging" | "done" | "expired" | "error";
 
@@ -91,6 +95,11 @@ export type MatchState = {
   result?: Record<string, unknown>;
   receipt?: Receipt;
   error?: string;
+  error_code?: "judges_busy" | "judge_failed" | "unjudged"; // judge tiers: why phase is "error"
+  judge_runs?: number; // judging attempts that actually called the AI (busy refusals don't count)
+  retry_at?: number; // the room retries judging on its own at this time (match alarm)
+  auto_retries?: number; // how many automatic retries were scheduled (sets the next wait)
+  refund_listed?: boolean; // a paid match that ended unjudged was put on the operator's refund list
 };
 
 const HOUR = 3600_000;
@@ -108,7 +117,14 @@ type JudgeTask = {
   ack?: Receipt;
 };
 const MAX_RPS_ROUNDS = 25;
-const JUDGE_TIMEOUT_MS = 2 * 60_000;
+// Judging can wait up to 20 s for a free slot, then run two 50 s tries with a short wait between: 3 minutes covers it.
+const JUDGE_TIMEOUT_MS = 3 * 60_000;
+/** Judging runs that actually call the AI: the first one plus 3 retries. After that the match ends unjudged. */
+export const MAX_JUDGE_RUNS = 4;
+/** A judge slot is held for the whole job: two 50 s calls plus a wait of up to 5 s, plus 30 s of margin. */
+export const JUDGE_LEASE_MS = 140_000;
+/** Waits before the room retries judging on its own: 30 s, 1, 2, 5 min, then every 10 min. */
+const AUTO_RETRY_MS = [30_000, 60_000, 120_000, 300_000, 600_000];
 
 const json = (status: number, body: unknown) =>
   new Response(JSON.stringify(body, null, 2), { status, headers: { "content-type": "application/json" } });
@@ -144,10 +160,43 @@ export class MatchRoom {
   }
 
   async alarm() {
-    await this.locked(async () => {
+    const task = await this.locked(async () => {
+      const m = await this.load();
+      const now = this.now();
+      if (m && now < m.delete_at - 1000) {
+        // Not time to delete yet: this alarm is a judging retry (or a stale one from before the match moved on).
+        const due = m.retry_at !== undefined && now + 1000 >= m.retry_at;
+        if (due && m.phase === "error" && isJudgeTier(m.tier) && m.error_code !== "unjudged") {
+          m.retry_at = undefined;
+          const started = await this.startJudging();
+          if (!(started instanceof Response)) return started;
+          await this.state.storage.setAlarm(m.delete_at);
+          return null;
+        }
+        if (due) m.retry_at = undefined;
+        await this.save();
+        await this.state.storage.setAlarm(m.retry_at ? Math.min(m.retry_at, m.delete_at) : m.delete_at);
+        return null;
+      }
+      if (m) await this.listIfUnjudged("deleted before it could be judged");
       await this.state.storage.deleteAll();
       this.m = undefined;
+      return null;
     });
+    if (task) await this.runJudgeTask(task);
+  }
+
+  /** Paid judge match that will never be judged: put the payers on the operator's refund list (once). */
+  private async listIfUnjudged(reason: string) {
+    const m = this.m;
+    if (!m || m.refund_listed || m.demo || !isJudgeTier(m.tier) || m.phase === "done") return;
+    if (!m.submissions || !m.parties.every((s) => m.submissions![s] !== undefined)) return; // never got to judging
+    const payers = Object.entries(m.joined)
+      .filter(([, j]) => j.paid)
+      .map(([seat, j]) => ({ seat, wallet: j.paid_by ?? null, payment_hash: j.payment_hash }));
+    if (!payers.length) return;
+    m.refund_listed = true;
+    await addUnjudged(this.env, { match_id: m.id, tier: m.tier, reason, payers }).catch((e) => console.error(`refund list write failed for ${m.id}: ${e}`));
   }
 
   async fetch(req: Request): Promise<Response> {
@@ -159,29 +208,7 @@ export class MatchRoom {
     if (result instanceof Response) return result;
 
     if ("judge" in result) {
-      // The AI judge calls run OUTSIDE the lock, so status checks aren't blocked while they think.
-      // Panelists run in parallel and independently: none sees another's verdict.
-      const settled = await Promise.allSettled(
-        result.jobs.map((j) =>
-          runOneJudge({
-            keys: { ANTHROPIC_API_KEY: this.env.ANTHROPIC_API_KEY, OPENROUTER_API_KEY: this.env.OPENROUTER_API_KEY },
-            model: j.model,
-            formatVersion: result.formatVersion,
-            panelist: j.index + 1,
-            order: j.order,
-            rules: result.rules,
-            title: result.title,
-            criteria: result.criteria,
-            submissions: result.submissions,
-          }),
-        ),
-      );
-      const outcomes = settled.map((s, i) => ({
-        index: result.jobs[i].index,
-        vote: s.status === "fulfilled" ? s.value : null,
-        error: s.status === "rejected" ? ((s.reason as any)?.message ?? String(s.reason)) : undefined,
-      }));
-      const res = await this.locked(() => this.finishJudging(outcomes));
+      const res = await this.runJudgeTask(result);
       if (!result.ack) return res;
       // The last submitter's request waits for the verdict; it still gets its signed acknowledgment.
       return json(res.status, { ...((await res.json()) as object), ack: result.ack });
@@ -190,6 +217,73 @@ export class MatchRoom {
     // A paid join is waiting for the table to fill. Wait OUTSIDE the lock so other agents can join.
     const filled = await result.filled;
     return this.locked(() => this.finishWaitingJoin(result, filled));
+  }
+
+  /**
+   * The AI judge calls run OUTSIDE the lock, so status checks aren't blocked while they think. Panelists run in
+   * parallel and independently: none sees another's verdict. Each first takes a slot at the provider's admission
+   * gate; if there's no room, nothing is called and the room retries on its own (verdicts already given are kept).
+   */
+  private async runJudgeTask(result: JudgeTask): Promise<Response> {
+    if (!result.jobs.length) return this.locked(() => this.finishJudging([]));
+    const models = result.jobs.map((j) => j.model);
+    const slots = await acquireSlots(this.env, models, { leaseMs: JUDGE_LEASE_MS, waitMs: GATE_MAX_WAIT_MS });
+    if (!slots.ok) {
+      const retryAfter = slots.retryAfter;
+      return this.locked(() => this.judgesBusy(retryAfter, slots.reason));
+    }
+    let settled: PromiseSettledResult<JudgeVote>[];
+    try {
+      const keys = { ANTHROPIC_API_KEY: this.env.ANTHROPIC_API_KEY, OPENROUTER_API_KEY: this.env.OPENROUTER_API_KEY, fake: fakeAiConfig(this.env) };
+      settled = await Promise.allSettled(
+        result.jobs.map((j, i) =>
+          runOneJudge({
+            keys,
+            model: j.model,
+            formatVersion: result.formatVersion,
+            panelist: j.index + 1,
+            order: j.order,
+            rules: result.rules,
+            title: result.title,
+            criteria: result.criteria,
+            submissions: result.submissions,
+            observe: (o) => slots.lease.observe(i, o),
+          }),
+        ),
+      );
+    } finally {
+      await slots.lease.release();
+    }
+    const outcomes = settled.map((s, i) => ({
+      index: result.jobs[i].index,
+      vote: s.status === "fulfilled" ? s.value : null,
+      error: s.status === "rejected" ? ((s.reason as any)?.message ?? String(s.reason)) : undefined,
+    }));
+    return this.locked(() => this.finishJudging(outcomes));
+  }
+
+  /** Inside the lock: no judge slot was free. No AI was called, so this doesn't count against the retry limit. */
+  private async judgesBusy(retryAfterS: number, reason: string): Promise<Response> {
+    const m = await this.load();
+    if (!m) return bad(404, "No such match. It may have expired.");
+    if (m.phase !== "judging") return json(200, { ok: true, match: this.publicView() });
+    m.phase = "error";
+    m.error_code = "judges_busy";
+    const wait = this.scheduleRetry(retryAfterS * 1000);
+    m.error = `The AI judges are busy right now (${reason}); nothing was lost. The match retries judging on its own in about ${Math.round(wait / 1000)} s, or any seated party can POST /matches/${m.id}/retry-judge then.`;
+    await this.save();
+    return json(200, { ok: true, retry_after_s: Math.round(wait / 1000), match: this.publicView() });
+  }
+
+  /** Sets the next automatic judging retry (the match alarm) and returns the wait in ms. */
+  private scheduleRetry(atLeastMs: number): number {
+    const m = this.m!;
+    const n = m.auto_retries ?? 0;
+    const wait = Math.max(atLeastMs, AUTO_RETRY_MS[Math.min(n, AUTO_RETRY_MS.length - 1)]);
+    m.auto_retries = n + 1;
+    m.retry_at = this.now() + wait;
+    void this.state.storage.setAlarm(Math.min(m.retry_at, m.delete_at));
+    return wait;
   }
 
   private async handle(action: string, body: any): Promise<Response | PendingJoin | JudgeTask> {
@@ -529,7 +623,10 @@ export class MatchRoom {
   private async retryJudge(body: any): Promise<Response | JudgeTask> {
     const seat = await this.auth(body);
     if (seat instanceof Response) return seat;
-    if (this.m!.phase !== "error" || !isJudgeTier(this.m!.tier)) return bad(409, "Nothing to retry.");
+    const m = this.m!;
+    if (m.phase !== "error" || !isJudgeTier(m.tier)) return bad(409, "Nothing to retry.");
+    if (m.error_code === "unjudged")
+      return bad(409, `Judging failed ${MAX_JUDGE_RUNS} times, so this match won't be retried again. The seats that paid are on the operator's refund list; contact hello@agentreferee.ai with the match id.`, { match: this.publicView() });
     return this.startJudging();
   }
 
@@ -594,6 +691,8 @@ export class MatchRoom {
   private async startJudging(): Promise<Response | JudgeTask> {
     const m = this.m!;
     m.error = undefined;
+    m.error_code = undefined;
+    m.retry_at = undefined;
     const needed = m.judge ? (m.judge.panel ?? [{ model: m.judge.model }]).map((p) => p.model) : [this.env.JUDGE_MODEL || "claude-haiku-5-5"];
     const missing = missingJudgeKey(this.env, needed);
     if (missing) {
@@ -628,14 +727,27 @@ export class MatchRoom {
     if (!m) return bad(404, "No such match. It may have expired.");
     if (m.phase !== "judging") return json(200, { ok: true, match: this.publicView() });
     for (const o of outcomes) if (o.vote) m.panel_votes![o.index] = o.vote;
+    if (outcomes.length) m.judge_runs = (m.judge_runs ?? 0) + 1;
     const failures = outcomes.filter((o) => !o.vote);
     if (failures.length) {
       m.phase = "error";
       const who = m.judge?.panel ? `${failures.length} of ${m.judge.panel.length} judges failed (${failures[0].error})` : `Judge failed: ${failures[0].error}`;
-      m.error = `${who}. Any seated party can POST /matches/${m.id}/retry-judge${m.judge?.panel ? "; verdicts already given are kept" : ""}.`;
+      if ((m.judge_runs ?? 0) >= MAX_JUDGE_RUNS) {
+        m.error_code = "unjudged";
+        m.retry_at = undefined;
+        m.error = `${who}. Judging has failed ${m.judge_runs} times, so it won't be retried again. The seats that paid are on the operator's refund list; contact hello@agentreferee.ai with the match id.`;
+        await this.listIfUnjudged(`judging failed ${m.judge_runs} times: ${String(failures[0].error).slice(0, 200)}`);
+        await this.state.storage.setAlarm(m.delete_at);
+      } else {
+        m.error_code = "judge_failed";
+        const wait = this.scheduleRetry(0);
+        m.error = `${who}. The match retries judging on its own in about ${Math.round(wait / 1000)} s (${MAX_JUDGE_RUNS - (m.judge_runs ?? 0)} tries left), or any seated party can POST /matches/${m.id}/retry-judge${m.judge?.panel ? "; verdicts already given are kept" : ""}.`;
+      }
       await this.save();
       return json(200, { ok: true, match: this.publicView() });
     }
+    m.error_code = undefined;
+    m.retry_at = undefined;
     const votes = m.panel_votes as JudgeVote[];
     const criteria = m.judge?.format_version === JUDGE_FORMAT_VERSION_V2 ? undefined : m.criteria;
     const rule = m.judge?.decision_rule ?? "single";
@@ -981,6 +1093,9 @@ export class MatchRoom {
           }
         : undefined,
       error: m.error,
+      error_code: m.error_code,
+      retry_at: m.retry_at ? new Date(m.retry_at).toISOString() : undefined,
+      judge_runs: judgeTier && m.judge_runs ? m.judge_runs : undefined,
     };
   }
 }

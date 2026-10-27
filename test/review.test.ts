@@ -292,11 +292,15 @@ test("failed reviews are capped per address per day, and the count resets the ne
   await call({ caller: "aa", limit: 2, record: true });
   assert.equal((await call({ caller: "aa", limit: 2 })).blocked, true);
   assert.equal((await call({ caller: "bb", limit: 2 })).blocked, false, "another address isn't affected");
+  const today = new Date().toISOString().slice(0, 10);
+  assert.equal(d.get(`rf:${today}:aa`), 2, "one small key per caller per day");
   l.now = () => Date.now() + 24 * 3600_000;
   assert.equal((await call({ caller: "aa", limit: 2 })).blocked, false);
   await call({ caller: "aa", limit: 2, record: true });
-  const today = new Date().toISOString().slice(0, 10);
-  assert.equal(d.has(`reviewfail:${today}`), false, "yesterday's counts are dropped");
+  (st.storage as any).list = async (o: any) => new Map([...d.keys()].filter((k) => k.startsWith(o.prefix)).sort().slice(0, o.limit).map((k) => [k, d.get(k)]));
+  (st.storage as any).delete = async (k: any) => { for (const x of [k].flat()) d.delete(x); return true; };
+  await l.alarm();
+  assert.equal([...d.keys()].some((k) => k.includes(today)), false, "yesterday's counts are dropped");
 });
 
 test("successful reviews earn back failure allowance, so paying users aren't locked out", async () => {

@@ -8,6 +8,15 @@ import { commitmentOf, randomToken, validateCreate, idForKey } from "../src/logi
 const kp = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"])) as CryptoKeyPair;
 const b64 = (b: ArrayBuffer) => Buffer.from(b).toString("base64");
 const keys = { SIGNING_KEY: b64(await crypto.subtle.exportKey("pkcs8", kp.privateKey)), PUBLIC_KEY: b64((await crypto.subtle.exportKey("raw", kp.publicKey)) as ArrayBuffer) };
+// In-memory storage with list/delete, like a real Durable Object's.
+export const memList = (d: Map<string, unknown>) => ({
+  async get(k: string) { return structuredClone(d.get(k)); },
+  async put(k: string, v: unknown) { d.set(k, structuredClone(v)); },
+  async delete(k: string | string[]) { for (const x of [k].flat()) d.delete(x); return true; },
+  async list(o: { prefix?: string; limit?: number }) { return new Map([...d.keys()].filter((k) => k.startsWith(o.prefix ?? "")).sort().slice(0, o.limit ?? 1e9).map((k) => [k, d.get(k)])); },
+  async deleteAll() { d.clear(); },
+  async setAlarm() {},
+});
 const mem = () => { const d = new Map(); return { storage: { async get(k: string) { return structuredClone(d.get(k)); }, async put(k: string, v: unknown) { d.set(k, structuredClone(v)); }, async deleteAll() { d.clear(); }, async setAlarm() {} } }; };
 
 function room(env: any = {}) {
@@ -81,7 +90,7 @@ test("the daily demo cap refuses once reached and resets the next day", async ()
 
 test("one caller can't use up everyone's demos; others still get theirs, and counts reset daily", async () => {
   const d = new Map();
-  const st = { storage: { async get(k: string) { return structuredClone(d.get(k)); }, async put(k: string, v: unknown) { d.set(k, structuredClone(v)); }, async delete(k: string) { return d.delete(k); }, async deleteAll() { d.clear(); }, async setAlarm() {} } };
+  const st = { storage: memList(d) };
   const l = new Ledger(st as any, {} as any);
   const q = async (caller?: string) => (await l.fetch(new Request("https://ledger/demo-quota", { method: "POST", body: JSON.stringify({ limit: 10, per_caller: 2, caller }) }))).status;
   assert.deepEqual([await q("aaa"), await q("aaa"), await q("aaa")], [200, 200, 429]);
@@ -89,11 +98,13 @@ test("one caller can't use up everyone's demos; others still get theirs, and cou
   assert.equal(await q(), 200); // no caller (no IP header) falls back to the global cap only
   // A refused caller didn't use up the global count: 4 counted so far.
   const day = new Date().toISOString().slice(0, 10);
-  assert.equal(d.get(`demo:${day}`), 4);
+  assert.equal(d.get(`dm:${day}`), 4);
+  assert.equal(d.get(`dmc:${day}:aaa`), 2, "one small key per caller per day");
   assert.ok(![...d.keys()].some((k) => String(JSON.stringify(d.get(k))).includes(".")), "only hashes and counts are stored");
   l.now = () => Date.now() + 24 * 3600_000;
   assert.equal(await q("aaa"), 200); // next day, fresh
-  assert.equal(d.has(`demoip:${day}`), false, "yesterday's per-caller counts are dropped");
+  await l.alarm(); // the cleanup the first request of the day scheduled
+  assert.equal([...d.keys()].some((k) => k.includes(day)), false, "yesterday's counts are dropped");
 });
 
 test("landing page shows the limitations; llms.txt lists tiers, prices and limits", async () => {

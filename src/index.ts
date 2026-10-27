@@ -3,17 +3,22 @@ import { Hono, type MiddlewareHandler } from "hono";
 import { paymentMiddleware } from "x402-hono";
 import { KEY_RE, MEDIATOR, MAX_SERIES_GAMES, doublePrice, idForKey, isJudgeTier, keyId, ipv6Prefix64, payerFromPaymentHeader, randomToken, sha256Hex, type Tier } from "./logic.ts";
 import { MatchRoom } from "./match.ts";
-import { Ledger } from "./ledger.ts";
+import { Ledger, ledgerShardName, shardLimit } from "./ledger.ts";
 import { landingHtml, llmsTxt, wantsHtml } from "./landing.ts";
 import { JUDGE_MESSAGE_FORMAT, JUDGE_SYSTEM, judgeCommitment, missingJudgeKey, modelPool, optInModels, panelModels, tierCommitment, tierModels, type JudgeTierName } from "./judge.ts";
 import type { Env } from "./types.ts";
 import { payaiToken } from "./payai.ts";
 import { signReceipt } from "./receipt.ts";
 import {
-  REVIEW_LIMITS, REVIEW_MESSAGE_FORMAT, REVIEW_SYSTEM, REVIEW_VERDICTS, missingReviewKey, reviewCommitment, reviewModels, reviewPayload, runOneReviewer, validateReview, type ReviewTier,
+  REVIEW_LIMITS, REVIEW_MESSAGE_FORMAT, REVIEW_SYSTEM, REVIEW_VERDICTS, REVIEWER_BUDGET_MS, missingReviewKey, reviewCommitment, reviewModels, reviewPayload, runOneReviewer, validateReview, type ReviewTier,
 } from "./review.ts";
+import { Gate, GATE_MAX_WAIT_MS } from "./gate.ts";
+import { Health, adminOk, evaluateHealth, healthEvents, listUnjudged, markRefunded, pauseState, recordEvent, setPause } from "./health.ts";
+import { acquireSlots, gateStats, gatesOn, poolsOfProvider, quickBusy, resetPools, type SlotLease } from "./gateclient.ts";
+import { classifyPaidResponse } from "./paywatch.ts";
+import { fakeAiConfig } from "./fakeai.ts";
 
-export { MatchRoom, Ledger };
+export { MatchRoom, Ledger, Gate, Health };
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -139,14 +144,140 @@ function getPaywall(env: Env): MiddlewareHandler {
 
 const PAUSED_MSG =
   "Paid matches are paused for a moment. Free demo matches work now: add \"demo\": true to POST /matches and join at /demo/join/<tier>. Nobody was charged.";
+const REVIEWS_PAUSED_MSG = "Sealed reviews are paused for a moment. Nobody was charged; try again later.";
 const paidPaused = (env: Env) => env.PAID_PAUSED === "true";
+/** The wrangler secret or the phone switch (POST /admin/pause). */
+async function paidPausedNow(env: Env) {
+  return paidPaused(env) || (await pauseState(env)).paid;
+}
+async function reviewsPausedNow(env: Env) {
+  return env.REVIEWS_PAUSED === "true" || (await pauseState(env)).reviews;
+}
+
+/** 503 "busy, nothing charged", with the seconds to wait in Retry-After (and in the body, for agents). */
+const busy = (retryAfterS: number, what: string) =>
+  new Response(
+    JSON.stringify({ error: `busy: ${what} Nothing was charged; retry in about ${retryAfterS} s.`, busy: true, retry_after_s: retryAfterS }),
+    { status: 503, headers: { "content-type": "application/json", "retry-after": String(retryAfterS) } },
+  );
+
+/** Runs after the response when the platform allows it (waitUntil), otherwise right away. */
+async function inBackground(c: any, p: Promise<unknown>) {
+  try {
+    c.executionCtx.waitUntil(p);
+  } catch {
+    await p;
+  }
+}
 
 const paidRoute = async (c: any, next: any) => {
   // Checked before the paywall, so a paused service never asks anyone to pay.
-  if (paidPaused(c.env)) return err(503, PAUSED_MSG);
+  if (await paidPausedNow(c.env)) return err(503, PAUSED_MSG);
   if (c.env.PAYMENTS_ENABLED === "false") return next();
-  return getPaywall(c.env)(c, next);
+  const hadPayment = !!c.req.header("x-payment");
+  const t0 = Date.now();
+  let handlerRan = false;
+  let handlerStatus: number | undefined;
+  let handlerMs = 0;
+  const r = await getPaywall(c.env)(c, async () => {
+    handlerRan = true;
+    const h0 = Date.now();
+    await next();
+    handlerMs = Date.now() - h0;
+    handlerStatus = c.res?.status;
+  });
+  const final: Response | undefined = r instanceof Response ? r : c.res;
+  if (hadPayment && final) {
+    let errorText = "";
+    if (final.status === 402) errorText = String(((await final.clone().json().catch(() => ({}))) as any)?.error ?? "");
+    const o = classifyPaidResponse({ hadPayment, handlerRan, handlerStatus, status: final.status, errorText });
+    const facilitatorMs = Date.now() - t0 - handlerMs;
+    console.log(JSON.stringify({ payment: o.kind, path: c.req.path, facilitator_ms: facilitatorMs, handler_ms: handlerMs, ...("detail" in o ? { stage: o.stage, detail: o.detail } : {}) }));
+    // A settle failure means the work was done but not paid for: always worth an alert (even when the payer caused it).
+    if ("stage" in o && o.stage === "settle") await inBackground(c, recordEvent(c.env, "settle_failure", `${c.req.path}: ${o.detail}`));
+    if (o.kind === "facilitator_problem") await inBackground(c, recordEvent(c.env, o.credit ? "credit_problem" : "facilitator_problem", `${o.stage} ${c.req.path}: ${o.detail}`));
+  }
+  return r;
 };
+
+/**
+ * Sealed review, before the paywall: pause switches, input checks, the review panel drawn once, the failed-review
+ * allowance, and admission. A request that hasn't paid yet is checked against a cached snapshot of the provider pools
+ * (no slot taken). A paid request takes its reviewer slots BEFORE the payment is verified and keeps them through the
+ * review, so a verified payment never meets a full pool. Any refusal here is before payment: nothing is charged.
+ */
+async function reviewGuard(c: any, next: any) {
+  const tier: ReviewTier = c.req.path === "/review-3" ? "review-3" : "review";
+  const t0 = Date.now();
+  if (await paidPausedNow(c.env)) return err(503, PAUSED_MSG);
+  if (await reviewsPausedNow(c.env)) return err(503, REVIEWS_PAUSED_MSG);
+  const body = await c.req.json().catch(() => null);
+  const v = validateReview(body, tier);
+  if (!v.ok) return err(400, `${v.error} Nothing was charged.`);
+  let commitment;
+  try {
+    commitment = await reviewCommitment(tier, c.env, v.value.panel);
+  } catch (e: any) {
+    return err(400, `${String(e?.message ?? e)} Nothing was charged.`);
+  }
+  if (missingReviewKey(c.env, commitment.models)) return err(503, "Sealed review is temporarily unavailable. Nothing was charged.");
+  const paying = c.env.PAYMENTS_ENABLED === "false" || !!c.req.header("x-payment");
+  if (!paying) {
+    // The first x402 call (no payment yet): answer busy now rather than after the agent signs a payment.
+    const b = await quickBusy(c.env, commitment.models);
+    if (b) return busy(b.retryAfter, "the AI reviewers are at capacity.");
+    c.set("review", { tier, input: v.value, commitment, t0 });
+    return next();
+  }
+  // A failed review isn't charged, so failed reviews are capped per address per day: nobody gets free AI calls in bulk.
+  const caller = await callerHash(c);
+  const failLimit = Number(c.env.REVIEW_FAIL_LIMIT || 10);
+  if (caller && c.env.LEDGER) {
+    let f: any;
+    try {
+      f = await ledgerJson(c.env, caller, "review-fails", { caller, limit: failLimit, global_limit: shardLimit(c.env.REVIEW_FAIL_GLOBAL_LIMIT, 500) });
+    } catch (e: any) {
+      await recordEvent(c.env, "ledger_error", `review-fails: ${String(e?.message ?? e)}`);
+      return err(503, "Sealed review is temporarily unavailable (its usage limits can't be checked right now). Nothing was charged; try again in a minute.");
+    }
+    if (f.blocked)
+      return err(
+        429,
+        f.count >= failLimit + (f.ok ?? 0)
+          ? `review_fail_limit: too many failed reviews from your IP address today (${failLimit}, plus one per successful review). Resets at 00:00 UTC. Nothing was charged.`
+          : `free_failure_ceiling: failed reviews across all users hit today's ceiling, so addresses without a successful review today are paused until 00:00 UTC. Nothing was charged.`,
+      );
+  }
+  const slots = await acquireSlots(c.env, commitment.models, { leaseMs: REVIEWER_BUDGET_MS + 30_000, waitMs: GATE_MAX_WAIT_MS });
+  if (!slots.ok) return busy(slots.retryAfter, slots.reason === "provider_cap" ? "the AI provider's account limit was reached; reviews resume when it's lifted." : "the AI reviewers are at capacity.");
+  c.set("review", { tier, input: v.value, commitment, t0, lease: slots.lease, caller, failLimit });
+  try {
+    await next();
+  } finally {
+    await slots.lease.release(); // normally already released by the handler; a second call does nothing
+  }
+}
+
+/** Judge seats: refuse before payment when the match's judges are closed by a provider cap or their queue is full.
+ * Judging itself happens later; this only avoids taking money when we already know it can't start soon. */
+async function judgeJoinGuard(c: any, next: any) {
+  if (!gatesOn(c.env)) return next();
+  const body: any = await c.req.json().catch(() => null);
+  const id = body?.match_id;
+  if (typeof id !== "string" || !ID_RE.test(id)) return next(); // the handler gives the proper error, before payment settles
+  const status: any = await (await forward(c.env, id, "status")).json().catch(() => null);
+  const models: string[] = status?.judge ? (status.judge.panel ?? [{ model: status.judge.model }]).map((p: any) => p.model) : [];
+  const b = models.length ? await quickBusy(c.env, models) : null;
+  if (b) return busy(b.retryAfter, "this match's AI judges are at capacity.");
+  return next();
+}
+
+for (const t of ["judge", "judge-2", "judge-3"]) {
+  app.use(`/join/${t}`, judgeJoinGuard);
+  app.use(`/host/join/${t}`, judgeJoinGuard);
+}
+app.use("/review", reviewGuard);
+app.use("/review-3", reviewGuard);
 app.use("/join/*", paidRoute);
 app.use("/host/join/*", paidRoute);
 app.use("/review", paidRoute);
@@ -244,15 +375,20 @@ app.get("/llms.txt", (c) => {
   return c.text(llmsTxt({ ...prices(c.env), ...reviewPrices(c.env) }, base, c.env.DEMO_PER_IP_LIMIT || "20"));
 });
 
-// Health check for uptime monitors (free, no AI calls, no payments). 200 = matches can run; 503 = something is broken.
+// Health check for uptime monitors (free, no AI calls, no payments). 200 + "status":"ok" = all good; "degraded" names
+// the reasons (a provider cap, high failure rate, payment facilitator problems, ledger errors); 503 = can't run at all.
+// The full answer is cached for 30 s per isolate, so a monitor (or anyone) polling it costs almost nothing.
+let healthCache: { at: number; body: any; status: number } | null = null;
 app.get("/health", async (c) => {
   const env = c.env;
+  if (healthCache && Date.now() - healthCache.at < 30_000) return c.json(healthCache.body, healthCache.status as any);
   const signing = !!env.SIGNING_KEY && !!env.PUBLIC_KEY;
-  let records = !env.LEDGER ? "off" : "ok";
+  let records: "ok" | "error" | "off" = !env.LEDGER ? "off" : "ok";
   if (env.LEDGER) {
     try {
       const r = await ledgerCall(env, "agent", undefined, `?wallet=0x${"0".repeat(40)}`);
       if (r.status >= 500) records = "error";
+      await ledgerJson(env, "0", "demo-quota", { limit: 0, per_caller: 0 }, true); // one shard answers (limit 0: counts nothing)
     } catch {
       records = "error";
     }
@@ -260,21 +396,73 @@ app.get("/health", async (c) => {
   const judges = Object.fromEntries(
     (["judge", "judge-2", "judge-3"] as const).map((t) => [t, missingJudgeKey(env, tierModels(env, t)) ? "unavailable" : "ok"]),
   );
+  const pools = gatesOn(env) ? [...new Set([...poolsOfProvider(env, "anthropic"), "openrouter"])] : [];
+  const gates = pools.length ? await gateStats(env, pools) : {};
+  const events = await healthEvents(env).catch(() => []);
+  const unjudged = await listUnjudged(env).catch(() => []);
+  const verdict = evaluateHealth({ gates, events, ledger: records, unjudgedOpen: unjudged.filter((u) => !u.refunded).length });
+  const pause = await pauseState(env);
+  const paused = paidPaused(env) || pause.paid;
+  const reviewsPaused = env.REVIEWS_PAUSED === "true" || pause.reviews;
   const ok = signing && records !== "error";
-  return c.json(
-    {
-      ok,
-      status: ok ? (Object.values(judges).every((v) => v === "ok") && !paidPaused(env) ? "operational" : "degraded") : "down",
-      checks: {
-        receipts_signing: signing ? "ok" : "missing key",
-        records,
-        payments: env.PAYMENTS_ENABLED === "false" ? "off" : paidPaused(env) ? "paused" : "on",
-        judges,
-      },
-      time: new Date().toISOString(),
+  const allJudges = Object.values(judges).every((v) => v === "ok");
+  const status = !ok ? "down" : verdict.degraded || !allJudges ? "degraded" : paused || reviewsPaused ? "paused" : "ok";
+  const body = {
+    ok,
+    status,
+    reasons: [...verdict.reasons, ...(allJudges ? [] : ["judge_key_missing"])],
+    warnings: verdict.warnings,
+    checks: {
+      receipts_signing: signing ? "ok" : "missing key",
+      records,
+      payments: env.PAYMENTS_ENABLED === "false" ? "off" : paused ? "paused" : "on",
+      reviews: reviewsPaused || paused ? "paused" : "on",
+      judges,
+      providers: Object.fromEntries(
+        Object.entries(gates).map(([p, g]: [string, any]) => [p, g?.error ? "unreachable" : g?.tripped ? "capped" : g?.full ? "full" : g?.throttled_until ? "throttled" : "ok"]),
+      ),
     },
-    ok ? 200 : 503,
-  );
+    time: new Date().toISOString(),
+  };
+  healthCache = { at: Date.now(), body, status: ok ? 200 : 503 };
+  return c.json(body, ok ? 200 : 503);
+});
+
+// ---------- operator controls (Authorization: Bearer <ADMIN_TOKEN>; 404 when no token is configured) ----------
+
+async function admin(c: any): Promise<Response | null> {
+  if (!c.env.ADMIN_TOKEN) return err(404, "Not found. GET / for how to use this service.");
+  if (!(await adminOk(c.env, c.req.header("authorization")))) return err(401, "Wrong or missing admin token.");
+  return null;
+}
+
+// Pause or resume from a phone (an iPhone Shortcut): {"scope":"paid"|"reviews","on":true|false}. Applies within 15 s.
+app.post("/admin/pause", async (c) => {
+  const denied = await admin(c);
+  if (denied) return denied;
+  const body: any = await c.req.json().catch(() => null);
+  if (!["paid", "reviews"].includes(body?.scope) || typeof body?.on !== "boolean") return err(400, 'Send {"scope":"paid"|"reviews","on":true|false}.');
+  healthCache = null;
+  return c.json(await setPause(c.env, body.scope, body.on));
+});
+
+// Paid judge matches that couldn't be judged: refund these wallets from the fee wallet, then mark them refunded.
+app.post("/admin/unjudged", async (c) => {
+  const denied = await admin(c);
+  if (denied) return denied;
+  const body: any = await c.req.json().catch(() => ({}));
+  if (typeof body?.refunded_match_id === "string") await markRefunded(c.env, body.refunded_match_id);
+  return c.json(await listUnjudged(c.env));
+});
+
+// Reopen provider pools after a spend cap was lifted (instead of waiting for the hourly probe).
+app.post("/admin/gate-reset", async (c) => {
+  const denied = await admin(c);
+  if (denied) return denied;
+  const pools = gatesOn(c.env) ? [...new Set([...poolsOfProvider(c.env, "anthropic"), "openrouter"])] : [];
+  await resetPools(c.env, pools);
+  healthCache = null;
+  return c.json({ ok: true, reset: pools });
 });
 
 // The exact judge setup, so anyone can check the prompt_sha256 in a match or receipt.
@@ -316,6 +504,8 @@ const PANEL_CHOICE_HELP =
  * an IP and can't link the same caller across days. Undefined when there's no IP header (local tests). */
 async function callerHash(c: any): Promise<string | undefined> {
   let ip: string | undefined = c.req.header("cf-connecting-ip");
+  // Staging load tests stand in for many callers with this header; production never reads it.
+  if (c.env.STAGING === "true" && c.env.NETWORK !== "base" && c.req.header("x-test-caller")) ip = `test:${c.req.header("x-test-caller")}`;
   // One IPv6 connection usually controls a whole /64 block, so count the block, not each address in it.
   if (ip && ip.includes(":")) ip = ipv6Prefix64(ip);
   const day = new Date().toISOString().slice(0, 10);
@@ -323,47 +513,36 @@ async function callerHash(c: any): Promise<string | undefined> {
 }
 
 async function handleReview(c: any, tier: ReviewTier) {
-  const body = await c.req.json().catch(() => null);
-  const v = validateReview(body, tier);
-  if (!v.ok) return err(400, `${v.error} Nothing was charged.`);
-  let commitment;
-  try {
-    commitment = await reviewCommitment(tier, c.env, v.value.panel);
-  } catch (e: any) {
-    return err(400, `${String(e?.message ?? e)} Nothing was charged.`);
-  }
-  const missing = missingReviewKey(c.env, commitment.models);
-  if (missing) return err(503, "Sealed review is temporarily unavailable. Nothing was charged.");
-  const keys = { ANTHROPIC_API_KEY: c.env.ANTHROPIC_API_KEY, OPENROUTER_API_KEY: c.env.OPENROUTER_API_KEY };
-  // A failed review isn't charged, so cap failed reviews per address per day: nobody gets free AI calls in bulk.
-  const caller = await callerHash(c);
-  const failLimit = Number(c.env.REVIEW_FAIL_LIMIT || 10);
+  // reviewGuard (before the paywall) already checked the input, drew the panel and took the reviewer slots.
+  const g = c.get("review") as { tier: ReviewTier; input: any; commitment: any; t0: number; lease?: SlotLease; caller?: string; failLimit?: number } | undefined;
+  if (!g || g.tier !== tier || !g.lease) return err(503, "Sealed review is temporarily unavailable. Nothing was charged.");
+  const { input, commitment, lease, caller } = g;
+  const failLimit = g.failLimit ?? 10;
+  const keys = { ANTHROPIC_API_KEY: c.env.ANTHROPIC_API_KEY, OPENROUTER_API_KEY: c.env.OPENROUTER_API_KEY, fake: fakeAiConfig(c.env) };
   const started = Date.now();
-  if (caller && c.env.LEDGER) {
-    const f: any = await (await ledgerCall(c.env, "review-fails", { caller, limit: failLimit, global_limit: Number(c.env.REVIEW_FAIL_GLOBAL_LIMIT || 500) })).json().catch(() => ({}));
-    if (f.blocked)
-      return err(
-        429,
-        f.count >= failLimit + (f.ok ?? 0)
-          ? `review_fail_limit: too many failed reviews from your IP address today (${failLimit}, plus one per successful review). Resets at 00:00 UTC. Nothing was charged.`
-          : `free_failure_ceiling: failed reviews across all users hit today's ceiling, so addresses without a successful review today are paused until 00:00 UTC. Nothing was charged.`,
-      );
-  }
-  let votes;
-  try {
-    // In parallel, so no reviewer sees another's verdict.
-    votes = await Promise.all(commitment.models.map((m, i) => runOneReviewer(keys, m, i + 1, v.value)));
-  } catch (e: any) {
-    console.error(`review ${tier} failed after ${Date.now() - started}ms: ${String(e?.message ?? e).slice(0, 200)}`);
-    if (caller && c.env.LEDGER) await ledgerCall(c.env, "review-fails", { caller, limit: failLimit, record: true }).catch(() => {});
+  // Time spent waiting for a slot and verifying the payment comes out of the reviewers' budget, so the whole
+  // review still ends well inside the 300 s payment window.
+  const budgetMs = Math.max(REVIEWER_BUDGET_MS - (started - g.t0), 20_000);
+  // In parallel, so no reviewer sees another's verdict. All are waited for before the slots go back.
+  const settled = await Promise.allSettled(
+    commitment.models.map((m: string, i: number) => runOneReviewer(keys, m, i + 1, input, undefined, { budgetMs, observe: (o) => lease.observe(i, o) })),
+  );
+  await lease.release();
+  const failed = settled.find((r) => r.status === "rejected") as PromiseRejectedResult | undefined;
+  if (failed) {
+    const msg = String(failed.reason?.message ?? failed.reason);
+    console.error(`review ${tier} failed after ${Date.now() - started}ms: ${msg.slice(0, 200)}`);
+    if (caller && c.env.LEDGER) await ledgerJson(c.env, caller, "review-fails", { caller, limit: failLimit, record: true }).catch(() => {});
     // Returning an error means the payment never settles: a failed review costs the agent nothing.
-    return err(502, `A reviewer didn't return a usable verdict (${String(e?.message ?? e).slice(0, 200)}). Nothing was charged; try again.`);
+    if (lease.capHit()) return busy(600, "the AI provider's account limit was reached; reviews resume when it's lifted.");
+    return err(502, `A reviewer didn't return a usable verdict (${msg.slice(0, 200)}). Nothing was charged; try again.`);
   }
+  const votes = settled.map((r) => (r as PromiseFulfilledResult<any>).value);
   console.log(`review ${tier} ok in ${Date.now() - started}ms: ${votes.map((v) => `${v.model}=${v.verdict}`).join(" ")}`);
-  if (caller && c.env.LEDGER) await ledgerCall(c.env, "review-fails", { caller, limit: failLimit, record_ok: true }).catch(() => {});
+  if (caller && c.env.LEDGER) await ledgerJson(c.env, caller, "review-fails", { caller, limit: failLimit, record_ok: true }).catch(() => {});
   const payload = await reviewPayload({
     tier,
-    input: v.value,
+    input,
     commitment,
     votes,
     payer: payerFromPaymentHeader(c.req.header("x-payment")),
@@ -448,8 +627,13 @@ app.post("/matches", async (c) => {
     // One-way, salted with a server secret and today's date, so it can't be turned back into an IP
     // and can't link the same caller across days.
     const caller = await callerHash(c);
-    const q = await ledgerCall(c.env, "demo-quota", { limit, per_caller, caller });
-    if (q.status === 429) return q;
+    try {
+      const q = await ledgerJson(c.env, caller, "demo-quota", { limit: caller ? shardLimit(String(limit), 2000) : limit, per_caller, caller }, true);
+      if (q.__status === 429) return err(429, q.error);
+    } catch (e: any) {
+      await recordEvent(c.env, "ledger_error", `demo-quota: ${String(e?.message ?? e)}`);
+      return err(503, "Demo matches are temporarily unavailable (their daily limit can't be checked right now). Try again in a minute.");
+    }
   }
   // With a shared key, both agents compute the same match id, so nobody has to pass an id around.
   const id = typeof input?.key === "string" && KEY_RE.test(input.key) ? await idForKey(input.key, demo) : randomToken(12);
@@ -590,6 +774,28 @@ function ledgerCall(env: Env, action: string, body?: unknown, query = "") {
       body: body === undefined ? undefined : JSON.stringify(body),
     })
     .then((r) => new Response(r.body, { status: r.status, headers: new Headers(r.headers) }));
+}
+
+/** Per-caller daily counters live in 16 ledger shards picked by the caller hash, so no single object takes every call. */
+function ledgerShard(env: Env, caller?: string) {
+  return env.LEDGER!.get(env.LEDGER!.idFromName(ledgerShardName(caller)));
+}
+
+/** A ledger counter call that fails closed: throws on any error, 5xx or unreadable answer (allow429: a 429 is an answer). */
+async function ledgerJson(env: Env, caller: string | undefined, action: string, body: unknown, allow429 = false): Promise<any> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const res = await Promise.race([
+      ledgerShard(env, caller).fetch(`https://ledger/${action}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }),
+      new Promise<never>((_, rej) => (timer = setTimeout(() => rej(new Error("ledger timed out")), 10_000))),
+    ]);
+    if (!res.ok && !(allow429 && res.status === 429)) throw new Error(`ledger answered ${res.status}`);
+    const data: any = await res.json();
+    if (!data || typeof data !== "object") throw new Error("ledger answer unreadable");
+    return { ...data, __status: res.status };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 app.get("/agents/:wallet", async (c) => {
