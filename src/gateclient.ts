@@ -38,7 +38,7 @@ async function gateCall(env: Env, pool: string, action: string, body?: unknown, 
     if (!res.ok) throw new Error(`gate answered ${res.status}`);
     return await res.json();
   } finally {
-    clearTimeout(timer);
+    if (timer !== undefined) clearTimeout(timer);
   }
 }
 

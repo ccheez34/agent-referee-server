@@ -828,7 +828,7 @@ async function ledgerJson(env: Env, caller: string | undefined, action: string, 
     if (!data || typeof data !== "object") throw new Error("ledger answer unreadable");
     return { ...data, __status: res.status };
   } finally {
-    clearTimeout(timer);
+    if (timer !== undefined) clearTimeout(timer);
   }
 }
 
