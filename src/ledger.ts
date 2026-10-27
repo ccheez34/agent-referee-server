@@ -151,7 +151,7 @@ export class Ledger {
     if (!st.list || !st.delete) return;
     const today = (await st.get<string>("counters_day")) ?? new Date(this.now()).toISOString().slice(0, 10);
     let deleted = 0;
-    for (const prefix of ["rf:", "ro:", "rft:", "dm:", "dmc:", "reviewfail:", "reviewok:", "reviewfailtotal:", "demo:", "demoip:"]) {
+    for (const prefix of ["rf:", "ro:", "rft:", "rfi:", "dm:", "dmc:", "reviewfail:", "reviewok:", "reviewfailtotal:", "demo:", "demoip:"]) {
       while (deleted < 5_000) {
         const found = await st.list({ prefix, limit: 128 });
         const old = [...found.keys()].filter((k) => !k.slice(prefix.length).startsWith(today) || prefix.startsWith("review") || prefix.startsWith("demo"));
@@ -164,7 +164,16 @@ export class Ledger {
     if (deleted >= 5_000) await st.setAlarm(this.now() + 1_000);
   }
 
+  // One counter request at a time: each is a read-check-write, and two interleaved ones could both pass a check.
+  // (Durable Object input gates already make storage-only sequences atomic; this keeps it true whatever the code awaits.)
+  private chain: Promise<unknown> = Promise.resolve();
   async fetch(req: Request): Promise<Response> {
+    const run = this.chain.then(() => this.handle(req), () => this.handle(req));
+    this.chain = run.catch(() => {});
+    return run;
+  }
+
+  private async handle(req: Request): Promise<Response> {
     const url = new URL(req.url);
     const action = url.pathname.replace(/^\//, "");
     const body: any = req.method === "POST" ? await req.json().catch(() => null) : null;
@@ -203,6 +212,15 @@ export class Ledger {
       const who = typeof body?.caller === "string" ? body.caller : "";
       const limit = Number.isFinite(body?.limit) ? body.limit : 10;
       const st = this.state.storage;
+      // Reviews in flight for this caller count against the allowance until they're recorded, so many parallel
+      // paid reviews can't all pass the check before any failure is written. A reservation left by a crashed
+      // request expires after 5 minutes (longer than any review).
+      const ik = `rfi:${day}:${who}`;
+      let inflight = who ? ((await st.get<{ id: string; t: number }[]>(ik)) ?? []).filter((r) => this.now() - r.t < 300_000) : [];
+      if (typeof body?.release_token === "string" && who) {
+        inflight = inflight.filter((r) => r.id !== body.release_token);
+        await st.put(ik, inflight);
+      }
       let ok = who ? ((await st.get<number>(`ro:${day}:${who}`)) ?? 0) : 0;
       if (body?.record_ok && who) await st.put(`ro:${day}:${who}`, ++ok);
       let total = (await st.get<number>(`rft:${day}`)) ?? 0;
@@ -217,7 +235,14 @@ export class Ledger {
       // past it, only addresses with a successful review today can keep going.
       const globalLimit = Number.isFinite(body?.global_limit) ? body.global_limit : 500;
       const overGlobal = total >= globalLimit && ok === 0;
-      return json(200, { count, ok, limit, total, blocked: count >= limit + ok || overGlobal });
+      const blocked = count + inflight.length >= limit + ok || overGlobal;
+      let token: string | undefined;
+      if (body?.reserve && who && !blocked) {
+        token = crypto.randomUUID();
+        inflight.push({ id: token, t: this.now() });
+        await st.put(ik, inflight);
+      }
+      return json(200, { count, ok, limit, total, inflight: inflight.length, blocked, ...(token ? { token } : {}) });
     }
 
     if (action === "demo-quota") {

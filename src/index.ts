@@ -15,7 +15,7 @@ import {
 import { Gate, GATE_MAX_WAIT_MS } from "./gate.ts";
 import { Health, adminOk, evaluateHealth, healthEvents, listUnjudged, markRefunded, pauseState, recordEvent, recordSettleFailure, setPause, walletBlocked } from "./health.ts";
 import { acquireSlots, gateStats, gatesOn, poolsOfProvider, quickBusy, resetPools, type SlotLease } from "./gateclient.ts";
-import { classifyPaidResponse, plausiblePayment, priceMicro } from "./paywatch.ts";
+import { classifyPaidResponse, plausiblePayment, priceMicro, reviewBudget } from "./paywatch.ts";
 import { fakeAiConfig } from "./fakeai.ts";
 
 export { MatchRoom, Ledger, Gate, Health };
@@ -163,10 +163,11 @@ const busy = (retryAfterS: number, what: string) =>
 
 /** Runs after the response when the platform allows it (waitUntil), otherwise right away. */
 async function inBackground(c: any, p: Promise<unknown>) {
+  const safe = p.catch((e) => console.error(`background task failed: ${String(e?.message ?? e).slice(0, 200)}`));
   try {
-    c.executionCtx.waitUntil(p);
+    c.executionCtx.waitUntil(safe);
   } catch {
-    await p;
+    await safe;
   }
 }
 
@@ -245,29 +246,42 @@ async function reviewGuard(c: any, next: any) {
     c.set("review", { tier, input: v.value, commitment, t0, caller, failLimit });
     return next();
   }
-  const refused = await failLimitCheck(c, caller, failLimit);
-  if (refused) return refused;
+  const check = await failLimitCheck(c, caller, failLimit);
+  if (check instanceof Response) return check;
+  const reservation = check?.token;
   const slots = await acquireSlots(c.env, commitment.models, { leaseMs: REVIEWER_BUDGET_MS + 30_000, waitMs: GATE_MAX_WAIT_MS });
-  if (!slots.ok) return busy(slots.retryAfter, busyWhat(slots.reason));
-  c.set("review", { tier, input: v.value, commitment, t0, lease: slots.lease, caller, failLimit });
+  if (!slots.ok) {
+    await releaseReservation(c, caller, failLimit, reservation);
+    return busy(slots.retryAfter, busyWhat(slots.reason));
+  }
+  const g: any = { tier, input: v.value, commitment, t0, lease: slots.lease, caller, failLimit, reservation };
+  c.set("review", g);
   try {
     await next();
   } finally {
     await slots.lease.release(); // normally already released by the handler; a second call does nothing
+    if (!g.recorded) await releaseReservation(c, caller, failLimit, reservation); // the paywall refused it, or it threw
   }
 }
 
-/** The failed-review allowance for this caller; fails closed when the ledger can't answer. Null = go ahead. */
-async function failLimitCheck(c: any, caller: string | undefined, failLimit: number): Promise<Response | null> {
+/** Give back an in-flight reservation that ended without a result (best effort; it expires after 5 minutes anyway). */
+async function releaseReservation(c: any, caller: string | undefined, failLimit: number, token?: string) {
+  if (!token || !caller || !c.env.LEDGER) return;
+  await ledgerJson(c.env, caller, "review-fails", { caller, limit: failLimit, release_token: token }).catch(() => {});
+}
+
+/** The failed-review allowance for this caller, reserving one in-flight review (released when the result is
+ * recorded). Fails closed when the ledger can't answer. Returns a refusal, or the reservation token (or null). */
+async function failLimitCheck(c: any, caller: string | undefined, failLimit: number): Promise<Response | { token?: string } | null> {
   if (!caller || !c.env.LEDGER) return null;
   let f: any;
   try {
-    f = await ledgerJson(c.env, caller, "review-fails", { caller, limit: failLimit, global_limit: shardLimit(c.env.REVIEW_FAIL_GLOBAL_LIMIT, 500) });
+    f = await ledgerJson(c.env, caller, "review-fails", { caller, limit: failLimit, global_limit: shardLimit(c.env.REVIEW_FAIL_GLOBAL_LIMIT, 500), reserve: true });
   } catch (e: any) {
     await recordEvent(c.env, "ledger_error", `review-fails: ${String(e?.message ?? e)}`);
     return err(503, "Sealed review is temporarily unavailable (its usage limits can't be checked right now). Nothing was charged; try again in a minute.");
   }
-  if (!f.blocked) return null;
+  if (!f.blocked) return { token: f.token };
   return err(
     429,
     f.count >= failLimit + (f.ok ?? 0)
@@ -538,42 +552,64 @@ async function callerHash(c: any): Promise<string | undefined> {
 
 async function handleReview(c: any, tier: ReviewTier) {
   // reviewGuard (before the paywall) already checked the input, drew the panel and took the reviewer slots.
-  const g = c.get("review") as { tier: ReviewTier; input: any; commitment: any; t0: number; lease?: SlotLease; caller?: string; failLimit?: number } | undefined;
+  const g = c.get("review") as
+    | { tier: ReviewTier; input: any; commitment: any; t0: number; lease?: SlotLease; caller?: string; failLimit?: number; reservation?: string; recorded?: boolean }
+    | undefined;
   if (!g || g.tier !== tier) return err(503, "Sealed review is temporarily unavailable. Nothing was charged.");
+  const failLimit = g.failLimit ?? 10;
   if (!g.lease) {
-    // The payment header didn't look right to the quick local check, but the facilitator verified it: check the
-    // allowance and take the slots now. A refusal here is still >= 400, so nothing settles.
-    const refused = await failLimitCheck(c, g.caller, g.failLimit ?? 10);
-    if (refused) return refused;
+    // Rare by design: the quick local check found this payment header implausible, yet the facilitator verified it.
+    // Real clients shouldn't land here (if they do, the local check needs fixing, hence the log). Check the
+    // allowance and take the slots now; any refusal is still >= 400, so nothing settles.
+    console.warn(JSON.stringify({ late_admission: true, path: c.req.path, note: "verified payment failed the local plausibility check" }));
+    const check = await failLimitCheck(c, g.caller, failLimit);
+    if (check instanceof Response) return check;
+    g.reservation = check?.token;
     const late = await acquireSlots(c.env, g.commitment.models, { leaseMs: REVIEWER_BUDGET_MS + 30_000, waitMs: GATE_MAX_WAIT_MS });
-    if (!late.ok) return busy(late.retryAfter, busyWhat(late.reason));
+    if (!late.ok) {
+      await releaseReservation(c, g.caller, failLimit, g.reservation);
+      g.recorded = true;
+      return busy(late.retryAfter, busyWhat(late.reason));
+    }
     g.lease = late.lease;
   }
   const { input, commitment, caller } = g;
   const lease = g.lease;
-  const failLimit = g.failLimit ?? 10;
-  const keys = { ANTHROPIC_API_KEY: c.env.ANTHROPIC_API_KEY, OPENROUTER_API_KEY: c.env.OPENROUTER_API_KEY, fake: fakeAiConfig(c.env) };
   const started = Date.now();
-  // Time spent waiting for a slot and verifying the payment comes out of the reviewers' budget, so the whole
-  // review still ends well inside the 300 s payment window.
-  const budgetMs = Math.max(REVIEWER_BUDGET_MS - (started - g.t0), 20_000);
-  // In parallel, so no reviewer sees another's verdict. All are waited for before the slots go back.
-  const settled = await Promise.allSettled(
-    commitment.models.map((m: string, i: number) => runOneReviewer(keys, m, i + 1, input, undefined, { budgetMs, observe: (o) => lease.observe(i, o) })),
-  );
-  await lease.release();
+  let settled: PromiseSettledResult<any>[];
+  try {
+    // What's left of the reviewers' budget, never past the payment authorization's own deadline.
+    const budgetMs = reviewBudget({ budgetMs: REVIEWER_BUDGET_MS, elapsedMs: started - g.t0, header: c.req.header("x-payment") });
+    if (budgetMs === null) return busy(10, "not enough time was left in this payment's window for a full review.");
+    const keys = { ANTHROPIC_API_KEY: c.env.ANTHROPIC_API_KEY, OPENROUTER_API_KEY: c.env.OPENROUTER_API_KEY, fake: fakeAiConfig(c.env) };
+    // In parallel, so no reviewer sees another's verdict. All are waited for before the slots go back.
+    settled = await Promise.allSettled(
+      commitment.models.map((m: string, i: number) => runOneReviewer(keys, m, i + 1, input, undefined, { budgetMs, observe: (o) => lease.observe(i, o) })),
+    );
+  } finally {
+    await lease.release();
+  }
+  const record = async (what: "record" | "record_ok") => {
+    g.recorded = true;
+    if (caller && c.env.LEDGER) await ledgerJson(c.env, caller, "review-fails", { caller, limit: failLimit, [what]: true, release_token: g.reservation }).catch(() => {});
+  };
   const failed = settled.find((r) => r.status === "rejected") as PromiseRejectedResult | undefined;
   if (failed) {
     const msg = String(failed.reason?.message ?? failed.reason);
     console.error(`review ${tier} failed after ${Date.now() - started}ms: ${msg.slice(0, 200)}`);
-    if (caller && c.env.LEDGER) await ledgerJson(c.env, caller, "review-fails", { caller, limit: failLimit, record: true }).catch(() => {});
     // Returning an error means the payment never settles: a failed review costs the agent nothing.
-    if (lease.capHit()) return busy(600, "the AI provider's account limit was reached; reviews resume when it's lifted.");
+    if (lease.capHit()) {
+      // The provider's account limit isn't the caller's fault: don't count it against their allowance.
+      await releaseReservation(c, caller, failLimit, g.reservation);
+      g.recorded = true;
+      return busy(600, "the AI provider's account limit was reached; reviews resume when it's lifted.");
+    }
+    await record("record");
     return err(502, `A reviewer didn't return a usable verdict (${msg.slice(0, 200)}). Nothing was charged; try again.`);
   }
   const votes = settled.map((r) => (r as PromiseFulfilledResult<any>).value);
   console.log(`review ${tier} ok in ${Date.now() - started}ms: ${votes.map((v) => `${v.model}=${v.verdict}`).join(" ")}`);
-  if (caller && c.env.LEDGER) await ledgerJson(c.env, caller, "review-fails", { caller, limit: failLimit, record_ok: true }).catch(() => {});
+  await record("record_ok");
   const payload = await reviewPayload({
     tier,
     input,

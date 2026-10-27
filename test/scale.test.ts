@@ -5,7 +5,7 @@ import { Gate } from "../src/gate.ts";
 import { acquireSlots, quickBusy, slotsFor, poolsOfProvider, _clearSnapshots } from "../src/gateclient.ts";
 import { classifyStatus, isSpendCap, poolOf, rateInfo, summarize, ProviderCapError } from "../src/providers.ts";
 import { Health, adminOk, evaluateHealth, pauseState, recordEvent, _resetHealthCaches } from "../src/health.ts";
-import { classifyPaidResponse, plausiblePayment, priceMicro } from "../src/paywatch.ts";
+import { classifyPaidResponse, plausiblePayment, priceMicro, reviewBudget } from "../src/paywatch.ts";
 import { recordSettleFailure, walletBlocked } from "../src/health.ts";
 import { fakeAiConfig, fakeModelResponse } from "../src/fakeai.ts";
 import { Ledger, ledgerShardName, shardLimit, LEDGER_SHARDS } from "../src/ledger.ts";
@@ -461,4 +461,49 @@ test("work delivered but not paid: the wallet is refused from then on, and repea
   assert.match(String(p.auto), /3 payments failed to settle/);
   const { setPause } = await import("../src/health.ts");
   assert.equal((await setPause(env, "paid", false)).auto, undefined, "resuming clears the automatic pause");
+});
+
+// ---------- third review round (the payment-path code) ----------
+
+test("parallel paid reviews from one caller can't all slip past the failed-review allowance", async () => {
+  const l = new Ledger({ storage: memStorage() } as any, {} as any);
+  let now = Date.parse("2026-10-27T12:00:00Z");
+  l.now = () => now;
+  const call = async (body: object) => (await (await l.fetch(new Request("https://ledger/review-fails", { method: "POST", body: JSON.stringify(body) }))).json()) as any;
+  const results = await Promise.all(Array.from({ length: 20 }, () => call({ caller: "aa", limit: 3, reserve: true })));
+  const granted = results.filter((r) => r.token);
+  assert.equal(granted.length, 3, "only as many in flight as the allowance");
+  assert.ok(results.filter((r) => r.blocked).length === 17);
+  // One fails, one succeeds, one is given back: the allowance follows.
+  await call({ caller: "aa", limit: 3, record: true, release_token: granted[0].token });
+  await call({ caller: "aa", limit: 3, record_ok: true, release_token: granted[1].token });
+  await call({ caller: "aa", limit: 3, release_token: granted[2].token });
+  const after = await call({ caller: "aa", limit: 3 });
+  assert.deepEqual([after.count, after.ok, after.inflight, after.blocked], [1, 1, 0, false]);
+  // A reservation left by a crashed request stops counting after 5 minutes.
+  const stuck = await call({ caller: "bb", limit: 1, reserve: true });
+  assert.ok(stuck.token);
+  assert.equal((await call({ caller: "bb", limit: 1, reserve: true })).blocked, true);
+  now += 300_001;
+  assert.ok((await call({ caller: "bb", limit: 1, reserve: true })).token);
+});
+
+test("the review's time budget never runs past the payment authorization", () => {
+  const nowMs = 1_900_000_000_000;
+  const h = (validBefore: number) => btoa(JSON.stringify({ payload: { authorization: { validBefore: String(validBefore) } } }));
+  assert.equal(reviewBudget({ budgetMs: 240_000, elapsedMs: 5_000, nowMs }), 235_000);
+  assert.equal(reviewBudget({ budgetMs: 240_000, elapsedMs: 5_000, header: h(nowMs / 1000 + 300), nowMs }), 235_000, "a fresh 300 s authorization leaves the full budget");
+  assert.equal(reviewBudget({ budgetMs: 240_000, elapsedMs: 5_000, header: h(nowMs / 1000 + 120), nowMs }), 90_000, "a slow signer gets a shorter review, ending 30 s before the deadline");
+  assert.equal(reviewBudget({ budgetMs: 240_000, elapsedMs: 5_000, header: h(nowMs / 1000 + 50), nowMs }), null, "too little time left: refuse, uncharged");
+  assert.equal(reviewBudget({ budgetMs: 240_000, elapsedMs: 215_000, nowMs }), null, "no floor that could push past the window");
+  assert.equal(reviewBudget({ budgetMs: 240_000, elapsedMs: 0, header: "garbage", nowMs }), 240_000);
+});
+
+test("a request too big for a pool doesn't make the next caller see it as full", async () => {
+  _clearSnapshots();
+  const ns = gates();
+  const env: any = { GATES: ns, GATE_SLOTS_OPENROUTER: "1" };
+  const r = await acquireSlots(env, ["openai/gpt-6-luna", "google/gemini-3.7-flash"], { leaseMs: 60_000, waitMs: 0 });
+  assert.equal(r.ok, false);
+  assert.equal(await quickBusy(env, ["openai/gpt-6-luna"]), null, "a single OpenRouter reviewer still fits");
 });

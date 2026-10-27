@@ -90,7 +90,8 @@ export async function acquireSlots(env: Env, models: string[], opts: { leaseMs: 
       try {
         const r = await gateCall(env, pool, "acquire", { n: byPool.get(pool)!.length, slots: slotsFor(env, pool), lease_ms: opts.leaseMs, wait_ms: opts.waitMs });
         if (Array.isArray(r?.tokens) && r.tokens.length === byPool.get(pool)!.length) return { pool, tokens: r.tokens as string[] };
-        snapshots.set(pool, { at: Date.now(), full: true });
+        // Only a capacity refusal says anything about the next caller (a request too big for the pool doesn't).
+        if (["queue_full", "wait_timeout", "provider_cap", "closed"].includes(String(r?.reason))) snapshots.set(pool, { at: Date.now(), full: true });
         return { pool, busy: { retryAfter: Number(r?.retry_after_s) || 10, reason: String(r?.reason || "busy") } };
       } catch {
         return { pool, busy: { retryAfter: 5, reason: "gate_unavailable" } };
@@ -111,6 +112,7 @@ export async function acquireSlots(env: Env, models: string[], opts: { leaseMs: 
       if (released) return;
       released = true;
       const capProviders = new Set<Provider>();
+      // Never throws: every gate call below is caught, and a slot not given back expires with its lease.
       await Promise.all(
         granted.map((g) => {
           const entries = byPool.get(g.pool)!.map((modelIndex) => {
@@ -122,7 +124,7 @@ export async function acquireSlots(env: Env, models: string[], opts: { leaseMs: 
         }),
       );
       cap = capProviders.size > 0;
-      for (const p of capProviders) await tripProvider(env, p, "provider_cap");
+      for (const p of capProviders) await tripProvider(env, p, "provider_cap").catch(() => {});
     },
   };
   if (refused.length) {

@@ -58,3 +58,21 @@ export function priceMicro(price: string): number {
   const n = Number(String(price).replace(/^\$/, ""));
   return Number.isFinite(n) ? Math.round(n * 1_000_000) : Number.MAX_SAFE_INTEGER;
 }
+
+/**
+ * How long the reviewers may take: what's left of their own budget since the request arrived, and never past the
+ * payment authorization's validBefore (minus a margin for settling). The window starts when the agent signed, not
+ * when the request reached us, so a slow signer gets a shorter review rather than an expired payment.
+ * Returns null when there isn't enough time left for a real review (the caller refuses, uncharged).
+ */
+export function reviewBudget(opts: { budgetMs: number; elapsedMs: number; header?: string; nowMs?: number; settleMarginMs?: number; minMs?: number }): number | null {
+  let budget = opts.budgetMs - opts.elapsedMs;
+  const nowMs = opts.nowMs ?? Date.now();
+  if (opts.header) {
+    try {
+      const vb = Number(JSON.parse(atob(opts.header))?.payload?.authorization?.validBefore);
+      if (Number.isFinite(vb) && vb > 0) budget = Math.min(budget, vb * 1000 - nowMs - (opts.settleMarginMs ?? 30_000));
+    } catch {}
+  }
+  return budget >= (opts.minMs ?? 30_000) ? budget : null;
+}
