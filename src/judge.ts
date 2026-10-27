@@ -80,9 +80,12 @@ export const JUDGE_MESSAGE_FORMAT_V2 = [
 
 // ---------- v3 (current) ----------
 
-export const JUDGE_FORMAT_VERSION = "agent-referee-judge-v3";
+export const JUDGE_FORMAT_VERSION_V3 = "agent-referee-judge-v3";
+/** v4 (Oct 27): the v3 instructions plus a LENGTH section, so answers fit the reply limit without changing any verdict. */
+export const JUDGE_FORMAT_VERSION = "agent-referee-judge-v4";
 
-export const JUDGE_SYSTEM = `You are a neutral referee settling a disagreement between AI agents that belong to different owners.
+/** v3 instructions, byte-for-byte as before: matches created with v3 keep running exactly these. */
+export const JUDGE_SYSTEM_V3 = `You are a neutral referee settling a disagreement between AI agents that belong to different owners.
 You will receive RULES the parties agreed to in advance and one SUBMISSION per party. You may also receive
 CRITERIA: named, weighted scoring criteria the parties also agreed to in advance.
 
@@ -112,6 +115,25 @@ Respond with ONLY a JSON object, no other text:
  "reasoning": "<2 to 6 sentences tied to the rules>",
  "scores": {"<party label>": {"<criterion name>": <0-10>}}   <- only when CRITERIA are given
 }`;
+
+const V3_TAIL = "\n\nRespond with ONLY a JSON object, no other text:";
+const JUDGE_LENGTH = `
+
+LENGTH: your reply has a fixed size limit, and a reply cut off by it is thrown away. Keep the whole JSON under
+about 600 words: rule_applied and mistrial_reason one sentence each, the reasoning 2 to 6 sentences,
+nothing outside the JSON. Length never changes your judgment: decide the winner (or mistrial), the confidence
+and any scores from your full assessment first, then write them up briefly. Never pick a different winner,
+declare a mistrial, or change a score to save space.`;
+
+/** Current (v4) instructions: v3 with the LENGTH section added before the answer format. */
+export const JUDGE_SYSTEM = JUDGE_SYSTEM_V3.replace(V3_TAIL, JUDGE_LENGTH + V3_TAIL);
+
+/** The instructions a match locked in, by its format version. */
+export function judgeSystemFor(formatVersion: string): string {
+  if (formatVersion === JUDGE_FORMAT_VERSION_V2) return JUDGE_SYSTEM_V2;
+  if (formatVersion === JUDGE_FORMAT_VERSION_V3) return JUDGE_SYSTEM_V3;
+  return JUDGE_SYSTEM;
+}
 
 /** How the user message is built. Part of the fingerprint, so the format can't change silently. */
 export const JUDGE_MESSAGE_FORMAT = [
@@ -409,7 +431,12 @@ function parseVote(text: string, seats: string[], criteria: Criterion[] | undefi
 }
 
 /** One model call: Anthropic directly for Claude ids, OpenRouter (OpenAI-compatible) for "provider/model" ids. */
-export async function callModel(keys: JudgeKeys, model: string, system: string, user: string, signal?: AbortSignal): Promise<Response> {
+/** Answer budget for Claude judges (was 1000). A cut-off answer can't be used, and unused tokens cost nothing.
+ * OpenRouter models get 6000, since reasoning models spend part of it thinking. */
+export const JUDGE_MAX_TOKENS = 4000;
+
+/** anthropicMaxTokens: the answer budget for Claude models (judges and reviewers both get 4000). */
+export async function callModel(keys: JudgeKeys, model: string, system: string, user: string, signal?: AbortSignal, anthropicMaxTokens = JUDGE_MAX_TOKENS): Promise<Response> {
   if (viaOpenRouter(model)) {
     return fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
@@ -438,7 +465,7 @@ export async function callModel(keys: JudgeKeys, model: string, system: string, 
     headers: { "content-type": "application/json", "x-api-key": keys.ANTHROPIC_API_KEY ?? "", "anthropic-version": "2023-06-01" },
     body: JSON.stringify({
       model,
-      max_tokens: 1000,
+      max_tokens: anthropicMaxTokens,
       ...(typeof JUDGE_TEMPERATURE === "number" ? { temperature: JUDGE_TEMPERATURE } : {}),
       system,
       messages: [{ role: "user", content: user }],
@@ -469,16 +496,30 @@ export async function runOneJudge(opts: {
   title?: string;
   criteria?: Criterion[];
   submissions: Record<string, string>;
+  /** Tests only: a shorter per-call limit, and a fake sleep. */
+  callTimeoutMs?: number;
+  sleep?: (ms: number) => Promise<unknown>;
 }): Promise<JudgeVote> {
   const v3 = opts.formatVersion !== JUDGE_FORMAT_VERSION_V2;
   const seats = Object.keys(opts.submissions).sort();
-  const system = v3 ? JUDGE_SYSTEM : JUDGE_SYSTEM_V2;
+  const system = judgeSystemFor(opts.formatVersion);
   const user = v3 ? buildJudgeMessage(opts.rules, opts.submissions, opts.title, opts.criteria, opts.order) : buildJudgeMessageV2(opts.rules, opts.submissions, opts.title);
 
   const keys: JudgeKeys = { ANTHROPIC_API_KEY: opts.apiKey, ...opts.keys };
+  const sleep = opts.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
+  const callTimeoutMs = opts.callTimeoutMs ?? JUDGE_CALL_TIMEOUT_MS;
   let lastErr = "unknown error";
   for (let attempt = 0; attempt < 2; attempt++) {
-    const res = await callModel(keys, opts.model, system, user);
+    let res: Response;
+    try {
+      // Each call has its own time limit, so two tries plus a short wait end inside the match's 2-minute judging limit.
+      res = await callModel(keys, opts.model, system, user, AbortSignal.timeout(callTimeoutMs));
+    } catch (e: any) {
+      const timedOut = e?.name === "TimeoutError" || e?.name === "AbortError";
+      lastErr = timedOut ? `judge timed out after ${Math.round(callTimeoutMs / 1000)}s` : `judge request failed: ${String(e?.message ?? e).slice(0, 150)}`;
+      console.error(`judge ${opts.model} panelist ${opts.panelist}: ${lastErr}`);
+      continue;
+    }
     if (!res.ok) {
       // Keep the provider's own explanation (e.g. low credit balance, unknown model), never the request itself.
       let detail = "";
@@ -488,14 +529,23 @@ export async function runOneJudge(opts: {
       } catch {}
       lastErr = `judge API returned ${res.status}${detail ? `: ${detail}` : ""}`;
       console.error(`judge ${opts.model} panelist ${opts.panelist}: ${lastErr}`);
-      if (res.status >= 400 && res.status < 500 && res.status !== 429) break; // won't fix itself on an immediate retry
+      if (res.status >= 400 && res.status < 500 && res.status !== 429) break; // won't fix itself on a retry
+      // Busy (429) or a provider error (5xx, 529): a short wait before the one retry, so it doesn't pile on.
+      if (attempt === 0) await sleep(judgeRetryDelayMs(res.headers.get("retry-after")));
       continue;
     }
     try {
       const data: any = await res.json();
       if (data?.error) throw new Error(`judge API error: ${String(data.error.message ?? data.error).slice(0, 200)}`);
       const text = answerText(opts.model, data);
-      const v = parseVote(text, seats, opts.criteria, v3);
+      let v;
+      try {
+        v = parseVote(text, seats, opts.criteria, v3);
+      } catch (pe: any) {
+        // An answer cut off at the token limit can't be parsed: say so plainly instead of "unparseable".
+        const cutOff = data?.stop_reason === "max_tokens" || data?.choices?.[0]?.finish_reason === "length";
+        throw cutOff ? new Error("judge ran out of tokens before finishing its answer") : pe;
+      }
       const vote: JudgeVote = { panelist: opts.panelist, model: opts.model, order: opts.order, ...v };
       if (typeof data?.model === "string") vote.model_reported = data.model.slice(0, 120);
       if (v.scores && opts.criteria?.length) vote.totals = criteriaTotals(v.scores, opts.criteria);
@@ -504,7 +554,18 @@ export async function runOneJudge(opts: {
       lastErr = e?.message ?? "judge returned unusable output";
     }
   }
-  throw new Error(lastErr);
+  // Name the judge, so whoever reads the match error knows which AI company's model failed.
+  throw new Error(`${opts.model}: ${lastErr}`);
+}
+
+/** Per-call limit for a judge: two tries (50 s each) plus a wait of at most 5 s fit the match's 2-minute judging limit. */
+export const JUDGE_CALL_TIMEOUT_MS = 50_000;
+
+/** Wait before a judge's one retry: the provider's numeric retry-after, else 1-2 s; always between 1 s and 5 s. */
+export function judgeRetryDelayMs(retryAfter?: string | null, rand: () => number = Math.random): number {
+  const secs = Number(retryAfter);
+  const ms = retryAfter && Number.isFinite(secs) && secs >= 0 ? secs * 1000 : 1000 + 1000 * rand();
+  return Math.round(Math.min(Math.max(ms, 1000), 5000));
 }
 
 /** Single judge (v2 or v3). Kept for callers of the original API. */

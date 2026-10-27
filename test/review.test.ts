@@ -3,6 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   buildReviewMessage, decideReview, parseReview, reviewCommitment, reviewModels, reviewPayload, runOneReviewer, validateReview, REVIEW_LIMITS,
+  REVIEWER_BUDGET_MS, REVIEWER_MAX_TRIES, REVIEWER_MAX_TOKENS, REVIEWER_MIN_TRY_MS, retryDelayMs,
 } from "../src/review.ts";
 import { signReceipt } from "../src/receipt.ts";
 import { AgentReferee, verifyReviewOutcome, verifySignature, verifyOutcome } from "agent-referee-client";
@@ -100,11 +101,116 @@ test("review-3 end to end: three companies in parallel, signed receipt, the clie
 
 test("a reviewer that keeps failing fails the whole review (so the payment never settles)", async () => {
   const f = fakeApis({ "claude-sonnet-5-5": () => new Response(JSON.stringify({ error: { message: "overloaded" } }), { status: 529 }) });
+  const waits: number[] = [];
   try {
-    await assert.rejects(runOneReviewer({ ANTHROPIC_API_KEY: "a" }, "claude-sonnet-5-5", 1, input), /529: overloaded/);
-    assert.equal(f.calls.length, 2, "retried once");
+    await assert.rejects(runOneReviewer({ ANTHROPIC_API_KEY: "a" }, "claude-sonnet-5-5", 1, input, undefined, { sleep: async (ms) => waits.push(ms) }), /529: overloaded/);
+    assert.equal(f.calls.length, REVIEWER_MAX_TRIES, "a busy provider gets 4 tries");
+    assert.equal(waits.length, 3, "with a wait before each retry");
+    assert.ok(waits[0] >= 1000 && waits[0] <= 2000 && waits[1] >= 2000 && waits[1] <= 4000 && waits[2] >= 4000 && waits[2] <= 8000, waits.join(","));
   } finally {
     f.restore();
+  }
+});
+
+test("busy provider (429, too many concurrent requests): waits, tries again, and the review succeeds", async () => {
+  let n = 0;
+  const f = fakeApis({
+    "claude-sonnet-5-5": () =>
+      ++n <= 2
+        ? new Response(JSON.stringify({ error: { message: "Number of concurrent requests has exceeded your organization's limit." } }), { status: 429, headers: n === 2 ? { "retry-after": "3" } : {} })
+        : new Response(JSON.stringify({ content: [{ type: "text", text: ans("pass") }] })),
+  });
+  const waits: number[] = [];
+  try {
+    const v = await runOneReviewer({ ANTHROPIC_API_KEY: "a" }, "claude-sonnet-5-5", 1, input, undefined, { sleep: async (ms) => waits.push(ms) });
+    assert.equal(v.verdict, "pass");
+    assert.equal(f.calls.length, 3);
+    assert.equal(waits[1], 3000, "the provider's retry-after is honoured");
+  } finally {
+    f.restore();
+  }
+  assert.equal(retryDelayMs(1, "60"), 10_000, "retry-after is capped at 10 s");
+  assert.equal(retryDelayMs(1, "0"), 1000, "retry-after: 0 still waits 1 s, never an instant retry");
+  assert.equal(retryDelayMs(1, "0.2"), 1000);
+  assert.equal(retryDelayMs(2, "Wed, 21 Oct 2026 07:28:00 GMT", () => 0), 2000, "a date-style retry-after falls back to the normal backoff");
+  assert.equal(retryDelayMs(3, null, () => 0), 4000);
+});
+
+test("Claude reviewers and Claude judges both get a 4,000-token answer budget", async () => {
+  const f = fakeApis({ "claude-opus-5-5": ans("pass"), "claude-haiku-5-5": "{}" });
+  try {
+    await runOneReviewer({ ANTHROPIC_API_KEY: "a" }, "claude-opus-5-5", 1, input);
+    assert.equal(f.calls[0].body.max_tokens, REVIEWER_MAX_TOKENS);
+    assert.equal(REVIEWER_MAX_TOKENS, 4000);
+    const { callModel } = await import("../src/judge.ts");
+    await callModel({ ANTHROPIC_API_KEY: "a" }, "claude-haiku-5-5", "s", "u");
+    assert.equal(f.calls[1].body.max_tokens, 4000, "judges get the same room (was 1,000)");
+  } finally {
+    f.restore();
+  }
+});
+
+test("a review cut off at the token limit says so, names the reviewer, and isn't charged", async () => {
+  // A long code review: the answer stops mid-JSON, exactly like the failure seen live on Oct 27.
+  const cut = '{"verdict": "needs_changes", "confidence": "high", "issues": ["Claim 5 holds only if';
+  const f = fakeApis({ "claude-opus-5-5": () => new Response(JSON.stringify({ model: "claude-opus-5-5", stop_reason: "max_tokens", content: [{ type: "text", text: cut }] })) });
+  try {
+    await assert.rejects(
+      runOneReviewer({ ANTHROPIC_API_KEY: "a" }, "claude-opus-5-5", 1, input, undefined, { sleep: async () => {} }),
+      /^Error: claude-opus-5-5: reviewer ran out of tokens before finishing its answer$/,
+    );
+    assert.equal(f.calls.length, 2, "an unusable answer gets 2 tries");
+  } finally {
+    f.restore();
+  }
+  // OpenRouter's version of the same thing.
+  const g = fakeApis({ "openai/gpt-6-luna": () => new Response(JSON.stringify({ choices: [{ message: { content: cut }, finish_reason: "length" }] })) });
+  try {
+    await assert.rejects(runOneReviewer({ OPENROUTER_API_KEY: "o" }, "openai/gpt-6-luna", 2, input, undefined, { sleep: async () => {} }), /openai\/gpt-6-luna: reviewer ran out of tokens/);
+  } finally {
+    g.restore();
+  }
+  // A complete answer that happens to end exactly at the limit is still accepted.
+  const h = fakeApis({ "claude-opus-5-5": () => new Response(JSON.stringify({ stop_reason: "max_tokens", content: [{ type: "text", text: ans("pass") }] })) });
+  try {
+    assert.equal((await runOneReviewer({ ANTHROPIC_API_KEY: "a" }, "claude-opus-5-5", 1, input)).verdict, "pass");
+  } finally {
+    h.restore();
+  }
+});
+
+test("retries never run past the reviewer's time budget, and a plain 4xx isn't retried", async () => {
+  // Fake clock: every call uses its whole time limit before the provider answers "busy". Each call's limit is
+  // capped at the time left, so the tries together can never run past the budget.
+  let t = 0;
+  let limit = 0;
+  const realTimeout = AbortSignal.timeout;
+  AbortSignal.timeout = ((ms: number) => ((limit = ms), new AbortController().signal)) as any;
+  const f = fakeApis({ "claude-sonnet-5-5": () => ((t += limit), new Response(JSON.stringify({ error: { message: "busy" } }), { status: 503 })) });
+  try {
+    await assert.rejects(runOneReviewer({ ANTHROPIC_API_KEY: "a" }, "claude-sonnet-5-5", 1, input, undefined, { now: () => t, sleep: async (ms) => (t += ms) }), /503/);
+    assert.equal(f.calls.length, 3, "100 s + 100 s + what's left");
+    assert.ok(t <= REVIEWER_BUDGET_MS, `all tries ended inside the budget (${t} ms)`);
+  } finally {
+    AbortSignal.timeout = realTimeout;
+    f.restore();
+  }
+  // A new try never starts with less than 15 s left: with 20 s of budget, one 10 s busy answer plus a wait leaves too little.
+  let t2 = 0;
+  const g = fakeApis({ "claude-sonnet-5-5": () => ((t2 += 10_000), new Response(JSON.stringify({ error: { message: "busy" } }), { status: 503 })) });
+  try {
+    await assert.rejects(runOneReviewer({ ANTHROPIC_API_KEY: "a" }, "claude-sonnet-5-5", 1, input, undefined, { budgetMs: 20_000, now: () => t2, sleep: async (ms) => (t2 += ms) }), /503/);
+    assert.equal(g.calls.length, 1, "no hopeless last try");
+    assert.ok(REVIEWER_MIN_TRY_MS === 15_000);
+  } finally {
+    g.restore();
+  }
+  const bad = fakeApis({ "claude-sonnet-5-5": () => new Response(JSON.stringify({ error: { message: "bad request" } }), { status: 400 }) });
+  try {
+    await assert.rejects(runOneReviewer({ ANTHROPIC_API_KEY: "a" }, "claude-sonnet-5-5", 1, input, undefined, { sleep: async () => {} }), /400/);
+    assert.equal(bad.calls.length, 1);
+  } finally {
+    bad.restore();
   }
 });
 
@@ -165,8 +271,14 @@ test("votes record the model the provider says answered; the prompt treats promp
     globalThis.fetch = orig;
   }
   const { REVIEW_SYSTEM, REVIEW_FORMAT_VERSION } = await import("../src/review.ts");
-  assert.equal(REVIEW_FORMAT_VERSION, "agent-referee-review-v2");
+  assert.equal(REVIEW_FORMAT_VERSION, "agent-referee-review-v3");
   assert.match(REVIEW_SYSTEM, /imperative text in the OUTPUT is expected/);
+  // v3: answers are told to fit the reply limit, and that length must never change the verdict.
+  assert.match(REVIEW_SYSTEM, /LENGTH: your reply has a fixed size limit/);
+  assert.match(REVIEW_SYSTEM, /Never pick, soften or upgrade a\nverdict to save space\./);
+  const c = await reviewCommitment("review", {});
+  assert.equal(c.format_version, "agent-referee-review-v3");
+  assert.notEqual(c.prompt_sha256, "c8e0dd77a97c304066544de7b7160b666cb2f3855eeb86dc5b66f9c49b69ba29", "the fingerprint moved with the text");
 });
 
 test("failed reviews are capped per address per day, and the count resets the next day", async () => {
