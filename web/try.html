@@ -20,13 +20,13 @@
   p { margin: 8px 0; }
   a { color: var(--accent); }
   .lede { color: var(--muted); margin-bottom: 14px; }
-  .status { display: inline-flex; align-items: center; gap: 8px; padding: 3px 12px; border: 1px solid var(--line); border-radius: 999px; font-size: 0.88rem; background: var(--card); }
+  .status { display: inline-flex; align-items: center; gap: 8px; padding: 3px 12px; border: 1px solid var(--edge); border-radius: 999px; font-size: 0.88rem; background: var(--card); }
   .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
   .dot.ok { background: var(--ok); } .dot.warn { background: var(--warn); } .dot.bad { background: var(--bad); }
-  .notice { border: 1px solid var(--warn); color: var(--warn); border-radius: 8px; padding: 8px 12px; margin: 12px 0; font-size: 0.92rem; }
-  nav { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin: 22px 0 0; flex-wrap: wrap; }
-  nav button { border: 1px solid transparent; border-bottom: 0; background: none; color: var(--muted); font: inherit; padding: 8px 14px; border-radius: 8px 8px 0 0; cursor: pointer; }
-  nav button[aria-selected="true"] { color: var(--fg); background: var(--card); border-color: var(--edge); border-top: 3px solid var(--accent); margin-bottom: -1px; font-weight: 600; }
+  .notice { border: 1px solid var(--warn); color: var(--warn); border-radius: 8px; padding: 8px 12px; margin: 12px 0; font-size: 0.92rem; overflow-wrap: anywhere; }
+  .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin: 22px 0 0; flex-wrap: wrap; }
+  .tabs button { border: 1px solid transparent; border-top: 3px solid transparent; border-bottom: 0; background: none; color: var(--muted); font: inherit; padding: 6px 14px 8px; border-radius: 8px 8px 0 0; cursor: pointer; }
+  .tabs button[aria-selected="true"] { color: var(--fg); background: var(--card); border-color: var(--edge); border-top-color: var(--accent); margin-bottom: -1px; font-weight: 600; }
   section.panel { background: var(--card); border: 1px solid var(--line); border-top: 0; border-radius: 0 0 8px 8px; padding: 16px; }
   section.panel[hidden] { display: none; }
   :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -37,8 +37,7 @@
   textarea { min-height: 96px; resize: vertical; }
   select, input[type="number"] { font-family: inherit; width: auto; max-width: 100%; }
   .row select { width: 100%; }
-  p code { white-space: nowrap; }
-  @media (max-width: 360px) { p code { white-space: normal; overflow-wrap: anywhere; } }
+  p code { overflow-wrap: anywhere; }
   h2.tool { font-size: 1rem; margin: 0 0 6px; }
   #key-shown { overflow-wrap: anywhere; }
   .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: end; }
@@ -49,47 +48,47 @@
   .cnt.over { color: var(--bad); font-weight: 600; }
   input[type="file"] { font-family: inherit; padding: 6px; }
   button.go { margin-top: 14px; background: var(--accent); color: var(--bg); border: 0; border-radius: 6px; padding: 9px 18px; font: 600 0.95rem system-ui, sans-serif; cursor: pointer; }
-  button.go:disabled { opacity: 0.55; cursor: progress; }
+  button.go:disabled { opacity: 0.55; cursor: default; }
   .small { display: inline-block; text-decoration: none; background: none; border: 1px solid var(--edge); color: var(--fg); border-radius: 6px; padding: 5px 10px; font: 0.85rem system-ui, sans-serif; cursor: pointer; margin: 8px 8px 0 0; }
   .out { margin-top: 16px; }
   .verdict { font-size: 1.25rem; font-weight: 700; }
   .pass, .ok { color: var(--ok); } .needs_changes, .split, .warn { color: var(--warn); } .fail, .cannot_assess, .bad { color: var(--bad); }
   .vote { border-top: 1px solid var(--line); padding: 10px 0 4px; }
   .vote:first-child { border-top: 0; }
-  .vote code { font-size: 0.85rem; }
+  .vote code { font-size: 0.85rem; overflow-wrap: anywhere; }
   ul { padding-left: 20px; margin: 6px 0; }
   li { margin: 3px 0; }
-  .check { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin-top: 12px; }
-  .err { color: var(--bad); white-space: pre-wrap; }
+  .check { border: 1px solid var(--edge); border-radius: 8px; padding: 10px 12px; margin-top: 12px; overflow-wrap: anywhere; }
+  .err { color: var(--bad); white-space: pre-wrap; overflow-wrap: anywhere; }
   .muted { color: var(--muted); font-size: 0.9rem; }
   details { margin-top: 10px; }
   pre { background: var(--field); border: 1px solid var(--line); border-radius: 6px; padding: 10px; overflow-x: auto; font-size: 0.8rem; max-height: 320px; }
-  footer { margin-top: 32px; color: var(--muted); font-size: 0.85rem; }
-  @media (max-width: 560px) { nav button { padding: 8px 10px; } }
+  footer { max-width: 760px; margin: 0 auto; padding: 0 16px 48px; color: var(--muted); font-size: 0.85rem; }
+  @media (max-width: 560px) { .tabs button { padding: 6px 10px 8px; } }
 </style>
 </head>
 <body>
 <main>
   <h1>Agent Referee</h1>
-  <p class="lede">Try it in your browser: no wallet, no account, nothing to install. Every finished review or match comes with a signed receipt, and this page checks it for you.</p>
+  <p class="lede">Try it in your browser: no wallet, no account, nothing to install. Every finished review or match comes with a signed receipt, and this page checks the receipts it gets and any you paste.</p>
   <span class="status" role="status"><span class="dot" id="health-dot" aria-hidden="true"></span><span id="health">Checking the service…</span></span>
   <div class="notice" id="test-notice" role="alert" hidden></div>
 
-  <nav role="tablist" aria-label="What to do">
+  <div class="tabs" role="tablist" aria-label="What to do">
     <button role="tab" id="t-review" aria-controls="tab-review" aria-selected="true" tabindex="0" data-tab="review">Review my work</button>
     <button role="tab" id="t-files" aria-controls="tab-files" aria-selected="false" tabindex="-1" data-tab="files">Review files</button>
     <button role="tab" id="t-match" aria-controls="tab-match" aria-selected="false" tabindex="-1" data-tab="match">Demo tie-break</button>
     <button role="tab" id="t-check" aria-controls="tab-check" aria-selected="false" tabindex="-1" data-tab="check">Check a receipt</button>
-  </nav>
+  </div>
 
   <!-- 1. Free sealed review -->
   <section class="panel" id="tab-review" role="tabpanel" aria-labelledby="t-review" tabindex="0">
     <h2 class="tool">Free sealed review</h2>
-    <p class="muted">Independent AI reviewers check a piece of work against the task it was given. Free: <span id="r-allowance">a few reviews a day</span> from each internet connection (IP address), while the service's shared free budget lasts.</p>
+    <p class="muted">Independent AI reviewers check a piece of work against the task it was given. Free: <span id="r-allowance">a few reviews a day</span> from each internet connection (IP address), while the service's shared free budget lasts. The reviewers are AI models, and they can be wrong.</p>
     <p class="muted"><strong>What you type leaves your browser:</strong> it's sent to Agent Referee and on to the AI companies that review it. Leave out secrets and personal data. The receipt stores fingerprints of your text, not the text, though reviewers' comments may quote parts of it.</p>
-    <div class="lab"><label for="r-task">Task <span class="hint">(what the work was supposed to do)</span></label><span class="cnt" id="r-task-n" aria-live="polite"></span></div>
+    <div class="lab"><label for="r-task">Task <span class="hint">(what the work was supposed to do)</span></label><span class="cnt" id="r-task-n"></span></div>
     <textarea id="r-task" aria-describedby="r-task-n" placeholder="For example: Write a SQL query returning the 10 newest orders."></textarea>
-    <div class="lab"><label for="r-output">Output <span class="hint">(the work to check)</span></label><span class="cnt" id="r-output-n" aria-live="polite"></span></div>
+    <div class="lab"><label for="r-output">Output <span class="hint">(the work to check)</span></label><span class="cnt" id="r-output-n"></span></div>
     <textarea id="r-output" aria-describedby="r-output-n" placeholder="For example: SELECT * FROM orders ORDER BY created_at DESC LIMIT 10;"></textarea>
     <div class="row">
       <div>
@@ -114,10 +113,10 @@
   <!-- 1b. Free sealed review from files -->
   <section class="panel" id="tab-files" role="tabpanel" aria-labelledby="t-files" tabindex="0" hidden>
     <h2 class="tool">Review from files</h2>
-    <p class="muted">The same free review, with the task and the output read from text files (for example .txt, .md, code or JSON). The files are read in your browser and only their text is sent, exactly as if you'd typed it, so the same note applies: leave out secrets and personal data. The receipt is tied to each file's text exactly as read.</p>
-    <div class="lab"><label for="f-task">Task file <span class="hint">(what the work was supposed to do)</span></label><span class="cnt" id="f-task-n" aria-live="polite"></span></div>
+    <p class="muted">The same free review, with the task and the output read from text files (for example .txt, .md, code or JSON). The files are read in your browser and only their text is sent, exactly as if you'd typed it, so the same note applies: leave out secrets and personal data. The reviewers are AI models, and they can be wrong. The receipt is tied to each file's text exactly as read.</p>
+    <div class="lab"><label for="f-task">Task file <span class="hint">(what the work was supposed to do)</span></label><span class="cnt" id="f-task-n"></span></div>
     <input type="file" id="f-task" aria-describedby="f-task-n" accept="text/*,.txt,.md,.markdown,.json,.csv,.tsv,.xml,.yaml,.yml,.toml,.ini,.log,.html,.css,.js,.mjs,.cjs,.ts,.tsx,.jsx,.py,.rb,.go,.rs,.java,.kt,.c,.h,.cpp,.cs,.php,.sh,.ps1,.bat,.cmd,.sql">
-    <div class="lab"><label for="f-output">Output file <span class="hint">(the work to check)</span></label><span class="cnt" id="f-output-n" aria-live="polite"></span></div>
+    <div class="lab"><label for="f-output">Output file <span class="hint">(the work to check)</span></label><span class="cnt" id="f-output-n"></span></div>
     <input type="file" id="f-output" aria-describedby="f-output-n" accept="text/*,.txt,.md,.markdown,.json,.csv,.tsv,.xml,.yaml,.yml,.toml,.ini,.log,.html,.css,.js,.mjs,.cjs,.ts,.tsx,.jsx,.py,.rb,.go,.rs,.java,.kt,.c,.h,.cpp,.cs,.php,.sh,.ps1,.bat,.cmd,.sql">
     <div class="row">
       <div>
@@ -142,7 +141,7 @@
   <!-- 2. Demo tie-break -->
   <section class="panel" id="tab-match" role="tabpanel" aria-labelledby="t-match" tabindex="0" hidden>
     <h2 class="tool">Demo tie-break</h2>
-    <p class="muted">A fair pick between two AI agents, here called <em>alpha</em> and <em>beta</em>. Each locks in a secret number before seeing the other's, so neither side can choose the outcome, and each can recompute it from the receipt. In real use each agent plays its own seat; this free demo plays both in your browser to show how it works. Only the demo's random numbers and moves are sent to Agent Referee.</p>
+    <p class="muted">A fair pick between two AI agents, here called <em>alpha</em> and <em>beta</em>. Each locks in a secret number before seeing the other's, so neither can change its number after seeing the other's, and each can recompute the result from the receipt. In real use each agent plays its own seat; this free demo plays both in your browser to show how it works. The demo sends Agent Referee only the match settings (the type of pick and the odds) and the two seats' commitments, then the random numbers and moves they commit to.</p>
     <div class="row">
       <div>
         <label for="m-tier">Type of pick</label>
@@ -163,9 +162,11 @@
   <!-- 3. Check any receipt -->
   <section class="panel" id="tab-check" role="tabpanel" aria-labelledby="t-check" tabindex="0" hidden>
     <h2 class="tool">Check a receipt</h2>
-    <p class="muted">Paste a receipt someone gave you. The page checks that Agent Referee signed it and recomputes the result from what's inside, entirely in your browser. A pass means it was signed with Agent Referee's official key and hasn't been changed since. For a review, add the task and output to confirm which work it's about; a pass never means the reviewers were right.</p>
+    <p class="muted">Paste a receipt someone gave you, or open a saved receipt file (the files the MCP server and review scripts save work too). The page checks that Agent Referee signed it and recomputes the result from what's inside, entirely in your browser. A pass means it was signed with Agent Referee's official key and hasn't been changed since. For a review, add the task and output to confirm which work it's about; a pass never means the reviewers were right.</p>
     <label for="c-receipt">Receipt <span class="hint">(JSON)</span></label>
     <textarea id="c-receipt" placeholder='{"payload": {...}, "signature": "..."}'></textarea>
+    <label for="c-file">Or open a receipt file <span class="hint">(.json)</span></label>
+    <input type="file" id="c-file" accept=".json,application/json">
     <details>
       <summary>For a review: the task and output it should be about <span class="hint">(optional)</span></summary>
       <label for="c-task">Task</label>
@@ -179,12 +180,12 @@
 
   <h2>Paying, and using it from code</h2>
   <p>Paid reviews and matches are paid per request in USDC (a dollar-backed digital currency) on the Base network, using the x402 payment standard, with no account. From code: <code>npm install agent-referee-client</code>, <code>pip install agent-referee-client</code>, or the MCP server for AI tools (<code>npx -y agent-referee-mcp</code>).</p>
-  <footer>
+</main>
+<footer>
     <a href="https://agentreferee.ai">agentreferee.ai</a> · <a href="https://github.com/ccheez34/agent-referee-client">JavaScript client</a> · <a href="https://github.com/ccheez34/agent-referee-python">Python client</a> · <a href="https://github.com/ccheez34/agent-referee-client/blob/main/TERMS.md">Terms</a> · <a href="https://github.com/ccheez34/agent-referee-client/blob/main/PRIVACY.md">Privacy</a>
     <br>Signing key <code id="key-shown"></code>
     <br>This page loads the official JavaScript client from jsDelivr, a public code host, which sees your IP address like any website you visit.
-  </footer>
-</main>
+</footer>
 
 <script type="module">
 // The JavaScript client, pinned to an exact version. Everything below runs in the visitor's browser.
@@ -205,14 +206,19 @@ const API = refused ? OFFICIAL[0] : asked;
 const official = OFFICIAL.includes(API);
 let KEYS = [PINNED_KEY];
 const $ = (id) => document.getElementById(id);
-const words = (v) => String(v ?? "?").replaceAll("_", " ");
+const words = (v) => String(v ?? "?").replaceAll("_", " "); // plain text: always wrap in esc() before inserting as HTML
+// A verdict picks a colour only if it's one the service can give; anything else from a receipt gets no class.
+const VERDICTS = ["pass", "needs_changes", "fail", "cannot_assess", "split"];
+const vclass = (v) => (VERDICTS.includes(v) ? v : "");
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 
 async function api(method, path, body) {
   let r;
   try {
-    r = await fetch(API + path, { method, headers: body ? { "content-type": "application/json", accept: "application/json" } : { accept: "application/json" }, body: body ? JSON.stringify(body) : undefined });
+    // Reviews can take up to about 4 minutes; nothing waits forever. Redirects are refused, never followed.
+    r = await fetch(API + path, { method, redirect: "error", signal: AbortSignal.timeout(330_000), headers: body ? { "content-type": "application/json", accept: "application/json" } : { accept: "application/json" }, body: body ? JSON.stringify(body) : undefined });
   } catch (e) {
+    if (e?.name === "TimeoutError") throw new Error("The service didn't answer within about 5 minutes, so the page stopped waiting. Try again; the service doesn't use a free review that fails on its side.");
     throw new Error("Couldn't reach the service. Check your connection, or the status page: https://stats.uptimerobot.com/dh6sVMvo3W");
   }
   const data = await r.json().catch(() => undefined);
@@ -221,7 +227,9 @@ async function api(method, path, body) {
     const said = typeof data?.error === "string" ? data.error : "";
     const e = new Error(said || (r.status === 429 ? "Today's free allowance from your connection is used up, or the service is limiting requests. Try again tomorrow (UTC)." : `The service answered ${r.status}.`));
     e.status = r.status;
-    e.retry = (data.retry_after_s ?? Number(r.headers.get("retry-after"))) || null;
+    e.data = data; // the answer's JSON, when it had one (GET /health answers 503 with its status)
+    const ra = typeof data?.retry_after_s === "number" ? data.retry_after_s : Number(r.headers.get("retry-after"));
+    e.retry = Number.isFinite(ra) && ra > 0 ? ra : null;
     throw e;
   }
   return data;
@@ -252,11 +260,12 @@ if (!keysReady) disableAll(); // in test mode, nothing runs until the test servi
   }
   $("key-shown").textContent = KEYS[0] || "(unknown)";
   try {
-    const h = await api("GET", "/health");
+    let h;
+    try { h = await api("GET", "/health"); } catch (e) { if (typeof e.data?.status === "string") h = e.data; else throw e; }
     const s = h.status || "ok";
     $("health-dot").className = "dot " + (s === "ok" ? "ok" : s === "down" ? "bad" : "warn");
     const reasons = Array.isArray(h.reasons) ? h.reasons.map(String).join(", ") : "";
-    $("health").textContent = s === "ok" ? "Service is up" : s === "paused" ? "Paused for a moment" : s === "degraded" ? "Up, with problems" + (reasons ? ": " + reasons : "") : "Service is down";
+    $("health").textContent = s === "ok" ? "Service is up" : s === "paused" ? "Paused for a moment" : s === "degraded" ? "Up, with problems" + (reasons ? ": " + reasons : "") : s === "down" ? "Service is down" : "Status unknown";
   } catch {
     $("health-dot").className = "dot bad";
     $("health").textContent = "Couldn't reach the service";
@@ -272,7 +281,7 @@ if (!keysReady) disableAll(); // in test mode, nothing runs until the test servi
 })();
 
 // Tabs: click, or arrow keys / Home / End between them (one tab stop for the whole row).
-const tabs = [...document.querySelectorAll("nav [role=tab]")];
+const tabs = [...document.querySelectorAll("[role=tablist] [role=tab]")];
 function selectTab(b, focus) {
   for (const x of tabs) { x.setAttribute("aria-selected", String(x === b)); x.tabIndex = x === b ? 0 : -1; }
   for (const p of document.querySelectorAll("section.panel")) p.hidden = p.id !== b.getAttribute("aria-controls");
@@ -281,8 +290,10 @@ function selectTab(b, focus) {
 for (const b of tabs) {
   b.addEventListener("click", () => selectTab(b, false));
   b.addEventListener("keydown", (e) => {
+    if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return; // leave browser shortcuts (Alt+Left is Back) alone
     const i = tabs.indexOf(b);
-    const to = { ArrowRight: (i + 1) % tabs.length, ArrowLeft: (i - 1 + tabs.length) % tabs.length, Home: 0, End: tabs.length - 1 }[e.key];
+    const moves = new Map([["ArrowRight", (i + 1) % tabs.length], ["ArrowLeft", (i - 1 + tabs.length) % tabs.length], ["Home", 0], ["End", tabs.length - 1]]);
+    const to = moves.get(e.key);
     if (to !== undefined) { e.preventDefault(); selectTab(tabs[to], true); }
   });
 }
@@ -290,8 +301,9 @@ for (const b of tabs) {
 // "Receipt checks out" only ever means: signed by the OFFICIAL key and the result recomputes. A receipt signed by a
 // test instance's key (?api=) says so in the headline itself, not just in the banner.
 function checkBox(check, extra = [], testKey = !official, note = "") {
-  const problems = [...(check.problems || []), ...extra];
-  const ok = check.ok === true && extra.length === 0;
+  check = check && typeof check === "object" ? check : {};
+  const problems = [...(Array.isArray(check.problems) ? check.problems : []), ...extra];
+  const ok = check.ok === true && problems.length === 0; // a check that reports any problem never "checks out"
   if (!ok && problems.length === 0) problems.push("The check didn't complete, so this result can't be confirmed.");
   const head = !ok ? "Receipt problem" : testKey ? "Checks out against the TEST service's key: not an official receipt" : "Receipt checks out";
   return `<div class="check"><strong class="${ok && !testKey ? "ok" : ok ? "warn" : "bad"}">${head}</strong>
@@ -340,23 +352,33 @@ $("r-task").addEventListener("input", countAll);
 $("r-output").addEventListener("input", countAll);
 
 // Read a picked file as text. Refuses big or binary files instead of sending something unreadable.
+// Each field keeps its own error, and only the latest pick for a field counts (a slow read of an earlier file
+// can't overwrite a newer one).
+const fileErr = { task: null, output: null };
+const fileRead = { task: 0, output: 0 };
+const showFileErrors = () => { $("f-out").innerHTML = ["task", "output"].map((w) => (fileErr[w] ? errorHtml(fileErr[w]) : "")).join(""); };
 for (const which of ["task", "output"]) {
   $("f-" + which).addEventListener("change", async () => {
     const f = $("f-" + which).files?.[0];
+    const mine = ++fileRead[which];
     files[which] = null;
-    $("f-out").innerHTML = "";
+    fileErr[which] = null;
     if (f) {
       try {
         if (f.size > 1_000_000) throw new Error(`${f.name} is ${Math.round(f.size / 1000).toLocaleString()} KB, far over the limit. Pick a smaller text file.`);
         const text = await f.text();
-        if (text.includes("\u0000") || text.includes("�")) throw new Error(`${f.name} doesn't look like a plain text file (UTF-8). Save it as text and try again.`);
+        if (mine !== fileRead[which]) return; // a newer file was picked meanwhile
+        const controls = (text.match(/[\u0001-\u0008\u000E-\u001F\u007F]/g) || []).length; // not tab, newline or carriage return
+        if (text.includes("\u0000") || text.includes("\uFFFD") || controls > Math.max(2, text.length / 1000)) throw new Error(`${f.name} doesn't look like a plain text file (UTF-8). Save it as text and try again.`);
         if (!text.trim()) throw new Error(`${f.name} is empty.`);
         files[which] = text;
       } catch (e) {
+        if (mine !== fileRead[which]) return;
         $("f-" + which).value = "";
-        $("f-out").innerHTML = errorHtml(e);
+        fileErr[which] = e;
       }
     }
+    showFileErrors();
     countAll();
   });
 }
@@ -364,7 +386,7 @@ for (const which of ["task", "output"]) {
 async function runReview(task, output, tier, panel, btn, outEl) {
   if (!task || !task.trim() || !output || !output.trim()) { outEl.innerHTML = errorHtml(new Error("Fill in both the task and the output.")); return; }
   const tooLong = [task.length > LIMITS.task ? `the task is ${task.length.toLocaleString()} characters (at most ${LIMITS.task.toLocaleString()})` : "", task.length < LIMITS.minTask ? `the task needs at least ${LIMITS.minTask} characters` : "", output.length > LIMITS.output ? `the output is ${output.length.toLocaleString()} characters (at most ${LIMITS.output.toLocaleString()})` : ""].filter(Boolean);
-  if (tooLong.length) { outEl.innerHTML = errorHtml(new Error(`Not sent: ${tooLong.join("; ")}. Nothing was used. Shorten it, or split the work into pieces and review each.`)); return; }
+  if (tooLong.length) { outEl.innerHTML = errorHtml(new Error(`Not sent: ${tooLong.join("; ")}. Nothing was used.${task.length < LIMITS.minTask ? " Describe the task in a little more detail." : " Shorten it, or split the work into pieces and review each."}`)); return; }
   btn.disabled = true;
   outEl.innerHTML = `<p class="muted">Reviewing… usually seconds, sometimes up to a few minutes.</p>`;
   try {
@@ -381,8 +403,8 @@ async function runReview(task, output, tier, panel, btn, outEl) {
     // The check comes first: if it fails, what follows is the service's unverified answer, and says so.
     outEl.innerHTML = `${checkBox(check, extra)}
       ${good ? "" : `<p class="bad"><strong>Unverified:</strong> the result below couldn't be confirmed from the receipt.</p>`}
-      <p class="verdict ${esc(p.result.verdict)}">${esc(words(p.result.verdict))}</p>
-      <div class="votes">${p.votes.map((v) => `<div class="vote"><strong class="${esc(v?.verdict)}">${esc(words(v?.verdict))}</strong> · <code>${esc(v?.model)}</code> <span class="muted">(${esc(v?.confidence)} confidence)</span>
+      <p class="verdict ${vclass(p.result.verdict)}">${esc(words(p.result.verdict))}</p>
+      <div class="votes">${p.votes.map((v) => `<div class="vote"><strong class="${vclass(v?.verdict)}">${esc(words(v?.verdict))}</strong> · <code>${esc(v?.model)}</code> <span class="muted">(${esc(v?.confidence)} confidence)</span>
         ${Array.isArray(v?.issues) && v.issues.length ? `<ul>${v.issues.map((i) => `<li>${esc(i)}</li>`).join("")}</ul>` : ""}
         ${v?.reasoning ? `<p class="muted">${esc(v.reasoning)}</p>` : ""}</div>`).join("")}</div>
       ${receiptTools(r.receipt, "review-" + p.review_id, outEl.id)}
@@ -413,6 +435,10 @@ $("m-go").addEventListener("click", async () => {
     const m = await ref.create(spec);
     const [sa, sb] = await Promise.all([ref.join(m.match_id, "alpha"), ref.join(m.match_id, "beta")]);
     const [ra, rb] = await Promise.all([sa.play(), sb.play()]);
+    for (const x of [ra, rb]) {
+      const xp = x.receipt?.payload;
+      if (xp?.receipt_format !== undefined || xp?.type !== undefined) throw new Error("The service answered with a receipt this page can't check as a match, so nothing was confirmed.");
+    }
     const problems = [...(ra.check?.problems ?? []).map((x) => "alpha: " + x), ...(rb.check?.problems ?? []).map((x) => "beta: " + x)];
     if (AR.canonicalJson(ra.receipt) !== AR.canonicalJson(rb.receipt)) problems.push("The two seats were given different receipts.");
     const ok = !!(ra.check?.ok && rb.check?.ok) && problems.length === 0;
@@ -431,24 +457,47 @@ $("m-go").addEventListener("click", async () => {
   }
 });
 
-// 3. Check any receipt, offline.
+// 3. Check any receipt, offline. A receipt file can be opened instead of pasted; it's read in the browser.
+let receiptRead = 0;
+$("c-file").addEventListener("change", async () => {
+  const f = $("c-file").files?.[0];
+  const mine = ++receiptRead;
+  if (!f) return;
+  $("c-file").value = "";
+  if (f.size > 2_000_000) { $("c-out").innerHTML = errorHtml(new Error(`${f.name} is too big to be a receipt.`)); return; }
+  let text;
+  try { text = await f.text(); } catch { if (mine === receiptRead) $("c-out").innerHTML = errorHtml(new Error(`${f.name} couldn't be read.`)); return; }
+  if (mine !== receiptRead) return; // another file was opened meanwhile
+  $("c-receipt").value = text;
+  $("c-go").click();
+});
+// Only the latest check may show its result, so a slow earlier one can't replace a newer one.
+let checkRun = 0;
 $("c-go").addEventListener("click", async () => {
-  try { await checkPasted(); } catch (e) { $("c-out").innerHTML = errorHtml(new Error("That doesn't look like an Agent Referee receipt (" + (e.message || e) + ").")); }
+  const run = ++checkRun;
+  let html;
+  try { html = await checkPasted(); } catch (e) { html = errorHtml(new Error("That doesn't look like an Agent Referee receipt (" + (e.message || e) + ").")); }
+  if (run === checkRun) $("c-out").innerHTML = html;
 });
 async function checkPasted() {
   let receipt;
-  if (!$("c-receipt").value.trim()) { $("c-out").innerHTML = errorHtml(new Error("Paste a receipt first.")); return; }
-  try { receipt = JSON.parse($("c-receipt").value); } catch { $("c-out").innerHTML = errorHtml(new Error("That isn't valid JSON.")); return; }
+  if (!$("c-receipt").value.trim()) { return errorHtml(new Error("Paste a receipt first.")); }
+  try { receipt = JSON.parse($("c-receipt").value); } catch { return errorHtml(new Error("That isn't valid JSON.")); }
+  // Saved receipt files (from the MCP server or a review batch) wrap the receipt: {kind, id, summary, ..., receipt}.
+  // Check the receipt inside; nothing else in the wrapper is trusted or shown.
+  let wrapped = false;
+  if (receipt && typeof receipt === "object" && !Array.isArray(receipt) && !("payload" in receipt) && receipt.receipt && typeof receipt.receipt === "object") {
+    receipt = receipt.receipt;
+    wrapped = true;
+  }
   if (!receipt || typeof receipt !== "object" || Array.isArray(receipt) || typeof receipt.signature !== "string" || typeof receipt.payload !== "object" || !receipt.payload) {
-    $("c-out").innerHTML = errorHtml(new Error("That doesn't look like an Agent Referee receipt: it needs a payload and a signature."));
-    return;
+    return errorHtml(new Error("That doesn't look like an Agent Referee receipt: it needs a payload and a signature."));
   }
   const p = receipt.payload;
   // Receipt formats this page doesn't know (multi-part reviews and judging are coming) are refused, never checked
   // the old way: an old check could recompute the verdict and miss what the new format changed.
   if (p.receipt_format !== undefined) {
-    $("c-out").innerHTML = errorHtml(new Error(`This receipt uses a newer format ("${String(p.receipt_format).slice(0, 40)}") that this page can't check yet. Nothing was confirmed.`));
-    return;
+    return errorHtml(new Error(`This receipt uses a newer format ("${String(p.receipt_format).slice(0, 40)}") that this page can't check yet. Nothing was confirmed.`));
   }
   // The official key decides. Only in test mode (?api=) is the test instance's key tried as well, and labelled.
   const officialSig = await AR.verifySignature(receipt, [PINNED_KEY]);
@@ -458,21 +507,21 @@ async function checkPasted() {
     : "The signature doesn't match Agent Referee's key or the test service's key: it wasn't issued by either, or it was changed."];
   let check, headline, note = "";
   if (p.type !== undefined && p.type !== "review") {
-    $("c-out").innerHTML = errorHtml(new Error(`This page can't check "${String(p.type).slice(0, 40)}" receipts yet. Nothing was confirmed.`));
-    return;
+    return errorHtml(new Error(`This page can't check "${String(p.type).slice(0, 40)}" receipts yet. Nothing was confirmed.`));
   }
   if (p.type === "review") {
     const task = $("c-task").value, output = $("c-output").value;
     check = await AR.verifyReviewOutcome(receipt, { ...(task ? { task } : {}), ...(output ? { output } : {}) });
-    headline = `A ${esc(p.tier)} review: <span class="${esc(p.result?.verdict)}">${esc(words(p.result?.verdict))}</span>`;
-    if (!task || !output) note = "The task and output weren't given, so this doesn't confirm which work the review is about.";
+    headline = `A ${esc(p.tier)} review: <span class="${vclass(p.result?.verdict)}">${esc(words(p.result?.verdict))}</span>`;
+    if (!task || !output) note = "The task or the output wasn't given, so this doesn't confirm which work the review is about.";
   } else {
     check = await AR.verifyOutcome(receipt);
     const o = p?.outcome || {};
     headline = `A ${esc(p?.tier ?? "?")} match${p?.demo ? " (demo)" : ""}: ${o.winner ? esc(o.winner) + " won" : o.mistrial ? "mistrial" : esc(o.result ?? "")}`;
   }
   const good = check.ok === true && sigProblem.length === 0;
-  $("c-out").innerHTML = `${checkBox(check, sigProblem, !officialSig, note)}<p class="verdict">${good ? "" : "<span class='bad'>Unverified claim:</span> "}${headline}</p>`;
+  return `${checkBox(check, sigProblem, !officialSig, note)}<p class="verdict">${good ? "" : "<span class='bad'>Unverified claim:</span> "}${headline}</p>
+    ${wrapped ? `<p class="muted">This was a saved receipt file: the page checked the signed receipt inside it, and ignored the file's other fields.</p>` : ""}`;
 }
 </script>
 </body>
