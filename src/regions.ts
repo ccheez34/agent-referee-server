@@ -61,7 +61,7 @@ const companyVar = (company: string) => `BLOCKED_REGIONS_${company.toUpperCase()
  * tests, and Cloudflare knows the country for nearly every real request.
  */
 export function regionBlock(env: Record<string, unknown>, models: string[], where: Where): { code: string; company: string } | null {
-  if (String(env.REGION_BLOCK ?? "").toLowerCase() === "off" || !where.country) return null;
+  if (String(env.REGION_BLOCK ?? "").trim().toLowerCase() === "off" || !where.country) return null;
   const codes = [where.country, where.sub].filter(Boolean) as string[];
   const hit = (list: string[]) => codes.find((c) => list.includes(c));
   const base = hit(listFrom(env, "BLOCKED_REGIONS", BASE_BLOCKED));

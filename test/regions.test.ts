@@ -47,6 +47,7 @@ test("sanctions list applies to every model, and to routes with no models", () =
 test("unknown location is allowed; REGION_BLOCK=off turns it all off", () => {
   assert.equal(regionBlock({}, [CLAUDE], where(undefined)), null);
   assert.equal(regionBlock({ REGION_BLOCK: "off" }, [CLAUDE], where("IR")), null);
+  assert.equal(regionBlock({ REGION_BLOCK: " Off " }, [CLAUDE], where("IR")), null, "spaces and case are ignored");
 });
 
 test("env lists replace the defaults; 'none' empties one; other companies get their own var", () => {
