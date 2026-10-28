@@ -368,7 +368,7 @@ test("long inputs: rotate leaves light models (Haiku) out, and naming one is ref
   assert.ok(!seenLong.has("claude-haiku-5-5"));
   // Named explicitly (an exact list or an agreed set) with a long input: refused, with the reason and the limit.
   const ds = "deepseek/deepseek-v4-pro-0813";
-  await assert.rejects(reviewCommitment("review-3", {}, [ds, "claude-haiku-5-5", "openai/gpt-6-luna"], undefined, 12000), /claude-haiku-5-5 can't reliably review inputs this long \(task \+ output is 12000 characters; the limit for this model is 8000\)/);
+  await assert.rejects(reviewCommitment("review-3", {}, [ds, "claude-haiku-5-5", "openai/gpt-6-luna"], undefined, 12000), /claude-haiku-5-5 can't reliably review inputs this long \(task \+ output is 12000 characters; the limit for this model is 6000\)/);
   await assert.rejects(reviewCommitment("review", {}, [["claude-haiku-5-5"], ["claude-sonnet-5-5"]], undefined, 9000), /can't reliably review/);
   // Short inputs, other models, and the default panels are unaffected.
   assert.deepEqual((await reviewCommitment("review-3", {}, [ds, "claude-haiku-5-5", "openai/gpt-6-luna"], undefined, 500)).models, [ds, "claude-haiku-5-5", "openai/gpt-6-luna"]);

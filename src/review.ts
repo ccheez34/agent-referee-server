@@ -101,10 +101,10 @@ export type ReviewCommitment = {
 /**
  * Long reviews and small models: a light model (default Claude Haiku) can run out of room on a long task + output
  * and return no usable verdict (uncharged, but the agent gets nothing). So when task + output is longer than
- * LONG_REVIEW_CHARS (default 8,000), random draws ("rotate") leave light models out, and a request that names one
+ * LONG_REVIEW_CHARS (default 6,000), random draws ("rotate") leave light models out, and a request that names one
  * itself is refused before payment with a clear message.
  */
-export const DEFAULT_LONG_REVIEW_CHARS = 8000;
+export const DEFAULT_LONG_REVIEW_CHARS = 6000; // Haiku ran out of room on a 7,500-character review (Oct 28)
 export const DEFAULT_LIGHT_REVIEW_MODELS = "claude-haiku-5-5";
 type LongEnv = { LONG_REVIEW_CHARS?: string; LIGHT_REVIEW_MODELS?: string };
 export function longReviewRule(env: LongEnv) {

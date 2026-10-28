@@ -18,7 +18,7 @@ export interface Env {
   EXT_FREE_DAILY_BUDGET_USD?: string; // daily budget for free reviews sent by the hosted MCP server (off when unset)
   EXT_FREE_REVIEWS_PER_DAY?: string; // per hosted-server user per UTC day (default 3)
   EXT_FREE_REVIEW3_PER_DAY?: string; // per hosted-server user per UTC day (default 1)
-  LONG_REVIEW_CHARS?: string; // task + output longer than this: light models (LIGHT_REVIEW_MODELS) sit out of reviews (default 8000)
+  LONG_REVIEW_CHARS?: string; // task + output longer than this: light models (LIGHT_REVIEW_MODELS) sit out of reviews (default 6000)
   LIGHT_REVIEW_MODELS?: string; // comma list, default "claude-haiku-5-5"
   PAID_PAUSED?: string; // "true" refuses paid matches (before any payment) and points agents to demo mode
   REVIEWS_PAUSED?: string; // "true" refuses sealed reviews only (before any payment)
