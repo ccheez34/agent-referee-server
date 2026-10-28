@@ -10,6 +10,7 @@
 // payment settles, so a failed review is never charged.
 
 import { LIMITS, canonicalJson, panelShapeError, sha256Hex, validateCriteria } from "./logic.ts";
+import { ProviderCapError, classifyStatus, rateInfo, type CallObservation } from "./providers.ts";
 import { allowedModels, answerText, callModel, choosePanel, modelPool, panelModels, viaOpenRouter, JUDGE_TEMPERATURE, type Confidence, type Criterion, type JudgeKeys, type PanelEnv, type PanelRequest, type PanelSelection } from "./judge.ts";
 
 export type ReviewTier = "review" | "review-3";
@@ -97,9 +98,45 @@ export type ReviewCommitment = {
   panel_selection?: PanelSelection; // how the reviewers were chosen, when the request asked for something other than the default
 };
 
-export async function reviewCommitment(tier: ReviewTier, env: PanelEnv & { REVIEW_MODEL?: string; MODEL_POOL?: string; OPT_IN_MODELS?: string }, panel?: PanelRequest, rand?: () => number): Promise<ReviewCommitment> {
+/**
+ * Long reviews and small models: a light model (default Claude Haiku) can run out of room on a long task + output
+ * and return no usable verdict (uncharged, but the agent gets nothing). So when task + output is longer than
+ * LONG_REVIEW_CHARS (default 8,000), random draws ("rotate") leave light models out, and a request that names one
+ * itself is refused before payment with a clear message.
+ */
+export const DEFAULT_LONG_REVIEW_CHARS = 8000;
+export const DEFAULT_LIGHT_REVIEW_MODELS = "claude-haiku-5-5";
+type LongEnv = { LONG_REVIEW_CHARS?: string; LIGHT_REVIEW_MODELS?: string };
+export function longReviewRule(env: LongEnv) {
+  const n = Number(env.LONG_REVIEW_CHARS);
+  return {
+    max_chars_for_light_models: Number.isFinite(n) && n > 0 ? n : DEFAULT_LONG_REVIEW_CHARS,
+    light_models: String(env.LIGHT_REVIEW_MODELS ?? DEFAULT_LIGHT_REVIEW_MODELS).split(",").map((m) => m.trim()).filter(Boolean),
+  };
+}
+
+export async function reviewCommitment(
+  tier: ReviewTier,
+  env: PanelEnv & LongEnv & { REVIEW_MODEL?: string; MODEL_POOL?: string; OPT_IN_MODELS?: string },
+  panel?: PanelRequest,
+  rand?: () => number,
+  inputChars = 0,
+): Promise<ReviewCommitment> {
+  const rule = longReviewRule(env);
+  const long = inputChars > rule.max_chars_for_light_models;
+  const light = (m: string) => rule.light_models.includes(m);
+  let pool = modelPool(env);
+  if (long) {
+    pool = pool.filter((m) => !light(m));
+    const named = panel === "rotate" || panel === undefined ? [] : (Array.isArray(panel) ? (panel as any[]).flat() : Object.values((panel as any).picks ?? {})).map(String);
+    const tooSmall = [...new Set(named.filter(light))];
+    if (tooSmall.length)
+      throw new Error(
+        `${tooSmall.join(", ")} can't reliably review inputs this long (task + output is ${inputChars} characters; the limit for ${tooSmall.length > 1 ? "these models" : "this model"} is ${rule.max_chars_for_light_models}). Choose other reviewers, use "rotate" (it leaves them out for long inputs), or shorten the input.`,
+      );
+  }
   // Throws a readable Error if the request names a model outside the pool.
-  const picked = panel ? choosePanel(panel, REVIEW_SIZE[tier], modelPool(env), rand, allowedModels(env)) : undefined;
+  const picked = panel ? choosePanel(panel, REVIEW_SIZE[tier], pool, rand, allowedModels(env)) : undefined;
   return {
     ...(picked ? { panel_selection: picked.selection } : {}),
     models: picked ? picked.models : reviewModels(tier, env),
@@ -219,8 +256,9 @@ export async function runOneReviewer(
   reviewer: number,
   input: ReviewInput,
   timeoutMs = REVIEWER_CALL_TIMEOUT_MS,
-  opts: { budgetMs?: number; sleep?: (ms: number) => Promise<unknown>; now?: () => number } = {},
+  opts: { budgetMs?: number; sleep?: (ms: number) => Promise<unknown>; now?: () => number; observe?: (o: CallObservation) => void } = {},
 ): Promise<ReviewVote> {
+  const observe = opts.observe ?? (() => {});
   const user = buildReviewMessage(input.task, input.output, input.title, input.criteria);
   const now = opts.now ?? Date.now;
   const sleep = opts.sleep ?? sleepMs;
@@ -237,6 +275,7 @@ export async function runOneReviewer(
       res = await callModel(keys, model, REVIEW_SYSTEM, user, AbortSignal.timeout(callTimeoutMs), REVIEWER_MAX_TOKENS);
     } catch (e: any) {
       const timedOut = e?.name === "TimeoutError" || e?.name === "AbortError";
+      observe({ kind: timedOut ? "timeout" : "network" });
       lastErr = timedOut ? `reviewer timed out after ${Math.round(callTimeoutMs / 1000)}s` : `reviewer request failed: ${String(e?.message ?? e).slice(0, 150)}`;
       console.error(`review ${model} reviewer ${reviewer}: ${lastErr}`);
       if (timedOut && ++hangsOrBadAnswers >= 2) break; // a provider that hangs twice won't answer a third time in time
@@ -244,18 +283,24 @@ export async function runOneReviewer(
       continue;
     }
     if (!res.ok) {
+      const raw = await res.text().catch(() => "");
       let detail = "";
       try {
-        const e: any = await res.json();
+        const e: any = JSON.parse(raw);
         detail = String(e?.error?.message ?? e?.error?.type ?? "").replace(/\s+/g, " ").slice(0, 200);
       } catch {}
+      const kind = classifyStatus(model, res.status, raw);
+      observe({ kind, status: res.status, rate: rateInfo(res.headers) });
       lastErr = `reviewer API returned ${res.status}${detail ? `: ${detail}` : ""}`;
       console.error(`review ${model} reviewer ${reviewer} (try ${tryNumber}): ${lastErr}`);
+      // A spend cap or credit problem is account-wide and lasts: stop now, don't retry into it.
+      if (kind === "cap") throw new ProviderCapError(model, res.status, detail || raw.slice(0, 160));
       if (res.status >= 400 && res.status < 500 && res.status !== 429) break; // won't fix itself on a retry
       // Busy (429) or a provider error (5xx, 529 overloaded): wait, then try again.
       if (!(await waitBeforeRetry(tryNumber, res.headers.get("retry-after")))) break;
       continue;
     }
+    observe({ kind: "ok", status: res.status, rate: rateInfo(res.headers) });
     try {
       const data: any = await res.json();
       if (data?.error) throw new Error(`reviewer API error: ${String(data.error.message ?? data.error).slice(0, 200)}`);
