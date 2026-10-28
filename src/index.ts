@@ -22,7 +22,7 @@ import { recordCutOff } from "./cutoffs.ts";
 import { blockedStat, countryStat, regionBlock, regionRefusal, whereFrom } from "./regions.ts";
 import {
   MULTI_BUDGET_MS, MULTI_CALL_TIMEOUT_MS, MULTI_FORMAT_VERSION, MULTI_LEASE_MS, MULTI_LIMITS, MULTI_MAX_ISSUES, MULTI_MESSAGE_FORMAT, MULTI_PIECES, MULTI_RECEIPT_FORMAT, MULTI_SYSTEM,
-  MultiClosedError, boundaryToken, multiCommitment, multiMaxTokens, multiModels, multiReviewPayload, multiReviewerHow, readJsonCapped, validateMultiReview, type MultiTier,
+  MultiClosedError, TOO_BIG, boundaryToken, multiCommitment, multiMaxTokens, multiModels, multiReviewPayload, multiReviewerHow, readJsonCapped, validateMultiReview, type MultiTier,
 } from "./multipart.ts";
 
 export { MatchRoom, Ledger, Gate, Health };
@@ -488,7 +488,7 @@ async function multiGuard(c: any, next: any) {
   if (await reviewsPausedNow(c.env)) return err(503, REVIEWS_PAUSED_MSG);
   if (!(await multiOn(c))) return err(503, `${tier} isn't open yet. Nothing was charged. POST /review-3 reviews one piece of up to ${REVIEW_LIMITS.maxOutput} characters.`);
   const body = await readJsonCapped(c.req.raw, MULTI_LIMITS.maxBodyBytes);
-  if (body === "too_big") return err(413, `The request body is over ${MULTI_LIMITS.maxBodyBytes / 1024} KB. Nothing was charged.`);
+  if (body === TOO_BIG) return err(413, `The request body is over ${MULTI_LIMITS.maxBodyBytes / 1024} KB. Nothing was charged.`);
   const v = validateMultiReview(body, tier);
   if (!v.ok) return err(400, `${v.error} Nothing was charged.`);
   let commitment;
@@ -530,7 +530,7 @@ async function multiGuard(c: any, next: any) {
     await next();
   } finally {
     await slots.lease.release();
-    if (!g.recorded) await releaseReservation(c, caller, failLimit, reservation);
+    if (!g.recorded) await releaseReservation(c, caller, failLimit, g.reservation);
   }
 }
 
@@ -1065,62 +1065,76 @@ async function handleMultiReview(c: any, tier: MultiTier) {
     }
     g.lease = late.lease;
   }
+  const st = g; // narrowed: defined from here on (also inside runMulti)
   const { input, commitment, caller } = g;
   const lease = g.lease;
   const started = Date.now();
-  let settled: PromiseSettledResult<any>[];
+  // Any way out of here without a recorded result gives the in-flight reservation back. The guard does this too on
+  // the normal path; on the late-admission path (reservation taken just above) only this handler can.
   try {
-    const budgetMs = reviewBudget({ budgetMs: MULTI_BUDGET_MS, elapsedMs: started - g.t0, header: c.req.header("x-payment") });
-    if (budgetMs === null) return busy(10, "not enough time was left in this payment's window for a full review.");
-    const fake = fakeAiConfig(c.env, { mix: c.req.header("x-test-fake-mix"), delay: c.req.header("x-test-fake-delay") });
-    const keys = { ANTHROPIC_API_KEY: c.env.ANTHROPIC_API_KEY, OPENROUTER_API_KEY: c.env.OPENROUTER_API_KEY, fake };
-    const token = boundaryToken(); // one per request, the same for every reviewer
-    settled = await Promise.allSettled(
-      commitment.models.map((m: string, i: number) =>
-        runOneReviewer(keys, m, i + 1, input, MULTI_CALL_TIMEOUT_MS, {
-          budgetMs,
-          how: multiReviewerHow(m, input, token, c.env),
-          observe: (o) => lease.observe(i, o),
-          onCutOff: (cut) => void inBackground(c, recordCutOff(c.env, cut)),
-        }),
-      ),
-    );
+    return await runMulti();
   } finally {
-    await lease.release();
-  }
-  const record = async (what: "record" | "record_ok") => {
-    g.recorded = true;
-    if (caller && c.env.LEDGER)
-      await ledgerJson(c.env, caller, "review-fails", { caller, limit: failLimit, [what]: true, release_token: g.reservation, ...(what === "record" ? { weight } : {}) }).catch(() => {});
-  };
-  const failed = settled.find((r) => r.status === "rejected") as PromiseRejectedResult | undefined;
-  if (failed) {
-    const msg = String(failed.reason?.message ?? failed.reason);
-    console.error(`review ${tier} failed after ${Date.now() - started}ms: ${msg.slice(0, 200)}`);
-    if (lease.capHit()) {
-      await releaseReservation(c, caller, failLimit, g.reservation);
+    if (!g.recorded) {
       g.recorded = true;
-      return busy(600, "the AI provider's account limit was reached; reviews resume when it's lifted.");
+      await releaseReservation(c, caller, failLimit, g.reservation);
     }
-    await record("record");
-    stat(c, "paid_failed");
-    stat(c, `paid_failed_${tier.replace("-", "")}`);
-    return err(502, `A reviewer didn't return a usable verdict (${msg.slice(0, 200)}). Nothing was charged; this failed review counts as ${weight} of today's allowed failures. Try again.`);
   }
-  const votes = settled.map((r) => (r as PromiseFulfilledResult<any>).value);
-  console.log(`review ${tier} ok in ${Date.now() - started}ms: ${votes.map((v) => `${v.model}=${v.verdict}${v.issues_dropped ? ` (dropped ${v.issues_dropped})` : ""}`).join(" ")}`);
-  await record("record_ok");
-  stat(c, `paid_ok_${tier.replace("-", "")}`);
-  const payload = await multiReviewPayload({ tier, input, commitment, votes, payer: payerFromPaymentHeader(c.req.header("x-payment")), network: c.env.NETWORK, id: randomToken(12) });
-  const receipt = await signReceipt(payload, c.env.SIGNING_KEY, c.env.PUBLIC_KEY);
-  return c.json({
-    review_id: payload.review_id,
-    tier,
-    result: payload.result,
-    votes: payload.votes,
-    receipt,
-    note: "Save the receipt with the task and every piece (with its name, if you gave one): anyone holding them can check the signature, task_sha256, each piece's sha256 and chars, and pieces_sha256. The service keeps no copy of the review; the receipt you hold is the only record. It is not a guarantee the work is correct.",
-  });
+
+  async function runMulti() {
+    let settled: PromiseSettledResult<any>[];
+    try {
+      const budgetMs = reviewBudget({ budgetMs: MULTI_BUDGET_MS, elapsedMs: started - st.t0, header: c.req.header("x-payment") });
+      if (budgetMs === null) return busy(10, "not enough time was left in this payment's window for a full review.");
+      const fake = fakeAiConfig(c.env, { mix: c.req.header("x-test-fake-mix"), delay: c.req.header("x-test-fake-delay") });
+      const keys = { ANTHROPIC_API_KEY: c.env.ANTHROPIC_API_KEY, OPENROUTER_API_KEY: c.env.OPENROUTER_API_KEY, fake };
+      const token = boundaryToken(); // one per request, the same for every reviewer
+      settled = await Promise.allSettled(
+        commitment.models.map((m: string, i: number) =>
+          runOneReviewer(keys, m, i + 1, input, MULTI_CALL_TIMEOUT_MS, {
+            budgetMs,
+            how: multiReviewerHow(m, input, token, c.env),
+            observe: (o) => lease.observe(i, o),
+            onCutOff: (cut) => void inBackground(c, recordCutOff(c.env, cut)),
+          }),
+        ),
+      );
+    } finally {
+      await lease.release();
+    }
+    const record = async (what: "record" | "record_ok") => {
+      st.recorded = true;
+      if (caller && c.env.LEDGER)
+        await ledgerJson(c.env, caller, "review-fails", { caller, limit: failLimit, [what]: true, release_token: st.reservation, ...(what === "record" ? { weight } : {}) }).catch(() => {});
+    };
+    const failed = settled.find((r) => r.status === "rejected") as PromiseRejectedResult | undefined;
+    if (failed) {
+      const msg = String(failed.reason?.message ?? failed.reason);
+      console.error(`review ${tier} failed after ${Date.now() - started}ms: ${msg.slice(0, 200)}`);
+      if (lease.capHit()) {
+        await releaseReservation(c, caller, failLimit, st.reservation);
+        st.recorded = true;
+        return busy(600, "the AI provider's account limit was reached; reviews resume when it's lifted.");
+      }
+      await record("record");
+      stat(c, "paid_failed");
+      stat(c, `paid_failed_${tier.replace("-", "")}`);
+      return err(502, `A reviewer didn't return a usable verdict (${msg.slice(0, 200)}). Nothing was charged; this failed review counts as ${weight} of today's allowed failures. Try again.`);
+    }
+    const votes = settled.map((r) => (r as PromiseFulfilledResult<any>).value);
+    console.log(`review ${tier} ok in ${Date.now() - started}ms: ${votes.map((v) => `${v.model}=${v.verdict}${v.issues_dropped ? ` (dropped ${v.issues_dropped})` : ""}`).join(" ")}`);
+    await record("record_ok");
+    stat(c, `paid_ok_${tier.replace("-", "")}`);
+    const payload = await multiReviewPayload({ tier, input, commitment, votes, payer: payerFromPaymentHeader(c.req.header("x-payment")), network: c.env.NETWORK, id: randomToken(12) });
+    const receipt = await signReceipt(payload, c.env.SIGNING_KEY, c.env.PUBLIC_KEY);
+    return c.json({
+      review_id: payload.review_id,
+      tier,
+      result: payload.result,
+      votes: payload.votes,
+      receipt,
+      note: "Save the receipt with the task and every piece (with its name, if you gave one): anyone holding them can check the signature, task_sha256, each piece's sha256 and chars, and pieces_sha256. The service keeps no copy of the review; the receipt you hold is the only record. It is not a guarantee the work is correct.",
+    });
+  }
 }
 
 app.post("/review-3x2", (c) => handleMultiReview(c, "review-3x2"));

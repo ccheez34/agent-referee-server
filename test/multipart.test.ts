@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import {
   MULTI_LIMITS, MULTI_MAX_TOKENS, MULTI_SYSTEM, MULTI_MESSAGE_FORMAT, MULTI_FORMAT_VERSION, MODEL_OUTPUT_LIMITS, MultiClosedError,
   boundaryToken, buildMultiMessage, multiCommitment, multiMaxTokens, multiModels, multiPromptSha, multiReviewPayload, multiReviewerHow,
-  pieceRecords, piecesSha256, readJsonCapped, validateMultiReview, type MultiInput,
+  pieceRecords, piecesSha256, readJsonCapped, validateMultiReview, TOO_BIG, type MultiInput,
 } from "../src/multipart.ts";
 import { runOneReviewer, REVIEW_SYSTEM } from "../src/review.ts";
 import { canonicalJson, sha256Hex } from "../src/logic.ts";
@@ -93,7 +93,7 @@ test("the 256 KB body limit is applied before parsing, and fits the largest vali
   assert.equal(validateMultiReview(parsed, "review-3x3").ok, true);
 
   const big = "x".repeat(MULTI_LIMITS.maxBodyBytes + 1);
-  assert.equal(await readJsonCapped(new Request("https://x", { method: "POST", body: big }), MULTI_LIMITS.maxBodyBytes), "too_big", "declared length over");
+  assert.equal(await readJsonCapped(new Request("https://x", { method: "POST", body: big }), MULTI_LIMITS.maxBodyBytes), TOO_BIG, "declared length over");
   // A streamed body with no Content-Length is counted while it's read.
   const stream = new ReadableStream({
     start(c) {
@@ -103,8 +103,11 @@ test("the 256 KB body limit is applied before parsing, and fits the largest vali
   });
   const req = new Request("https://x", { method: "POST", body: stream, duplex: "half" } as any);
   assert.equal(req.headers.get("content-length"), null);
-  assert.equal(await readJsonCapped(req, MULTI_LIMITS.maxBodyBytes), "too_big", "streamed body over");
+  assert.equal(await readJsonCapped(req, MULTI_LIMITS.maxBodyBytes), TOO_BIG, "streamed body over");
   assert.equal(await readJsonCapped(new Request("https://x", { method: "POST", body: "{not json" }), MULTI_LIMITS.maxBodyBytes), null);
+  assert.equal(await readJsonCapped(new Request("https://x", { method: "POST", body: '"too_big"' }), MULTI_LIMITS.maxBodyBytes), "too_big", "a body that is the string too_big is just JSON");
+  const broken = new ReadableStream({ pull(c) { c.error(new Error("client hung up")); } });
+  assert.equal(await readJsonCapped(new Request("https://x", { method: "POST", body: broken, duplex: "half" } as any), MULTI_LIMITS.maxBodyBytes), null, "a read error is a bad body, not a crash");
   assert.equal(await readJsonCapped(new Request("https://x", { method: "POST", body: new Uint8Array([0x7b, 0xff, 0x7d]) }), MULTI_LIMITS.maxBodyBytes), null, "invalid UTF-8");
 });
 
@@ -112,12 +115,27 @@ test("the 256 KB body limit is applied before parsing, and fits the largest vali
 
 const OPUS = "claude-opus-5-5", SONNET = "claude-sonnet-5-5", HAIKU = "claude-haiku-5-5", LUNA = "openai/gpt-6-luna", ARGON = "google/gemini-4-argon", FLASH = "google/gemini-3.7-flash", KIMI = "moonshotai/kimi-k3";
 
+/** Opt-in models are eligible only once their published output limit is recorded; tests that need Kimi set one. */
+function withKimiChecked<T>(fn: () => T): T {
+  const saved = MODEL_OUTPUT_LIMITS[KIMI];
+  MODEL_OUTPUT_LIMITS[KIMI] = 16_000;
+  const restore = () => (MODEL_OUTPUT_LIMITS[KIMI] = saved);
+  try {
+    const r = fn();
+    return r instanceof Promise ? (r.finally(restore) as T) : (restore(), r);
+  } catch (e) {
+    restore();
+    throw e;
+  }
+}
+
 test("eligible models: the default pool without Haiku; opt-in models only once listed, and never drawn", () => {
   const m = multiModels({});
   assert.deepEqual(m.drawable.sort(), [OPUS, SONNET, LUNA, ARGON, FLASH].sort());
   assert.deepEqual(m.eligible.sort(), m.drawable.sort());
   assert.deepEqual(m.missing, []);
-  const withKimi = multiModels({ MULTI_PART_OPT_IN: `${KIMI},not-a-model,${HAIKU}` });
+  assert.ok(!multiModels({ MULTI_PART_OPT_IN: KIMI }).eligible.includes(KIMI), "not without a recorded output limit");
+  const withKimi = withKimiChecked(() => multiModels({ MULTI_PART_OPT_IN: `${KIMI},not-a-model,${HAIKU}` }));
   assert.ok(withKimi.eligible.includes(KIMI), "listed opt-in model becomes eligible");
   assert.ok(!withKimi.drawable.includes(KIMI), "but is never drawn");
   assert.ok(!withKimi.eligible.includes("not-a-model"), "only real opt-in models");
@@ -138,7 +156,8 @@ test("refused before payment: Haiku, opt-in models, two models from one company,
   const exact = await multiCommitment("review-3x2", {}, [SONNET, LUNA, FLASH]);
   assert.deepEqual(exact.models, [SONNET, LUNA, FLASH]);
   assert.equal(exact.panel_selection?.mode, "custom");
-  const kimi = await multiCommitment("review-3x2", { MULTI_PART_OPT_IN: KIMI }, [KIMI, LUNA, ARGON]);
+  const kimi = await withKimiChecked(() => multiCommitment("review-3x2", { MULTI_PART_OPT_IN: KIMI }, [KIMI, LUNA, ARGON]));
+  await assert.rejects(multiCommitment("review-3x2", { MULTI_PART_OPT_IN: KIMI }, [KIMI, LUNA, ARGON]), /opt-in models only work once the operator has made them eligible/);
   assert.deepEqual(kimi.models, [KIMI, LUNA, ARGON], "an opt-in model that passed the live test can be named");
 });
 
@@ -148,11 +167,14 @@ test("a company with no eligible model closes the tiers (503), never fewer than 
   await assert.rejects(multiCommitment("review-3x3", { MODEL_POOL: `${OPUS},${LUNA}` }), MultiClosedError, "a pool of two companies");
   await assert.rejects(multiCommitment("review-3x3", { MODEL_POOL: `${HAIKU},${LUNA},${ARGON}` }), MultiClosedError, "Anthropic's only model is light");
   // Even with an opt-in model from a fourth company eligible, a missing default company still closes the tier.
-  await assert.rejects(multiCommitment("review-3x3", { MULTI_PART_EXCLUDE: LUNA, MULTI_PART_OPT_IN: KIMI }, [OPUS, KIMI, ARGON]), MultiClosedError);
+  await withKimiChecked(() => assert.rejects(multiCommitment("review-3x3", { MULTI_PART_EXCLUDE: LUNA, MULTI_PART_OPT_IN: KIMI }, [OPUS, KIMI, ARGON]), MultiClosedError));
+  await assert.rejects(multiCommitment("review-3x3", { MULTI_PART_EXCLUDE: `${ARGON},${FLASH},${LUNA}` }), /these have none: openai, google|these have none: google, openai/, "several missing companies read correctly");
 });
 
 test("random draws (the default, rotate and agreed sets) never pick an ineligible model, and always three companies", async () => {
   const env = { MULTI_PART_OPT_IN: KIMI, MULTI_PART_EXCLUDE: FLASH };
+  MODEL_OUTPUT_LIMITS[KIMI] = 16_000; // Kimi eligible (named), so this shows it's still never drawn
+  assert.ok(multiModels(env).eligible.includes(KIMI));
   let i = 0;
   const rand = () => ((i = (i * 1103515245 + 12345) % 2 ** 31) / 2 ** 31);
   const seen = new Set<string>();
@@ -168,6 +190,7 @@ test("random draws (the default, rotate and agreed sets) never pick an ineligibl
     }
   }
   assert.deepEqual([...seen].sort(), [OPUS, SONNET, LUNA, ARGON].sort(), "every drawable model comes up");
+  MODEL_OUTPUT_LIMITS[KIMI] = null;
   const sets = [[OPUS, LUNA, ARGON], [SONNET, LUNA, ARGON]];
   const c = await multiCommitment("review-3x2", {}, sets, rand);
   assert.ok(sets.some((s) => canonicalJson(s) === canonicalJson(c.models)));
@@ -223,6 +246,7 @@ test("max_tokens is 12,000 for every reviewer, capped by the model's published l
   assert.equal(multiMaxTokens(LUNA, { MULTI_PART_MAX_TOKENS: `${LUNA}=9000, ${OPUS}=bad` }), 9000);
   assert.equal(multiMaxTokens(OPUS, { MULTI_PART_MAX_TOKENS: `${LUNA}=9000, ${OPUS}=bad` }), 12_000);
   assert.equal(multiMaxTokens(LUNA, { MULTI_PART_MAX_TOKENS: `${LUNA}=20000` }), 12_000, "can lower, never raise");
+  for (const bad of [`${LUNA}=5=6`, `${LUNA}=5.5`, `${LUNA}=-5`, `${LUNA}= `, `${LUNA}=1e3`, `${LUNA}`]) assert.equal(multiMaxTokens(LUNA, { MULTI_PART_MAX_TOKENS: bad }), 12_000, `ignored: ${bad}`);
   const saved = MODEL_OUTPUT_LIMITS[ARGON];
   MODEL_OUTPUT_LIMITS[ARGON] = 8192;
   assert.equal(multiMaxTokens(ARGON), 8192, "a lower published limit wins");

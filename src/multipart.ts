@@ -23,8 +23,8 @@ export const MULTI_LIMITS = {
   maxPiece: 12_000,
   maxTotal: 36_000,
   maxName: 80,
-  /** Refused before parsing. Fits the largest valid request even when every character is JSON-escaped
-   * (6 bytes per character for 40,000 characters is 240 KB). */
+  /** Refused before parsing. Fits the largest valid request even when every character is JSON-escaped: a 4,000-
+   * character task plus 36,000 characters of pieces is 40,000 characters, at 6 bytes each 240 KB. */
   maxBodyBytes: 256 * 1024,
 };
 /** At most this many issues per vote, in all (the prompt asks for it; the parser keeps the first ones). */
@@ -57,6 +57,8 @@ export const MODEL_OUTPUT_LIMITS: Record<string, number | null> = {
   "openai/gpt-6-luna": null,
   "google/gemini-4-argon": null,
   "google/gemini-3.7-flash": null,
+  // Opt-in models, checked only if one is ever made eligible through MULTI_PART_OPT_IN (it isn't eligible without a number).
+  "moonshotai/kimi-k3": null,
 };
 
 /** max_tokens for one model on these routes: 12,000, capped at the model's published limit, and lowered further by
@@ -66,9 +68,10 @@ export function multiMaxTokens(model: string, env: { MULTI_PART_MAX_TOKENS?: str
   const published = MODEL_OUTPUT_LIMITS[model];
   if (typeof published === "number" && published > 0) n = Math.min(n, published);
   for (const part of String(env.MULTI_PART_MAX_TOKENS ?? "").split(",")) {
-    const [m, v] = part.split("=").map((x) => x.trim());
-    const k = Number(v);
-    if (m === model && Number.isInteger(k) && k > 0) n = Math.min(n, k);
+    const bits = part.split("=").map((x) => x.trim());
+    if (bits.length !== 2) continue; // "model=n" only; anything else is ignored
+    const k = Number(bits[1]);
+    if (bits[0] === model && /^\d+$/.test(bits[1]) && Number.isInteger(k) && k > 0) n = Math.min(n, k);
   }
   return n;
 }
@@ -80,7 +83,8 @@ export type MultiEnv = {
   OPT_IN_MODELS?: string;
   LIGHT_REVIEW_MODELS?: string;
   LONG_REVIEW_CHARS?: string;
-  /** Opt-in models made eligible after passing the live test (spec 4.3). They can be named, never drawn. */
+  /** Opt-in models made eligible after passing the live test (spec 4.3). They can be named, never drawn, and only once
+   * their published output limit is recorded in MODEL_OUTPUT_LIMITS (so none runs uncapped). */
   MULTI_PART_OPT_IN?: string;
   /** Default-pool models left out after failing the live test (spec 4.3). */
   MULTI_PART_EXCLUDE?: string;
@@ -99,7 +103,8 @@ export function multiModels(env: MultiEnv): { drawable: string[]; eligible: stri
   const ok = (m: string) => !light.includes(m) && !exclude.includes(m);
   const pool = modelPool(env);
   const drawable = pool.filter(ok);
-  const optIn = list(env.MULTI_PART_OPT_IN).filter((m) => optInModels(env).includes(m) && allowedModels(env).includes(m) && ok(m));
+  const checked = (m: string) => typeof MODEL_OUTPUT_LIMITS[m] === "number";
+  const optIn = list(env.MULTI_PART_OPT_IN).filter((m) => optInModels(env).includes(m) && allowedModels(env).includes(m) && ok(m) && checked(m));
   const eligible = [...new Set([...drawable, ...optIn])];
   const have = new Set(drawable.map(companyOf));
   const companies = [...new Set(pool.map(companyOf))];
@@ -113,11 +118,11 @@ export class MultiClosedError extends Error {}
 
 export async function multiCommitment(tier: MultiTier, env: MultiEnv, panel?: PanelRequest, rand?: () => number): Promise<ReviewCommitment> {
   const { drawable, eligible, missing } = multiModels(env);
-  if (missing.length) throw new MultiClosedError(`${tier} is closed for now: it needs an eligible reviewer from each of three AI companies, and ${missing.join(", ")} has none.`);
+  if (missing.length) throw new MultiClosedError(`${tier} is closed for now: it needs an eligible reviewer from each of three AI companies, and ${missing.length > 1 ? `these have none: ${missing.join(", ")}` : `${missing[0]} has none`}.`);
   const notEligible = (ms: string[]) => [...new Set(ms.filter((m) => !eligible.includes(m)))];
   const threeCompanies = (ms: string[]) => ms.length === MULTI_SIZE && new Set(ms.map(companyOf)).size === MULTI_SIZE;
   const notEligibleMsg = (bad: string[]) =>
-    `Not eligible for multi-part reviews: ${bad.join(", ")}. These tiers use only ${eligible.join(", ")} (light models and opt-in models are refused). GET /reviewers lists them.`;
+    `Not eligible for multi-part reviews: ${bad.join(", ")}. These tiers use only ${eligible.join(", ")}: light models are refused, and opt-in models only work once the operator has made them eligible. GET /reviewers lists them.`;
   const companyMsg = "A multi-part review needs three models from three different AI companies (for example one Anthropic, one OpenAI, one Google).";
   let picked: { models: string[]; selection: PanelSelection };
   if (panel === undefined || panel === "rotate") {
@@ -205,24 +210,29 @@ export function validateMultiReview(body: any, tier: MultiTier): { ok: true; val
 /**
  * Reads a request body, refusing it once it passes maxBytes, before anything parses it (checks Content-Length first,
  * then counts while reading, so a chunked body without a length can't get past). Returns the parsed JSON, null for
- * a body that isn't JSON, or "too_big".
+ * a body that isn't JSON (or that couldn't be read, e.g. the client hung up), or TOO_BIG.
  */
-export async function readJsonCapped(req: Request, maxBytes: number): Promise<unknown | null | "too_big"> {
+export const TOO_BIG: unique symbol = Symbol("too_big");
+export async function readJsonCapped(req: Request, maxBytes: number): Promise<unknown | typeof TOO_BIG> {
   const declared = Number(req.headers.get("content-length"));
-  if (Number.isFinite(declared) && declared > maxBytes) return "too_big";
+  if (Number.isFinite(declared) && declared > maxBytes) return TOO_BIG;
   if (!req.body) return null;
   const reader = req.body.getReader();
   const chunks: Uint8Array[] = [];
   let size = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    size += value.byteLength;
-    if (size > maxBytes) {
-      await reader.cancel().catch(() => {});
-      return "too_big";
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > maxBytes) {
+        await reader.cancel().catch(() => {});
+        return TOO_BIG;
+      }
+      chunks.push(value);
     }
-    chunks.push(value);
+  } catch {
+    return null;
   }
   const all = new Uint8Array(size);
   let at = 0;
