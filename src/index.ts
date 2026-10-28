@@ -272,19 +272,27 @@ async function releaseReservation(c: any, caller: string | undefined, failLimit:
 
 /** The failed-review allowance for this caller, reserving one in-flight review (released when the result is
  * recorded). Fails closed when the ledger can't answer. Returns a refusal, or the reservation token (or null). */
+/** Extra reviews one address may have in flight beyond its remaining failure allowance (REVIEW_PARALLEL_PER_ADDRESS, default 20). */
+const reviewParallel = (env: Env) => {
+  const n = Number(env.REVIEW_PARALLEL_PER_ADDRESS);
+  return Number.isFinite(n) && n >= 0 ? n : 20;
+};
+
 async function failLimitCheck(c: any, caller: string | undefined, failLimit: number): Promise<Response | { token?: string } | null> {
   if (!caller || !c.env.LEDGER) return null;
   let f: any;
   try {
-    f = await ledgerJson(c.env, caller, "review-fails", { caller, limit: failLimit, global_limit: shardLimit(c.env.REVIEW_FAIL_GLOBAL_LIMIT, 500), reserve: true });
+    f = await ledgerJson(c.env, caller, "review-fails", { caller, limit: failLimit, global_limit: shardLimit(c.env.REVIEW_FAIL_GLOBAL_LIMIT, 500), parallel: reviewParallel(c.env), reserve: true });
   } catch (e: any) {
     await recordEvent(c.env, "ledger_error", `review-fails: ${String(e?.message ?? e)}`);
     return err(503, "Sealed review is temporarily unavailable (its usage limits can't be checked right now). Nothing was charged; try again in a minute.");
   }
   if (!f.blocked) return { token: f.token };
+  // Too many of this address's reviews running at once: like a full pool, a short wait fixes it.
+  if (f.reason === "too_many_in_flight") return busy(10, `too many of your reviews are running at once (about ${reviewParallel(c.env) + Math.max(0, failLimit + (f.ok ?? 0) - (f.count ?? 0))} at a time from one address).`);
   return err(
     429,
-    f.count >= failLimit + (f.ok ?? 0)
+    f.reason ? f.reason === "fail_limit" : f.count >= failLimit + (f.ok ?? 0)
       ? `review_fail_limit: too many failed reviews from your IP address today (${failLimit}, plus one per successful review). Resets at 00:00 UTC. Nothing was charged.`
       : `free_failure_ceiling: failed reviews across all users hit today's ceiling, so addresses without a successful review today are paused until 00:00 UTC. Nothing was charged.`,
   );

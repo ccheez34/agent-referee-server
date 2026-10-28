@@ -488,6 +488,15 @@ test("parallel paid reviews from one caller can't all slip past the failed-revie
   assert.equal((await call({ caller: "bb", limit: 1, reserve: true })).blocked, true);
   now += 300_001;
   assert.ok((await call({ caller: "bb", limit: 1, reserve: true })).token);
+  // With `parallel` room (the Worker passes 20), an address can run 3 + 20 reviews at once; the next is told
+  // "too many in flight" (the Worker answers busy, retry soon), not that it hit a failure limit.
+  const wide = await Promise.all(Array.from({ length: 30 }, () => call({ caller: "cc", limit: 3, parallel: 20, reserve: true })));
+  assert.equal(wide.filter((r) => r.token).length, 23);
+  assert.ok(wide.filter((r) => r.blocked).every((r) => r.reason === "too_many_in_flight"));
+  // Recorded failures still block on their own: parallel room never adds to the failure allowance.
+  for (const r of wide.filter((r) => r.token).slice(0, 3)) await call({ caller: "cc", limit: 3, parallel: 20, record: true, release_token: r.token });
+  const full = await call({ caller: "cc", limit: 3, parallel: 20, reserve: true });
+  assert.deepEqual([full.blocked, full.reason, full.count], [true, "fail_limit", 3]);
 });
 
 test("the review's time budget never runs past the payment authorization", () => {

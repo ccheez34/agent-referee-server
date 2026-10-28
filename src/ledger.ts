@@ -203,7 +203,7 @@ export class Ledger {
     }
 
     if (action === "review-fails") {
-      // body: { caller, limit, global_limit?, record?, record_ok? } -> counts failed paid reviews per address today (UTC).
+      // body: { caller, limit, global_limit?, parallel?, reserve?, record?, record_ok?, release_token? } -> counts failed paid reviews per address today (UTC).
       // A failed review isn't charged, so this stops one address from getting free AI calls by making reviews fail on
       // purpose. The caller is a daily-salted one-way hash (see index.ts); no IP address is stored. One small key per
       // caller per day (not one growing map), and the Worker spreads callers over 16 ledger shards.
@@ -235,14 +235,21 @@ export class Ledger {
       // past it, only addresses with a successful review today can keep going.
       const globalLimit = Number.isFinite(body?.global_limit) ? body.global_limit : 500;
       const overGlobal = total >= globalLimit && ok === 0;
-      const blocked = count + inflight.length >= limit + ok || overGlobal;
+      // In-flight reviews mostly succeed, so they get `parallel` extra room on top of the failure allowance: an
+      // address can run that many more reviews at once than it has failures left. Worst case, an address that makes
+      // every review fail gets `parallel` extra free failures once, after which its recorded failures block it.
+      const parallel = Number.isFinite(body?.parallel) ? Math.max(0, body.parallel) : 0;
+      const failBlocked = count >= limit + ok;
+      const inflightBlocked = count + inflight.length >= limit + ok + parallel;
+      const blocked = failBlocked || inflightBlocked || overGlobal;
+      const reason = failBlocked ? "fail_limit" : overGlobal ? "global_ceiling" : inflightBlocked ? "too_many_in_flight" : undefined;
       let token: string | undefined;
       if (body?.reserve && who && !blocked) {
         token = crypto.randomUUID();
         inflight.push({ id: token, t: this.now() });
         await st.put(ik, inflight);
       }
-      return json(200, { count, ok, limit, total, inflight: inflight.length, blocked, ...(token ? { token } : {}) });
+      return json(200, { count, ok, limit, total, inflight: inflight.length, blocked, ...(reason ? { reason } : {}), ...(token ? { token } : {}) });
     }
 
     if (action === "demo-quota") {
