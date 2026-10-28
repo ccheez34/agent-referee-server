@@ -203,12 +203,24 @@ function regionCheck(c: any, models: string[], suffix: string, count = false): R
   return regionRefusal(block, suffix);
 }
 
-/** Region rule for joining a match: its judges' companies (no judges: the sanctions list only). The match's status is
- * read only when some allowed model's company would refuse this location, so most requests cost nothing extra. */
+/**
+ * A match's judge models for the region rules: [] for a match without judges. When the match can't be read, or a
+ * judge-tier match shows no judges, every model agents may use: the strictest answer (fail closed, never open).
+ */
+async function matchJudgeModels(c: any, id: string, judgeTier: boolean): Promise<string[]> {
+  let status: any = null;
+  try {
+    const res = await forward(c.env, id, "status");
+    if (res.ok) status = await res.json();
+  } catch {}
+  const models: unknown[] = status?.judge ? (status.judge.panel ?? [{ model: status.judge.model }]).map((p: any) => p?.model) : [];
+  const readable = !!status && models.every((m) => typeof m === "string" && m) && (!judgeTier || models.length > 0);
+  return readable ? (models as string[]) : allowedModels(c.env);
+}
+
+/** Region rule for a guest joining an invite match: its judges' companies (no judges: the sanctions list only). */
 async function matchRegionCheck(c: any, id: string, suffix: string): Promise<Response | null> {
-  if (!regionBlock(c.env, allowedModels(c.env), whereOf(c))) return null;
-  const status: any = await (await forward(c.env, id, "status")).json().catch(() => null);
-  const models: string[] = status?.judge ? (status.judge.panel ?? [{ model: status.judge.model }]).map((p: any) => p.model) : [];
+  const models = await matchJudgeModels(c, id, false);
   return regionCheck(c, models, suffix, models.length > 0);
 }
 
@@ -349,8 +361,7 @@ async function judgeJoinGuard(c: any, next: any) {
   const body: any = await c.req.json().catch(() => null);
   const id = body?.match_id;
   if (typeof id !== "string" || !ID_RE.test(id)) return next(); // the handler gives the proper error, before payment settles
-  const status: any = await (await forward(c.env, id, "status")).json().catch(() => null);
-  const models: string[] = status?.judge ? (status.judge.panel ?? [{ model: status.judge.model }]).map((p: any) => p.model) : [];
+  const models = await matchJudgeModels(c, id, true);
   // Counted once per paid seat (the call carrying the payment).
   const region = regionCheck(c, models, "Nothing was charged.", c.env.PAYMENTS_ENABLED === "false" || !!c.req.header("x-payment"));
   if (region) return region;
@@ -596,7 +607,7 @@ app.get("/admin/stats", async (c) => {
       public: { spent_usd: usd(s.free_spent_micro?.public), budget_usd: usd(pub.budgetMicro) },
       ext: { spent_usd: usd(s.free_spent_micro?.ext), budget_usd: usd(ext.budgetMicro), note: "free reviews from the hosted MCP server (ChatGPT)" },
     },
-    key: "free_* = free reviews from the public routes; ext_* = free reviews from the hosted MCP server (ChatGPT); paid_* = paid reviews. ok_review / ok_review3 = completed, failed = a reviewer failed (not used / not charged), busy = at capacity, refused_caller = that address or user had used today's allowance, refused_budget = the shared budget was used up, bad_input = the request was rejected, region_blocked = refused because of where it came from. countries = AI requests by the country Cloudflare reports (paid reviews and judge seats once paid, free reviews once their input passed; XX = unknown; not the hosted MCP server's, which come from its own location), ran_out_of_tokens = AI answers cut off at the model's token limit (max_tokens) and so unusable: raise that model's limit if it keeps happening (the recent list has each one's limit and prompt length; GET /health warns for 24 h), region_blocked by country = those refused by the region rules (CC-SUB is a region, e.g. UA-43 Crimea; T1 = Tor). Spending is counted at list price, not the real AI cost.",
+    key: "free_* = free reviews from the public routes; ext_* = free reviews from the hosted MCP server (ChatGPT); paid_* = paid reviews. ok_review / ok_review3 = completed, failed = a reviewer failed (not used / not charged), busy = at capacity, refused_caller = that address or user had used today's allowance, refused_budget = the shared budget was used up, bad_input = the request was rejected, region_blocked = refused because of where it came from. countries = AI requests by the country Cloudflare reports, approximate (paid reviews and judge seats on the call carrying a payment, whether or not it then settles; free reviews once their input passed, including ones then refused or busy; XX = unknown; not the hosted MCP server's, which come from its own location), ran_out_of_tokens = AI answers cut off at the model's token limit (max_tokens) and so unusable: raise that model's limit if it keeps happening (the recent list has each one's limit and prompt length; GET /health warns for 24 h), region_blocked by country = those refused by the region rules (CC-SUB is a region, e.g. UA-43 Crimea; T1 = Tor). Spending is counted at list price, not the real AI cost.",
   });
 });
 

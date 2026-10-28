@@ -435,10 +435,10 @@ function parseVote(text: string, seats: string[], criteria: Criterion[] | undefi
 
 /** One model call: Anthropic directly for Claude ids, OpenRouter (OpenAI-compatible) for "provider/model" ids. */
 /** Answer budget for Claude judges (was 1000). A cut-off answer can't be used, and unused tokens cost nothing.
- * OpenRouter models get 6000, since reasoning models spend part of it thinking. */
+ * OpenRouter models (judges and reviewers) get 10,000, since reasoning models spend part of it thinking. */
 export const JUDGE_MAX_TOKENS = 4000;
-/** The answer budget (max_tokens) a model gets: OpenRouter models a fixed 6,000; Claude models `anthropicMaxTokens`. */
-export const OPENROUTER_MAX_TOKENS = 6000;
+/** The answer budget (max_tokens) a model gets: OpenRouter models a fixed 10,000; Claude models `anthropicMaxTokens`. */
+export const OPENROUTER_MAX_TOKENS = 10000;
 export const answerTokens = (model: string, anthropicMaxTokens = JUDGE_MAX_TOKENS) => (viaOpenRouter(model) ? OPENROUTER_MAX_TOKENS : anthropicMaxTokens);
 
 /** anthropicMaxTokens: the answer budget for Claude models (judges and reviewers both get 4000). */
@@ -456,6 +456,7 @@ export async function callModel(keys: JudgeKeys, model: string, system: string, 
       body: JSON.stringify({
         model,
         // Reasoning models spend part of max_tokens thinking; keep effort low and leave room for the JSON answer.
+        // 6,000 wasn't enough for DeepSeek V4 Pro or Mistral Large 4 on a 12,000-character code review (Oct 28).
         max_tokens: OPENROUTER_MAX_TOKENS,
         reasoning: { effort: "low", exclude: true },
         ...(privacyRouting(model) ? { provider: { data_collection: "deny" } } : {}),

@@ -31,18 +31,25 @@ export type Where = { country?: string; sub?: string };
 /** The request's country (upper case) and subdivision ("CC-SUB"), from Cloudflare. Unknown: both undefined. */
 export function whereFrom(req: Request, header: (name: string) => string | undefined): Where {
   const cf: any = (req as any).cf ?? {};
-  const raw = String(cf.country ?? header("cf-ipcountry") ?? "").trim().toUpperCase();
+  const raw = String(cf.country || header("cf-ipcountry") || "").trim().toUpperCase();
   const country = /^[A-Z][A-Z0-9]$/.test(raw) && raw !== "XX" ? raw : undefined;
   const region = String(cf.regionCode ?? "").trim().toUpperCase();
   const sub = country && /^[A-Z0-9]{1,3}$/.test(region) ? `${country}-${region}` : undefined;
   return { country, sub };
 }
 
+/** An env list, or the default when it's unset, blank or has any code that isn't valid (a typo such as "CN;RU" must
+ * never quietly empty a list). "none" is the only way to empty one. */
 function listFrom(env: Record<string, unknown>, name: string, fallback: string[]): string[] {
   const raw = env[name];
   if (typeof raw !== "string" || !raw.trim()) return fallback;
   if (raw.trim().toLowerCase() === "none") return [];
-  return raw.split(",").map((s) => s.trim().toUpperCase()).filter((s) => /^[A-Z][A-Z0-9](-[A-Z0-9]{1,3})?$/.test(s));
+  const codes = raw.split(",").map((s) => s.trim().toUpperCase()).filter(Boolean);
+  if (!codes.length || codes.some((s) => !/^[A-Z][A-Z0-9](-[A-Z0-9]{1,3})?$/.test(s))) {
+    console.error(`${name} has a code that isn't valid; using the default list instead`);
+    return fallback;
+  }
+  return codes;
 }
 
 /** BLOCKED_REGIONS_<COMPANY>, e.g. BLOCKED_REGIONS_ANTHROPIC or BLOCKED_REGIONS_DEEPSEEK. */

@@ -454,6 +454,10 @@ t("region rules: judge seats check the match's judges' companies", async () => {
   assert.equal(hk.status, 451, JSON.stringify(hk.body));
   assert.match(hk.body.error, /anthropic/);
   assert.notEqual((await call(e, "/join/judge", { match_id: id, seat: "alpha" }, from("JP"))).status, 451);
+  // If the match can't be read, the strictest list applies (fail closed): Hong Kong is still refused.
+  e.MATCHES.broken = true;
+  assert.equal((await call(e, "/join/judge", { match_id: id, seat: "beta" }, from("HK"))).status, 451);
+  assert.equal((await call(e, "/invite/join", { match_id: id, invite_token: "x".repeat(20) }, from("HK"))).status, 451);
 });
 
 t("GET /admin/stats: requests by country and region refusals, apart from the usage counts", async () => {
@@ -495,7 +499,7 @@ t("an answer cut off at the token limit is noted each time: per model in /admin/
   const recent = r.body.ran_out_of_tokens_recent;
   assert.equal(recent.length, 2);
   assert.equal(recent[0].where, "review");
-  assert.equal(recent[0].max_tokens, 4000);
+  assert.equal(recent[0].max_tokens, 8000);
   assert.ok(recent[0].prompt_chars > 0);
   assert.ok(!JSON.stringify(recent).includes(review.task), "never the prompt itself");
   const h = await call(e, "/health");

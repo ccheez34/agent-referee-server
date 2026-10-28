@@ -136,15 +136,22 @@ test("busy provider (429, too many concurrent requests): waits, tries again, and
   assert.equal(retryDelayMs(3, null, () => 0), 4000);
 });
 
-test("Claude reviewers and Claude judges both get a 4,000-token answer budget", async () => {
+test("Claude reviewers get an 8,000-token answer budget, Claude judges 4,000, OpenRouter models 10,000", async () => {
   const f = fakeApis({ "claude-opus-5-5": ans("pass"), "claude-haiku-5-5": "{}" });
   try {
     await runOneReviewer({ ANTHROPIC_API_KEY: "a" }, "claude-opus-5-5", 1, input);
     assert.equal(f.calls[0].body.max_tokens, REVIEWER_MAX_TOKENS);
-    assert.equal(REVIEWER_MAX_TOKENS, 4000);
+    assert.equal(REVIEWER_MAX_TOKENS, 8000);
     const { callModel } = await import("../src/judge.ts");
     await callModel({ ANTHROPIC_API_KEY: "a" }, "claude-haiku-5-5", "s", "u");
-    assert.equal(f.calls[1].body.max_tokens, 4000, "judges get the same room (was 1,000)");
+    assert.equal(f.calls[1].body.max_tokens, 4000, "judges (was 1,000)");
+    const g = fakeApis({ "openai/gpt-6-luna": () => new Response(JSON.stringify({ choices: [{ message: { content: ans("pass") }, finish_reason: "stop" }] })) });
+    try {
+      await callModel({ OPENROUTER_API_KEY: "o" }, "openai/gpt-6-luna", "s", "u");
+      assert.equal(g.calls[0].body.max_tokens, 10000);
+    } finally {
+      g.restore();
+    }
   } finally {
     f.restore();
   }
@@ -163,7 +170,7 @@ test("a review cut off at the token limit says so, names the reviewer, and isn't
     assert.equal(f.calls.length, 2, "an unusable answer gets 2 tries");
     // Each cut-off is noted, with the limit and prompt size (never the prompt).
     assert.equal(notes.length, 2);
-    assert.deepEqual({ ...notes[0], prompt_chars: 0 }, { where: "review", model: "claude-opus-5-5", max_tokens: 4000, prompt_chars: 0, try_number: 1 });
+    assert.deepEqual({ ...notes[0], prompt_chars: 0 }, { where: "review", model: "claude-opus-5-5", max_tokens: 8000, prompt_chars: 0, try_number: 1 });
     assert.ok(notes[0].prompt_chars > input.task.length + input.output.length);
     assert.equal(notes[1].try_number, 2);
   } finally {
@@ -174,7 +181,7 @@ test("a review cut off at the token limit says so, names the reviewer, and isn't
   try {
     const notes: any[] = [];
     await assert.rejects(runOneReviewer({ OPENROUTER_API_KEY: "o" }, "openai/gpt-6-luna", 2, input, undefined, { sleep: async () => {}, onCutOff: (c) => notes.push(c) }), /openai\/gpt-6-luna: reviewer ran out of tokens/);
-    assert.equal(notes[0].max_tokens, 6000, "OpenRouter models get 6,000");
+    assert.equal(notes[0].max_tokens, 10000, "OpenRouter models get 10,000");
   } finally {
     g.restore();
   }

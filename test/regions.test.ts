@@ -14,6 +14,7 @@ test("location: Cloudflare's cf object first, then the cf-ipcountry header; XX a
   assert.deepEqual(where("XX"), { country: undefined, sub: undefined });
   assert.deepEqual(where("not a country"), { country: undefined, sub: undefined });
   assert.deepEqual(where("T1"), { country: "T1", sub: undefined }, "Tor is reported as T1");
+  assert.equal(whereFrom({ cf: { country: "" } } as any, () => "HK").country, "HK", "an empty cf.country falls back to the header");
 });
 
 test("each company's own list: a single Claude review is refused in Hong Kong; an opt-in DeepSeek one isn't", () => {
@@ -54,6 +55,10 @@ test("env lists replace the defaults; 'none' empties one; other companies get th
   assert.equal(regionBlock({ BLOCKED_REGIONS: "none" }, [DEEPSEEK], where("IR")), null);
   assert.equal(regionBlock({ BLOCKED_REGIONS_DEEPSEEK: "CN" }, [DEEPSEEK], where("CN"))?.company, "deepseek");
   assert.equal(regionBlock({ BLOCKED_REGIONS_ANTHROPIC: "   " }, [CLAUDE], where("HK"))?.code, "HK", "blank keeps the default");
+  // A typo never quietly empties a list: the whole override is ignored and the default stays.
+  assert.equal(regionBlock({ BLOCKED_REGIONS_ANTHROPIC: "CN;RU" }, [CLAUDE], where("HK"))?.code, "HK");
+  assert.equal(regionBlock({ BLOCKED_REGIONS: "CU,IRAN" }, [], where("KP"))?.code, "KP");
+  assert.equal(regionBlock({ BLOCKED_REGIONS: "," }, [], where("KP"))?.code, "KP");
 });
 
 test("refusal is a 451 that says nothing was used; stat names fit the ledger's pattern", async () => {
