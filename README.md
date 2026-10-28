@@ -33,6 +33,7 @@ What you still take on the operator's word is listed in the client README under 
 | `src/receipt.ts` | Ed25519 signing over canonical JSON |
 | `src/payai.ts` | Auth tokens for the PayAI facilitator |
 | `src/landing.ts` | The human-readable home page and `/llms.txt` |
+| `web/try.html`, `src/try-page.ts` | The browser page at `/try` (free review, demo tie-break, receipt check). Edit `web/try.html`, then run `node scripts/sync-try-page.mjs` to rebuild `src/try-page.ts` and the script hash its Content-Security-Policy allows |
 | `test/` | The test suite (`npm test`) |
 
 ## Run it locally

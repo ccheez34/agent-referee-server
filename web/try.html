@@ -1,0 +1,403 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Referee: try it</title>
+<meta name="description" content="Run a free sealed review, a free demo tie-break, or check any Agent Referee receipt, all in your browser.">
+<style>
+  :root { color-scheme: light dark; --bg: #fbfaf7; --fg: #1d1d1b; --muted: #66645e; --line: #e4e1d8; --edge: #8a867c; --card: #ffffff; --accent: #2f5d50; --ok: #2e7d32; --warn: #8a5300; --bad: #b3261e; --field: #ffffff; }
+  /* Contrast: --warn #8a5300 is 6:1 on the background; --edge (field and button borders) is at least 3:1 on the fields,
+     cards and background in both themes (WCAG 1.4.11). --line stays for decorative dividers only. */
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #141413; --fg: #ecebe6; --muted: #a3a19a; --line: #2e2d2a; --edge: #77746d; --card: #1c1c1a; --accent: #8cc4b3; --ok: #81c784; --warn: #ffb74d; --bad: #ef9a9a; --field: #161615; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 32px 16px 64px; }
+  h1 { font-size: 1.8rem; margin: 0 0 4px; letter-spacing: -0.01em; }
+  h2 { font-size: 1.05rem; margin: 22px 0 8px; }
+  p { margin: 8px 0; }
+  a { color: var(--accent); }
+  .lede { color: var(--muted); margin-bottom: 14px; }
+  .status { display: inline-flex; align-items: center; gap: 8px; padding: 3px 12px; border: 1px solid var(--line); border-radius: 999px; font-size: 0.88rem; background: var(--card); }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+  .dot.ok { background: var(--ok); } .dot.warn { background: var(--warn); } .dot.bad { background: var(--bad); }
+  .notice { border: 1px solid var(--warn); color: var(--warn); border-radius: 8px; padding: 8px 12px; margin: 12px 0; font-size: 0.92rem; }
+  nav { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin: 22px 0 0; flex-wrap: wrap; }
+  nav button { border: 1px solid transparent; border-bottom: 0; background: none; color: var(--muted); font: inherit; padding: 8px 14px; border-radius: 8px 8px 0 0; cursor: pointer; }
+  nav button[aria-selected="true"] { color: var(--fg); background: var(--card); border-color: var(--edge); border-top: 3px solid var(--accent); margin-bottom: -1px; font-weight: 600; }
+  section.panel { background: var(--card); border: 1px solid var(--line); border-top: 0; border-radius: 0 0 8px 8px; padding: 16px; }
+  section.panel[hidden] { display: none; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  label { display: block; font-weight: 600; font-size: 0.92rem; margin: 12px 0 4px; }
+  .hint { font-weight: 400; color: var(--muted); }
+  textarea, input, select { width: 100%; font: 1rem/1.45 ui-monospace, Consolas, monospace; color: var(--fg); background: var(--field); border: 1px solid var(--edge); border-radius: 6px; padding: 8px; }
+  ::placeholder { color: var(--muted); opacity: 1; }
+  textarea { min-height: 96px; resize: vertical; }
+  select, input[type="number"] { font-family: inherit; width: auto; max-width: 100%; }
+  .row select { width: 100%; }
+  p code { white-space: nowrap; }
+  @media (max-width: 360px) { p code { white-space: normal; overflow-wrap: anywhere; } }
+  h2.tool { font-size: 1rem; margin: 0 0 6px; }
+  #key-shown { overflow-wrap: anywhere; }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: end; }
+  .row > div { flex: 1 1 160px; }
+  .count { color: var(--muted); font-size: 0.82rem; text-align: right; }
+  button.go { margin-top: 14px; background: var(--accent); color: var(--bg); border: 0; border-radius: 6px; padding: 9px 18px; font: 600 0.95rem system-ui, sans-serif; cursor: pointer; }
+  button.go:disabled { opacity: 0.55; cursor: progress; }
+  .small { display: inline-block; text-decoration: none; background: none; border: 1px solid var(--edge); color: var(--fg); border-radius: 6px; padding: 5px 10px; font: 0.85rem system-ui, sans-serif; cursor: pointer; margin: 8px 8px 0 0; }
+  .out { margin-top: 16px; }
+  .verdict { font-size: 1.25rem; font-weight: 700; }
+  .pass, .ok { color: var(--ok); } .needs_changes, .split, .warn { color: var(--warn); } .fail, .cannot_assess, .bad { color: var(--bad); }
+  .vote { border-top: 1px solid var(--line); padding: 10px 0 4px; }
+  .vote:first-child { border-top: 0; }
+  .vote code { font-size: 0.85rem; }
+  ul { padding-left: 20px; margin: 6px 0; }
+  li { margin: 3px 0; }
+  .check { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin-top: 12px; }
+  .err { color: var(--bad); white-space: pre-wrap; }
+  .muted { color: var(--muted); font-size: 0.9rem; }
+  details { margin-top: 10px; }
+  pre { background: var(--field); border: 1px solid var(--line); border-radius: 6px; padding: 10px; overflow-x: auto; font-size: 0.8rem; max-height: 320px; }
+  footer { margin-top: 32px; color: var(--muted); font-size: 0.85rem; }
+  @media (max-width: 560px) { nav button { padding: 8px 10px; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>Agent Referee</h1>
+  <p class="lede">Try it in your browser: no wallet, no account, nothing to install. Every finished review or match comes with a signed receipt, and this page checks it for you.</p>
+  <span class="status" role="status"><span class="dot" id="health-dot" aria-hidden="true"></span><span id="health">Checking the service…</span></span>
+  <div class="notice" id="test-notice" role="alert" hidden></div>
+
+  <nav role="tablist" aria-label="What to do">
+    <button role="tab" id="t-review" aria-controls="tab-review" aria-selected="true" tabindex="0" data-tab="review">Review my work</button>
+    <button role="tab" id="t-match" aria-controls="tab-match" aria-selected="false" tabindex="-1" data-tab="match">Demo tie-break</button>
+    <button role="tab" id="t-check" aria-controls="tab-check" aria-selected="false" tabindex="-1" data-tab="check">Check a receipt</button>
+  </nav>
+
+  <!-- 1. Free sealed review -->
+  <section class="panel" id="tab-review" role="tabpanel" aria-labelledby="t-review" tabindex="0">
+    <h2 class="tool">Free sealed review</h2>
+    <p class="muted">Independent AI reviewers check a piece of work against the task it was given. Free: <span id="r-allowance">a few reviews a day</span> from each internet connection (IP address), while the service's shared free budget lasts.</p>
+    <p class="muted"><strong>What you type leaves your browser:</strong> it's sent to Agent Referee and on to the AI companies that review it. Leave out secrets and personal data. The receipt stores fingerprints of your text, not the text, though reviewers' comments may quote parts of it.</p>
+    <label for="r-task">Task <span class="hint">(what the work was supposed to do)</span></label>
+    <textarea id="r-task" placeholder="For example: Write a SQL query returning the 10 newest orders."></textarea>
+    <label for="r-output">Output <span class="hint">(the work to check)</span></label>
+    <textarea id="r-output" aria-describedby="r-count" placeholder="For example: SELECT * FROM orders ORDER BY created_at DESC LIMIT 10;"></textarea>
+    <div class="count" id="r-count" aria-live="polite"></div>
+    <div class="row">
+      <div>
+        <label for="r-tier">Reviewers</label>
+        <select id="r-tier">
+          <option value="review">One reviewer</option>
+          <option value="review-3">Three reviewers, three AI companies (majority)</option>
+        </select>
+      </div>
+      <div>
+        <label for="r-panel">Which models</label>
+        <select id="r-panel">
+          <option value="">The service's usual reviewers</option>
+          <option value="rotate">Picked at random by the service</option>
+        </select>
+      </div>
+    </div>
+    <button class="go" id="r-go">Run a free review</button>
+    <div class="out" id="r-out" aria-live="polite"></div>
+  </section>
+
+  <!-- 2. Demo tie-break -->
+  <section class="panel" id="tab-match" role="tabpanel" aria-labelledby="t-match" tabindex="0" hidden>
+    <h2 class="tool">Demo tie-break</h2>
+    <p class="muted">A fair pick between two AI agents, here called <em>alpha</em> and <em>beta</em>. Each locks in a secret number before seeing the other's, so neither side can choose the outcome, and each can recompute it from the receipt. In real use each agent plays its own seat; this free demo plays both in your browser to show how it works. Only the demo's random numbers and moves are sent to Agent Referee.</p>
+    <div class="row">
+      <div>
+        <label for="m-tier">Type of pick</label>
+        <select id="m-tier">
+          <option value="weighted">Weighted pick (agreed odds)</option>
+          <option value="rps">Rock-paper-scissors</option>
+        </select>
+      </div>
+      <div id="m-odds">
+        <label for="m-alpha">alpha's chance, % <span class="hint">(beta gets the rest)</span></label>
+        <input id="m-alpha" type="number" min="1" max="99" value="50">
+      </div>
+    </div>
+    <button class="go" id="m-go">Run a demo match</button>
+    <div class="out" id="m-out" aria-live="polite"></div>
+  </section>
+
+  <!-- 3. Check any receipt -->
+  <section class="panel" id="tab-check" role="tabpanel" aria-labelledby="t-check" tabindex="0" hidden>
+    <h2 class="tool">Check a receipt</h2>
+    <p class="muted">Paste a receipt someone gave you. The page checks that Agent Referee signed it and recomputes the result from what's inside, entirely in your browser. A pass means it was signed with Agent Referee's official key and hasn't been changed since. For a review, add the task and output to confirm which work it's about; a pass never means the reviewers were right.</p>
+    <label for="c-receipt">Receipt <span class="hint">(JSON)</span></label>
+    <textarea id="c-receipt" placeholder='{"payload": {...}, "signature": "..."}'></textarea>
+    <details>
+      <summary>For a review: the task and output it should be about <span class="hint">(optional)</span></summary>
+      <label for="c-task">Task</label>
+      <textarea id="c-task"></textarea>
+      <label for="c-output">Output</label>
+      <textarea id="c-output"></textarea>
+    </details>
+    <button class="go" id="c-go">Check it</button>
+    <div class="out" id="c-out" aria-live="polite"></div>
+  </section>
+
+  <h2>Paying, and using it from code</h2>
+  <p>Paid reviews and matches are paid per request in USDC (a dollar-backed digital currency) on the Base network, using the x402 payment standard, with no account. From code: <code>npm install agent-referee-client</code>, <code>pip install agent-referee-client</code>, or the MCP server for AI tools (<code>npx -y agent-referee-mcp</code>).</p>
+  <footer>
+    <a href="https://agentreferee.ai">agentreferee.ai</a> · <a href="https://github.com/ccheez34/agent-referee-client">JavaScript client</a> · <a href="https://github.com/ccheez34/agent-referee-python">Python client</a> · <a href="https://github.com/ccheez34/agent-referee-client/blob/main/TERMS.md">Terms</a> · <a href="https://github.com/ccheez34/agent-referee-client/blob/main/PRIVACY.md">Privacy</a>
+    <br>Signing key <code id="key-shown"></code>
+    <br>This page loads the official JavaScript client from jsDelivr, a public code host, which sees your IP address like any website you visit.
+  </footer>
+</main>
+
+<script type="module">
+// The JavaScript client, pinned to an exact version. Everything below runs in the visitor's browser.
+import * as AR from "https://cdn.jsdelivr.net/npm/agent-referee-client@0.8.0/src/index.mjs";
+
+const PINNED_KEY = "vM2GY6ZEYc/omRlIFrzu0TaMGtjHXQtchg9d7lPKkTY=";
+const OFFICIAL = ["https://agentreferee.ai", "https://agent-referee.fairplayclub.workers.dev"];
+
+// ?api= points the page at staging or a local test instance. "Receipt checks out" still only ever means the
+// official key; a test instance's receipts are labelled "not an official receipt" in the result itself.
+// Only known test addresses are accepted, so a crafted link can't send what a visitor types to someone else's server.
+const TEST_APIS = ["https://agent-referee-staging.fairplayclub.workers.dev"];
+const isLocal = (u) => /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(u);
+const params = new URLSearchParams(location.search);
+const asked = (params.get("api") || OFFICIAL[0]).replace(/\/$/, "");
+const refused = !(OFFICIAL.includes(asked) || TEST_APIS.includes(asked) || isLocal(asked));
+const API = refused ? OFFICIAL[0] : asked;
+const official = OFFICIAL.includes(API);
+let KEYS = [PINNED_KEY];
+const $ = (id) => document.getElementById(id);
+const words = (v) => String(v ?? "?").replaceAll("_", " ");
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+
+async function api(method, path, body) {
+  let r;
+  try {
+    r = await fetch(API + path, { method, headers: body ? { "content-type": "application/json", accept: "application/json" } : { accept: "application/json" }, body: body ? JSON.stringify(body) : undefined });
+  } catch (e) {
+    throw new Error("Couldn't reach the service. Check your connection, or the status page: https://stats.uptimerobot.com/dh6sVMvo3W");
+  }
+  const data = await r.json().catch(() => undefined);
+  if (r.ok && (data === undefined || typeof data !== "object" || data === null)) throw new Error("The service sent an answer this page can't read. Try again in a moment.");
+  if (!r.ok) {
+    const said = typeof data?.error === "string" ? data.error : "";
+    const e = new Error(said || (r.status === 429 ? "Today's free allowance from your connection is used up, or the service is limiting requests. Try again tomorrow (UTC)." : `The service answered ${r.status}.`));
+    e.status = r.status;
+    e.retry = (data.retry_after_s ?? Number(r.headers.get("retry-after"))) || null;
+    throw e;
+  }
+  return data;
+}
+
+// Service status and the signing key in use.
+const disableAll = () => { for (const b of document.querySelectorAll("button.go")) b.disabled = true; };
+let keysReady = official || refused;
+if (!keysReady) disableAll(); // in test mode, nothing runs until the test service's key is known
+(async () => {
+  if (refused) {
+    $("test-notice").hidden = false;
+    $("test-notice").textContent = `This link asked the page to use ${asked}, which isn't an Agent Referee address, so the page ignored it and uses the official service.`;
+  } else if (!official) {
+    try {
+      const k = await api("GET", "/pubkey");
+      if (typeof k.public_key !== "string" || !k.public_key) throw new Error("no key");
+      KEYS = [k.public_key, ...(Array.isArray(k.history) ? k.history : []).map((h) => h?.public_key).filter((x) => typeof x === "string")];
+      keysReady = true;
+      for (const b of document.querySelectorAll("button.go")) b.disabled = false;
+      $("test-notice").textContent = `Test mode: this page talks to ${API}, not the official service. Receipts it signs are labelled "not an official receipt".`;
+    } catch {
+      KEYS = [];
+      disableAll();
+      $("test-notice").textContent = `Test mode: couldn't read ${API}'s signing key, so nothing can be checked. The buttons are off.`;
+    }
+    $("test-notice").hidden = false;
+  }
+  $("key-shown").textContent = KEYS[0] || "(unknown)";
+  try {
+    const h = await api("GET", "/health");
+    const s = h.status || "ok";
+    $("health-dot").className = "dot " + (s === "ok" ? "ok" : s === "down" ? "bad" : "warn");
+    const reasons = Array.isArray(h.reasons) ? h.reasons.map(String).join(", ") : "";
+    $("health").textContent = s === "ok" ? "Service is up" : s === "paused" ? "Paused for a moment" : s === "degraded" ? "Up, with problems" + (reasons ? ": " + reasons : "") : "Service is down";
+  } catch {
+    $("health-dot").className = "dot bad";
+    $("health").textContent = "Couldn't reach the service";
+  }
+  // The free allowance as the service publishes it (GET /reviewers), not a number written into this page.
+  try {
+    const per = (await api("GET", "/reviewers")).free?.per_address_per_day;
+    if (Number.isInteger(per?.review) && Number.isInteger(per?.["review-3"]))
+      $("r-allowance").textContent = `${per.review} single review${per.review === 1 ? "" : "s"} and ${per["review-3"]} three-reviewer review${per["review-3"] === 1 ? "" : "s"} a day`;
+  } catch {}
+})();
+
+// Tabs: click, or arrow keys / Home / End between them (one tab stop for the whole row).
+const tabs = [...document.querySelectorAll("nav [role=tab]")];
+function selectTab(b, focus) {
+  for (const x of tabs) { x.setAttribute("aria-selected", String(x === b)); x.tabIndex = x === b ? 0 : -1; }
+  for (const p of document.querySelectorAll("section.panel")) p.hidden = p.id !== b.getAttribute("aria-controls");
+  if (focus) b.focus();
+}
+for (const b of tabs) {
+  b.addEventListener("click", () => selectTab(b, false));
+  b.addEventListener("keydown", (e) => {
+    const i = tabs.indexOf(b);
+    const to = { ArrowRight: (i + 1) % tabs.length, ArrowLeft: (i - 1 + tabs.length) % tabs.length, Home: 0, End: tabs.length - 1 }[e.key];
+    if (to !== undefined) { e.preventDefault(); selectTab(tabs[to], true); }
+  });
+}
+
+// "Receipt checks out" only ever means: signed by the OFFICIAL key and the result recomputes. A receipt signed by a
+// test instance's key (?api=) says so in the headline itself, not just in the banner.
+function checkBox(check, extra = [], testKey = !official, note = "") {
+  const problems = [...(check.problems || []), ...extra];
+  const ok = check.ok === true && extra.length === 0;
+  if (!ok && problems.length === 0) problems.push("The check didn't complete, so this result can't be confirmed.");
+  const head = !ok ? "Receipt problem" : testKey ? "Checks out against the TEST service's key: not an official receipt" : "Receipt checks out";
+  return `<div class="check"><strong class="${ok && !testKey ? "ok" : ok ? "warn" : "bad"}">${head}</strong>
+    ${ok && !testKey ? "<p class='muted'>Signed with Agent Referee's official key, unchanged since, and the result recomputes from what's in it.</p>" : ""}
+    ${ok && note ? `<p class="warn">${esc(note)}</p>` : ""}
+    ${problems.length ? `<ul>${problems.map((p) => `<li>${esc(p)}</li>`).join("")}</ul>` : ""}
+    ${check.trusts?.length ? `<details><summary>What you're taking on trust</summary><ul>${check.trusts.map((t) => `<li>${esc(t)}</li>`).join("")}</ul></details>` : ""}</div>`;
+}
+
+const blobs = {};
+function receiptTools(receipt, name, slot) {
+  name = String(name).replace(/[^A-Za-z0-9-]/g, "").slice(0, 60) || "receipt";
+  const json = JSON.stringify(receipt, null, 2);
+  if (blobs[slot]) URL.revokeObjectURL(blobs[slot]);
+  const url = (blobs[slot] = URL.createObjectURL(new Blob([json], { type: "application/json" })));
+  return `<a class="small" download="${esc(name)}.json" href="${url}">Download receipt</a>
+    <details><summary>Show receipt</summary><pre>${esc(json)}</pre></details>`;
+}
+
+function errorHtml(e) {
+  let msg = e.message || String(e);
+  const retry = e.retry ?? e.body?.retry_after_s; // the page's own requests, or the JS client's RefereeError
+  if (e.status === 503 && retry) msg += ` Try again in about ${Math.ceil(retry)} seconds.`;
+  return `<p class="err">${esc(msg)}</p>`;
+}
+
+// 1. Free review.
+const countIt = () => {
+  const n = $("r-task").value.length + $("r-output").value.length;
+  $("r-count").textContent = n ? `${n.toLocaleString()} characters` : "";
+};
+$("r-task").addEventListener("input", countIt);
+$("r-output").addEventListener("input", countIt);
+$("r-go").addEventListener("click", async () => {
+  const task = $("r-task").value, output = $("r-output").value, tier = $("r-tier").value, panel = $("r-panel").value || undefined;
+  if (!task.trim() || !output.trim()) { $("r-out").innerHTML = errorHtml(new Error("Fill in both the task and the output.")); return; }
+  $("r-go").disabled = true;
+  $("r-out").innerHTML = `<p class="muted">Reviewing… usually seconds, sometimes up to a few minutes.</p>`;
+  try {
+    const r = await api("POST", `/free/${tier}`, { task, output, ...(panel ? { panel } : {}) });
+    const pp = r.receipt?.payload;
+    if (pp?.receipt_format !== undefined) throw new Error("The service answered with a receipt format this page can't check yet, so nothing was confirmed.");
+    if (!pp || typeof r.receipt.signature !== "string" || !Array.isArray(pp.votes) || typeof pp.result?.verdict !== "string")
+      throw new Error("The service's answer didn't include a complete receipt, so there's nothing to check. Your free review may not have been used; try again.");
+    const ref = new AR.AgentReferee({ url: API, publicKeys: KEYS });
+    const check = await ref.verifyReview(r.receipt, { task, output, tier, panel });
+    const p = r.receipt.payload;
+    const extra = p.funding === "free" && p.payer == null ? [] : ["This receipt isn't marked as a free review."];
+    const good = check.ok && extra.length === 0;
+    // The check comes first: if it fails, what follows is the service's unverified answer, and says so.
+    $("r-out").innerHTML = `${checkBox(check, extra)}
+      ${good ? "" : `<p class="bad"><strong>Unverified:</strong> the result below couldn't be confirmed from the receipt.</p>`}
+      <p class="verdict ${esc(p.result.verdict)}">${esc(words(p.result.verdict))}</p>
+      <div class="votes">${p.votes.map((v) => `<div class="vote"><strong class="${esc(v?.verdict)}">${esc(words(v?.verdict))}</strong> · <code>${esc(v?.model)}</code> <span class="muted">(${esc(v?.confidence)} confidence)</span>
+        ${Array.isArray(v?.issues) && v.issues.length ? `<ul>${v.issues.map((i) => `<li>${esc(i)}</li>`).join("")}</ul>` : ""}
+        ${v?.reasoning ? `<p class="muted">${esc(v.reasoning)}</p>` : ""}</div>`).join("")}</div>
+      ${receiptTools(r.receipt, "review-" + p.review_id, "review")}
+      ${Number.isInteger(r.free?.left_today) ? `<p class="muted">Free ${tier === "review-3" ? "three-reviewer reviews" : "single reviews"} left today: ${r.free.left_today}.</p>` : ""}
+      <p class="muted">A review is what these models think, not a guarantee the work is right.</p>`;
+  } catch (e) {
+    $("r-out").innerHTML = errorHtml(e);
+  } finally {
+    $("r-go").disabled = false;
+  }
+});
+
+// 2. Demo match: both seats play in this page.
+$("m-tier").addEventListener("change", () => { $("m-odds").hidden = $("m-tier").value !== "weighted"; });
+$("m-go").addEventListener("click", async () => {
+  const tier = $("m-tier").value;
+  const a = Math.min(99, Math.max(1, Math.round(Number($("m-alpha").value) || 50)));
+  $("m-go").disabled = true;
+  $("m-out").innerHTML = `<p class="muted">Both seats commit their secret seeds, then reveal them…</p>`;
+  try {
+    const ref = new AR.AgentReferee({ url: API, demo: true, publicKeys: KEYS, pollMs: 500 });
+    const spec = { tier, seats: ["alpha", "beta"], ...(tier === "weighted" ? { weights: { alpha: a, beta: 100 - a } } : {}) };
+    const m = await ref.create(spec);
+    const [sa, sb] = await Promise.all([ref.join(m.match_id, "alpha"), ref.join(m.match_id, "beta")]);
+    const [ra, rb] = await Promise.all([sa.play(), sb.play()]);
+    const problems = [...(ra.check?.problems ?? []).map((x) => "alpha: " + x), ...(rb.check?.problems ?? []).map((x) => "beta: " + x)];
+    if (AR.canonicalJson(ra.receipt) !== AR.canonicalJson(rb.receipt)) problems.push("The two seats were given different receipts.");
+    const ok = !!(ra.check?.ok && rb.check?.ok) && problems.length === 0;
+    const out = ra.receipt?.payload?.outcome ?? {};
+    const weights = out.weights; // the odds as signed in the receipt, not as typed into this page
+    $("m-out").innerHTML = `${checkBox({ ok, problems, trusts: ra.check?.trusts })}
+      ${ok ? "" : `<p class="bad"><strong>Unverified:</strong> the result below couldn't be confirmed from the receipt.</p>`}
+      <p class="verdict">${out.winner ? esc(out.winner) + " wins" : "No winner"}</p>
+      ${weights && typeof weights === "object" ? `<p class="muted">Odds in the signed receipt: ${Object.entries(weights).map(([k, v]) => `${esc(k)} ${esc(v)}%`).join(", ")}.</p>` : ""}
+      ${ok ? `<p class="muted">Each seat recomputed the result from the receipt and confirmed its own secret number is in it as sent. In a real match, where each agent runs its own seat, that's what lets either side catch a changed outcome.</p>` : ""}
+      ${receiptTools(ra.receipt, "match-" + m.match_id, "match")}`;
+  } catch (e) {
+    $("m-out").innerHTML = errorHtml(e);
+  } finally {
+    $("m-go").disabled = false;
+  }
+});
+
+// 3. Check any receipt, offline.
+$("c-go").addEventListener("click", async () => {
+  try { await checkPasted(); } catch (e) { $("c-out").innerHTML = errorHtml(new Error("That doesn't look like an Agent Referee receipt (" + (e.message || e) + ").")); }
+});
+async function checkPasted() {
+  let receipt;
+  if (!$("c-receipt").value.trim()) { $("c-out").innerHTML = errorHtml(new Error("Paste a receipt first.")); return; }
+  try { receipt = JSON.parse($("c-receipt").value); } catch { $("c-out").innerHTML = errorHtml(new Error("That isn't valid JSON.")); return; }
+  if (!receipt || typeof receipt !== "object" || Array.isArray(receipt) || typeof receipt.signature !== "string" || typeof receipt.payload !== "object" || !receipt.payload) {
+    $("c-out").innerHTML = errorHtml(new Error("That doesn't look like an Agent Referee receipt: it needs a payload and a signature."));
+    return;
+  }
+  const p = receipt.payload;
+  // Receipt formats this page doesn't know (multi-part reviews and judging are coming) are refused, never checked
+  // the old way: an old check could recompute the verdict and miss what the new format changed.
+  if (p.receipt_format !== undefined) {
+    $("c-out").innerHTML = errorHtml(new Error(`This receipt uses a newer format ("${String(p.receipt_format).slice(0, 40)}") that this page can't check yet. Nothing was confirmed.`));
+    return;
+  }
+  // The official key decides. Only in test mode (?api=) is the test instance's key tried as well, and labelled.
+  const officialSig = await AR.verifySignature(receipt, [PINNED_KEY]);
+  const testSig = !officialSig && !official && (await AR.verifySignature(receipt, KEYS));
+  const sigProblem = officialSig || testSig ? [] : [official
+    ? "The signature doesn't match Agent Referee's key: this receipt wasn't issued by it, or it was changed."
+    : "The signature doesn't match Agent Referee's key or the test service's key: it wasn't issued by either, or it was changed."];
+  let check, headline, note = "";
+  if (p.type !== undefined && p.type !== "review") {
+    $("c-out").innerHTML = errorHtml(new Error(`This page can't check "${String(p.type).slice(0, 40)}" receipts yet. Nothing was confirmed.`));
+    return;
+  }
+  if (p.type === "review") {
+    const task = $("c-task").value, output = $("c-output").value;
+    check = await AR.verifyReviewOutcome(receipt, { ...(task ? { task } : {}), ...(output ? { output } : {}) });
+    headline = `A ${esc(p.tier)} review: <span class="${esc(p.result?.verdict)}">${esc(words(p.result?.verdict))}</span>`;
+    if (!task || !output) note = "The task and output weren't given, so this doesn't confirm which work the review is about.";
+  } else {
+    check = await AR.verifyOutcome(receipt);
+    const o = p?.outcome || {};
+    headline = `A ${esc(p?.tier ?? "?")} match${p?.demo ? " (demo)" : ""}: ${o.winner ? esc(o.winner) + " won" : o.mistrial ? "mistrial" : esc(o.result ?? "")}`;
+  }
+  const good = check.ok === true && sigProblem.length === 0;
+  $("c-out").innerHTML = `${checkBox(check, sigProblem, !officialSig, note)}<p class="verdict">${good ? "" : "<span class='bad'>Unverified claim:</span> "}${headline}</p>`;
+}
+</script>
+</body>
+</html>

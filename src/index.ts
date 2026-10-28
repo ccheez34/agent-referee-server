@@ -1,4 +1,5 @@
 // Agent Referee: a neutral, paid tie-breaker for AI agents (x402 / USDC).
+import { TRY_HTML, TRY_SCRIPT_HASHES } from "./try-page.ts";
 import { Hono, type MiddlewareHandler } from "hono";
 import { paymentMiddleware } from "x402-hono";
 import { KEY_RE, MEDIATOR, MAX_SERIES_GAMES, doublePrice, idForKey, isJudgeTier, keyId, ipv6Prefix64, payerFromPaymentHeader, randomToken, sha256Hex, type Tier } from "./logic.ts";
@@ -461,6 +462,29 @@ const err = (status: number, error: string) =>
 
 // ---------- discovery ----------
 
+// The browser page (free reviews, a demo tie-break, checking a receipt), built from web/try.html. Its one script is
+// allowed by hash; the JS client loads from jsDelivr at an exact version; it may only call the official addresses,
+// staging and a local test copy.
+const TRY_CSP = [
+  "default-src 'none'",
+  `script-src ${TRY_SCRIPT_HASHES.map((h) => `'${h}'`).join(" ")} https://cdn.jsdelivr.net`,
+  "style-src 'unsafe-inline'",
+  "connect-src 'self' https://agentreferee.ai https://agent-referee.fairplayclub.workers.dev https://agent-referee-staging.fairplayclub.workers.dev http://localhost:* http://127.0.0.1:*",
+  "img-src 'self' data:",
+  "base-uri 'none'",
+  "form-action 'none'",
+  "frame-ancestors 'none'",
+].join("; ");
+app.get("/try", (c) =>
+  c.body(TRY_HTML, 200, {
+    "content-type": "text/html; charset=utf-8",
+    "content-security-policy": TRY_CSP,
+    "x-content-type-options": "nosniff",
+    "referrer-policy": "no-referrer",
+    "cache-control": "public, max-age=300",
+  }),
+);
+
 app.get("/", (c) => {
   const p = prices(c.env);
   const base = new URL(c.req.url).origin;
@@ -478,6 +502,7 @@ app.get("/", (c) => {
     health: `${base}/health`,
     status_page: "https://stats.uptimerobot.com/dh6sVMvo3W",
     llms_txt: `${base}/llms.txt`,
+    try_in_browser: `${base}/try`,
     wallet_rules: { ...BAN_RULES, check: "GET /settle-up?wallet=0x... shows a wallet's standing." },
     clients: { javascript: "npm install agent-referee-client", python: "pip install agent-referee-client (add [pay] to pay in USDC)", mcp: "npx -y agent-referee-mcp" },
     coming_next: "Batch reviews (one payment for many outputs) and company accounts (see plans).",

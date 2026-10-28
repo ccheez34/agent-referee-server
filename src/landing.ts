@@ -71,6 +71,7 @@ export function landingHtml(p: Record<string, string>, base: string, demoPerIp =
   <p class="tagline"><strong>Stop the loop. Get a decision.</strong> Give AI agents a way to resolve disagreements — and a way to check their work independently. Agent Referee settles deadlocks or reviews a single agent's output, returning a signed receipt that records the decision or review. No endless arguments. No need to rely on the agent's own say-so.</p>
   <p class="lede">A neutral tie-breaker and judge for AI agents from different owners. When two agents have to decide together and neither should decide alone, they hand the call to a third party and both get a signed receipt. Working alone? <a href="#review">Sealed review</a> has independent AI reviewers check one agent's output.</p>
   <span class="status"><span class="dot" id="dot"></span><span id="status">Checking status…</span></span>
+  <p><a href="${b}/try"><strong>Try it in your browser</strong></a>: a free review, a demo tie-break, or checking any receipt. No wallet, nothing to install.</p>
 
   <h2>What it decides</h2>
   <table>
@@ -127,6 +128,7 @@ r.result.winner; r.check.ok; // the winner, and true if the receipt checks out</
 
   <h2>Links</h2>
   <div class="links">
+    <a href="${b}/try">Try it in your browser</a>
     <a href="${REPO}">Docs and client (GitHub)</a>
     <a href="https://www.npmjs.com/package/agent-referee-client">npm</a>
     <a href="${REPO}/blob/main/TERMS.md">Terms</a>
@@ -184,6 +186,7 @@ ${p.free_reviews ? `- Free, no wallet: ${p.free_reviews} reviews per day from ea
 ` : ""}
 ## Start
 
+- Try it in your browser (free reviews, a demo tie-break, checking a receipt; no wallet): ${base}/try
 - Full machine-readable instructions: ${base}/?format=json
 - Client library (JavaScript/TypeScript): npm install agent-referee-client
 - Free demo, no wallet: new AgentReferee({ demo: true }), up to ${demoPerIp} demo matches per day per IP address.

@@ -603,3 +603,31 @@ t("browsers may call the public API (CORS), never the admin or internal routes",
   const ao = await app.fetch(new Request("https://x/admin/stats", { method: "OPTIONS" }), e, ctx);
   assert.equal(ao.headers.get("access-control-allow-origin"), null);
 });
+
+t("GET /try serves the browser page with a tight CSP, and the landing page, llms.txt and root JSON link to it", async () => {
+  const { TRY_HTML, TRY_SCRIPT_HASHES } = await import("../src/try-page.ts");
+  const e = env();
+  const res = await app.fetch(new Request("https://x/try"), e, ctx);
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get("content-type") ?? "", /^text\/html/);
+  const html = await res.text();
+  assert.equal(html, TRY_HTML);
+  assert.match(html, /<title>Agent Referee: try it<\/title>/);
+  const csp = res.headers.get("content-security-policy") ?? "";
+  assert.match(csp, /default-src 'none'/);
+  assert.match(csp, /script-src [^;]*https:\/\/cdn\.jsdelivr\.net/);
+  assert.match(csp, /connect-src 'self'/);
+  assert.match(csp, /frame-ancestors 'none'/);
+  // The inline script's hash in the CSP matches the script actually served, so the page can't silently break.
+  const script = html.match(/<script type="module">([\s\S]*?)<\/script>/)![1];
+  const hash = "sha256-" + Buffer.from(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(script))).toString("base64");
+  assert.deepEqual(TRY_SCRIPT_HASHES, [hash]);
+  assert.ok(csp.includes(`'${hash}'`));
+  // The page only imports the client at an exact version.
+  assert.match(html, /cdn\.jsdelivr\.net\/npm\/agent-referee-client@\d+\.\d+\.\d+\//);
+  const landing = await (await app.fetch(new Request("https://x/", { headers: { accept: "text/html" } }), e, ctx)).text();
+  assert.match(landing, /href="https:\/\/x\/try"[^>]*>(<strong>)?Try it in your browser/);
+  const llms = await (await app.fetch(new Request("https://x/llms.txt"), e, ctx)).text();
+  assert.match(llms, /Try it in your browser[^\n]*https:\/\/x\/try/);
+  assert.equal((await call(e, "/")).body.try_in_browser, "https://x/try");
+});
