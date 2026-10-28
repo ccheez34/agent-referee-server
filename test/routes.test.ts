@@ -108,6 +108,24 @@ t("review limits fail closed: a ledger outage refuses reviews and demos instead 
   assert.equal(d.status, 503);
 });
 
+t("a single failed ledger call is retried once, so the review goes through and health stays ok; two failures still refuse", async () => {
+  const e = env();
+  const get = e.LEDGER.get;
+  let failures = 1;
+  e.LEDGER.get = (id: string) => {
+    const stub = get(id);
+    return { fetch: async (u: string, i?: RequestInit) => { if (u.endsWith("/review-fails") && failures > 0) { failures--; throw new Error("object unavailable"); } return stub.fetch(u, i); } };
+  };
+  const r = await call(e, "/review", review);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(failures, 0, "the first call failed");
+  assert.equal((await call(e, "/health")).body.status, "ok", "a retried blip isn't a health event");
+  failures = 2;
+  const r2 = await call(e, "/review", review);
+  assert.equal(r2.status, 503);
+  assert.match(r2.body.error, /can't be checked/);
+});
+
 t("pause switches: the wrangler secret, and the phone switch with the admin token", async () => {
   assert.equal((await call(env({ REVIEWS_PAUSED: "true" }), "/review", review)).status, 503);
   const e = env();

@@ -395,16 +395,32 @@ const reviewParallel = (env: Env) => {
   return raw !== "" && Number.isFinite(n) && n >= 0 ? Math.floor(n) : 20;
 };
 
+/** Wait before retrying a failed ledger call once (failLimitCheck). */
+const LEDGER_RETRY_MS = 300;
+
 /** The failed-review allowance for this caller, reserving one in-flight review (released when the result is
  * recorded). Fails closed when the ledger can't answer. Returns a refusal, or the reservation token (or null). */
 async function failLimitCheck(c: any, caller: string | undefined, failLimit: number): Promise<Response | { token?: string } | null> {
   if (!caller || !c.env.LEDGER) return null;
   let f: any;
+  const ask = () => ledgerJson(c.env, caller, "review-fails", { caller, limit: failLimit, global_limit: shardLimit(c.env.REVIEW_FAIL_GLOBAL_LIMIT, 500), parallel: reviewParallel(c.env), reserve: true });
   try {
-    f = await ledgerJson(c.env, caller, "review-fails", { caller, limit: failLimit, global_limit: shardLimit(c.env.REVIEW_FAIL_GLOBAL_LIMIT, 500), parallel: reviewParallel(c.env), reserve: true });
-  } catch (e: any) {
-    await recordEvent(c.env, "ledger_error", `review-fails: ${String(e?.message ?? e)}`);
-    return err(503, "Sealed review is temporarily unavailable (its usage limits can't be checked right now). Nothing was charged; try again in a minute.");
+    f = await ask();
+  } catch (first: any) {
+    // One retry after a short wait: a single failed call to the ledger object (Oct 28, 16:53) shouldn't refuse a
+    // customer. If the first call did reach the ledger and only its answer was lost, the retry takes a second in-flight
+    // reservation; that one is never released by this request, but expires on its own after 5 minutes.
+    // Still fails closed if the retry fails too. A timeout isn't retried: it has already waited 10 seconds.
+    const timedOut = /timed out/.test(String(first?.message ?? first));
+    if (!timedOut) await new Promise((r) => setTimeout(r, LEDGER_RETRY_MS));
+    try {
+      if (timedOut) throw first;
+      f = await ask();
+      console.log(JSON.stringify({ ledger_retry: "ok", action: "review-fails", first_error: String(first?.message ?? first).slice(0, 200) }));
+    } catch (e: any) {
+      await recordEvent(c.env, "ledger_error", `review-fails: ${String(e?.message ?? e)}`);
+      return err(503, "Sealed review is temporarily unavailable (its usage limits can't be checked right now). Nothing was charged; try again in a minute.");
+    }
   }
   if (!f.blocked) return { token: f.token };
   const r = reviewLimitRefusal(f, failLimit, reviewParallel(c.env));
