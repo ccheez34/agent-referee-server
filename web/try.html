@@ -43,7 +43,11 @@
   #key-shown { overflow-wrap: anywhere; }
   .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: end; }
   .row > div { flex: 1 1 160px; }
-  .count { color: var(--muted); font-size: 0.82rem; text-align: right; }
+  .lab { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; flex-wrap: wrap; margin: 12px 0 4px; }
+  .lab label { margin: 0; }
+  .cnt { color: var(--muted); font-size: 0.82rem; font-variant-numeric: tabular-nums; }
+  .cnt.over { color: var(--bad); font-weight: 600; }
+  input[type="file"] { font-family: inherit; padding: 6px; }
   button.go { margin-top: 14px; background: var(--accent); color: var(--bg); border: 0; border-radius: 6px; padding: 9px 18px; font: 600 0.95rem system-ui, sans-serif; cursor: pointer; }
   button.go:disabled { opacity: 0.55; cursor: progress; }
   .small { display: inline-block; text-decoration: none; background: none; border: 1px solid var(--edge); color: var(--fg); border-radius: 6px; padding: 5px 10px; font: 0.85rem system-ui, sans-serif; cursor: pointer; margin: 8px 8px 0 0; }
@@ -73,6 +77,7 @@
 
   <nav role="tablist" aria-label="What to do">
     <button role="tab" id="t-review" aria-controls="tab-review" aria-selected="true" tabindex="0" data-tab="review">Review my work</button>
+    <button role="tab" id="t-files" aria-controls="tab-files" aria-selected="false" tabindex="-1" data-tab="files">Review files</button>
     <button role="tab" id="t-match" aria-controls="tab-match" aria-selected="false" tabindex="-1" data-tab="match">Demo tie-break</button>
     <button role="tab" id="t-check" aria-controls="tab-check" aria-selected="false" tabindex="-1" data-tab="check">Check a receipt</button>
   </nav>
@@ -82,11 +87,10 @@
     <h2 class="tool">Free sealed review</h2>
     <p class="muted">Independent AI reviewers check a piece of work against the task it was given. Free: <span id="r-allowance">a few reviews a day</span> from each internet connection (IP address), while the service's shared free budget lasts.</p>
     <p class="muted"><strong>What you type leaves your browser:</strong> it's sent to Agent Referee and on to the AI companies that review it. Leave out secrets and personal data. The receipt stores fingerprints of your text, not the text, though reviewers' comments may quote parts of it.</p>
-    <label for="r-task">Task <span class="hint">(what the work was supposed to do)</span></label>
-    <textarea id="r-task" placeholder="For example: Write a SQL query returning the 10 newest orders."></textarea>
-    <label for="r-output">Output <span class="hint">(the work to check)</span></label>
-    <textarea id="r-output" aria-describedby="r-count" placeholder="For example: SELECT * FROM orders ORDER BY created_at DESC LIMIT 10;"></textarea>
-    <div class="count" id="r-count" aria-live="polite"></div>
+    <div class="lab"><label for="r-task">Task <span class="hint">(what the work was supposed to do)</span></label><span class="cnt" id="r-task-n" aria-live="polite"></span></div>
+    <textarea id="r-task" aria-describedby="r-task-n" placeholder="For example: Write a SQL query returning the 10 newest orders."></textarea>
+    <div class="lab"><label for="r-output">Output <span class="hint">(the work to check)</span></label><span class="cnt" id="r-output-n" aria-live="polite"></span></div>
+    <textarea id="r-output" aria-describedby="r-output-n" placeholder="For example: SELECT * FROM orders ORDER BY created_at DESC LIMIT 10;"></textarea>
     <div class="row">
       <div>
         <label for="r-tier">Reviewers</label>
@@ -105,6 +109,34 @@
     </div>
     <button class="go" id="r-go">Run a free review</button>
     <div class="out" id="r-out" aria-live="polite"></div>
+  </section>
+
+  <!-- 1b. Free sealed review from files -->
+  <section class="panel" id="tab-files" role="tabpanel" aria-labelledby="t-files" tabindex="0" hidden>
+    <h2 class="tool">Review from files</h2>
+    <p class="muted">The same free review, with the task and the output read from text files (for example .txt, .md, code or JSON). The files are read in your browser and only their text is sent, exactly as if you'd typed it, so the same note applies: leave out secrets and personal data. The receipt is tied to each file's text exactly as read.</p>
+    <div class="lab"><label for="f-task">Task file <span class="hint">(what the work was supposed to do)</span></label><span class="cnt" id="f-task-n" aria-live="polite"></span></div>
+    <input type="file" id="f-task" aria-describedby="f-task-n" accept="text/*,.txt,.md,.markdown,.json,.csv,.tsv,.xml,.yaml,.yml,.toml,.ini,.log,.html,.css,.js,.mjs,.cjs,.ts,.tsx,.jsx,.py,.rb,.go,.rs,.java,.kt,.c,.h,.cpp,.cs,.php,.sh,.ps1,.bat,.cmd,.sql">
+    <div class="lab"><label for="f-output">Output file <span class="hint">(the work to check)</span></label><span class="cnt" id="f-output-n" aria-live="polite"></span></div>
+    <input type="file" id="f-output" aria-describedby="f-output-n" accept="text/*,.txt,.md,.markdown,.json,.csv,.tsv,.xml,.yaml,.yml,.toml,.ini,.log,.html,.css,.js,.mjs,.cjs,.ts,.tsx,.jsx,.py,.rb,.go,.rs,.java,.kt,.c,.h,.cpp,.cs,.php,.sh,.ps1,.bat,.cmd,.sql">
+    <div class="row">
+      <div>
+        <label for="f-tier">Reviewers</label>
+        <select id="f-tier">
+          <option value="review">One reviewer</option>
+          <option value="review-3">Three reviewers, three AI companies (majority)</option>
+        </select>
+      </div>
+      <div>
+        <label for="f-panel">Which models</label>
+        <select id="f-panel">
+          <option value="">The service's usual reviewers</option>
+          <option value="rotate">Picked at random by the service</option>
+        </select>
+      </div>
+    </div>
+    <button class="go" id="f-go">Run a free review</button>
+    <div class="out" id="f-out" aria-live="polite"></div>
   </section>
 
   <!-- 2. Demo tie-break -->
@@ -231,7 +263,9 @@ if (!keysReady) disableAll(); // in test mode, nothing runs until the test servi
   }
   // The free allowance as the service publishes it (GET /reviewers), not a number written into this page.
   try {
-    const per = (await api("GET", "/reviewers")).free?.per_address_per_day;
+    const rv = await api("GET", "/reviewers");
+    if (Number.isInteger(rv.limits?.maxTask) && Number.isInteger(rv.limits?.maxOutput)) { LIMITS.task = rv.limits.maxTask; LIMITS.output = rv.limits.maxOutput; countAll(); }
+    const per = rv.free?.per_address_per_day;
     if (Number.isInteger(per?.review) && Number.isInteger(per?.["review-3"]))
       $("r-allowance").textContent = `${per.review} single review${per.review === 1 ? "" : "s"} and ${per["review-3"]} three-reviewer review${per["review-3"] === 1 ? "" : "s"} a day`;
   } catch {}
@@ -284,18 +318,55 @@ function errorHtml(e) {
   return `<p class="err">${esc(msg)}</p>`;
 }
 
-// 1. Free review.
-const countIt = () => {
-  const n = $("r-task").value.length + $("r-output").value.length;
-  $("r-count").textContent = n ? `${n.toLocaleString()} characters` : "";
-};
-$("r-task").addEventListener("input", countIt);
-$("r-output").addEventListener("input", countIt);
-$("r-go").addEventListener("click", async () => {
-  const task = $("r-task").value, output = $("r-output").value, tier = $("r-tier").value, panel = $("r-panel").value || undefined;
-  if (!task.trim() || !output.trim()) { $("r-out").innerHTML = errorHtml(new Error("Fill in both the task and the output.")); return; }
-  $("r-go").disabled = true;
-  $("r-out").innerHTML = `<p class="muted">Reviewing… usually seconds, sometimes up to a few minutes.</p>`;
+// 1. Free review, typed or from files. Limits as the service publishes them (GET /reviewers), these until it answers.
+const LIMITS = { task: 4000, output: 12000, minTask: 10 };
+const files = { task: null, output: null }; // text read from the files tab
+function showCount(id, text, max, min = 0) {
+  const n = text == null ? null : text.length; // UTF-16 code units, the way the service counts
+  const el = $(id);
+  if (n == null) { el.textContent = ""; el.classList.remove("over"); return; }
+  const over = n > max, under = min && n > 0 && n < min;
+  el.textContent = `${n.toLocaleString()} / ${max.toLocaleString()} characters${over ? ": too long" : under ? `: at least ${min}` : ""}`;
+  el.classList.toggle("over", over || !!under);
+}
+function countAll() {
+  showCount("r-task-n", $("r-task").value, LIMITS.task, LIMITS.minTask);
+  showCount("r-output-n", $("r-output").value, LIMITS.output);
+  showCount("f-task-n", files.task, LIMITS.task, LIMITS.minTask);
+  showCount("f-output-n", files.output, LIMITS.output);
+}
+countAll();
+$("r-task").addEventListener("input", countAll);
+$("r-output").addEventListener("input", countAll);
+
+// Read a picked file as text. Refuses big or binary files instead of sending something unreadable.
+for (const which of ["task", "output"]) {
+  $("f-" + which).addEventListener("change", async () => {
+    const f = $("f-" + which).files?.[0];
+    files[which] = null;
+    $("f-out").innerHTML = "";
+    if (f) {
+      try {
+        if (f.size > 1_000_000) throw new Error(`${f.name} is ${Math.round(f.size / 1000).toLocaleString()} KB, far over the limit. Pick a smaller text file.`);
+        const text = await f.text();
+        if (text.includes("\u0000") || text.includes("�")) throw new Error(`${f.name} doesn't look like a plain text file (UTF-8). Save it as text and try again.`);
+        if (!text.trim()) throw new Error(`${f.name} is empty.`);
+        files[which] = text;
+      } catch (e) {
+        $("f-" + which).value = "";
+        $("f-out").innerHTML = errorHtml(e);
+      }
+    }
+    countAll();
+  });
+}
+
+async function runReview(task, output, tier, panel, btn, outEl) {
+  if (!task || !task.trim() || !output || !output.trim()) { outEl.innerHTML = errorHtml(new Error("Fill in both the task and the output.")); return; }
+  const tooLong = [task.length > LIMITS.task ? `the task is ${task.length.toLocaleString()} characters (at most ${LIMITS.task.toLocaleString()})` : "", task.length < LIMITS.minTask ? `the task needs at least ${LIMITS.minTask} characters` : "", output.length > LIMITS.output ? `the output is ${output.length.toLocaleString()} characters (at most ${LIMITS.output.toLocaleString()})` : ""].filter(Boolean);
+  if (tooLong.length) { outEl.innerHTML = errorHtml(new Error(`Not sent: ${tooLong.join("; ")}. Nothing was used. Shorten it, or split the work into pieces and review each.`)); return; }
+  btn.disabled = true;
+  outEl.innerHTML = `<p class="muted">Reviewing… usually seconds, sometimes up to a few minutes.</p>`;
   try {
     const r = await api("POST", `/free/${tier}`, { task, output, ...(panel ? { panel } : {}) });
     const pp = r.receipt?.payload;
@@ -308,20 +379,25 @@ $("r-go").addEventListener("click", async () => {
     const extra = p.funding === "free" && p.payer == null ? [] : ["This receipt isn't marked as a free review."];
     const good = check.ok && extra.length === 0;
     // The check comes first: if it fails, what follows is the service's unverified answer, and says so.
-    $("r-out").innerHTML = `${checkBox(check, extra)}
+    outEl.innerHTML = `${checkBox(check, extra)}
       ${good ? "" : `<p class="bad"><strong>Unverified:</strong> the result below couldn't be confirmed from the receipt.</p>`}
       <p class="verdict ${esc(p.result.verdict)}">${esc(words(p.result.verdict))}</p>
       <div class="votes">${p.votes.map((v) => `<div class="vote"><strong class="${esc(v?.verdict)}">${esc(words(v?.verdict))}</strong> · <code>${esc(v?.model)}</code> <span class="muted">(${esc(v?.confidence)} confidence)</span>
         ${Array.isArray(v?.issues) && v.issues.length ? `<ul>${v.issues.map((i) => `<li>${esc(i)}</li>`).join("")}</ul>` : ""}
         ${v?.reasoning ? `<p class="muted">${esc(v.reasoning)}</p>` : ""}</div>`).join("")}</div>
-      ${receiptTools(r.receipt, "review-" + p.review_id, "review")}
+      ${receiptTools(r.receipt, "review-" + p.review_id, outEl.id)}
       ${Number.isInteger(r.free?.left_today) ? `<p class="muted">Free ${tier === "review-3" ? "three-reviewer reviews" : "single reviews"} left today: ${r.free.left_today}.</p>` : ""}
       <p class="muted">A review is what these models think, not a guarantee the work is right.</p>`;
   } catch (e) {
-    $("r-out").innerHTML = errorHtml(e);
+    outEl.innerHTML = errorHtml(e);
   } finally {
-    $("r-go").disabled = false;
+    btn.disabled = false;
   }
+}
+$("r-go").addEventListener("click", () => runReview($("r-task").value, $("r-output").value, $("r-tier").value, $("r-panel").value || undefined, $("r-go"), $("r-out")));
+$("f-go").addEventListener("click", () => {
+  if (!files.task || !files.output) { $("f-out").innerHTML = errorHtml(new Error("Pick both a task file and an output file.")); return; }
+  runReview(files.task, files.output, $("f-tier").value, $("f-panel").value || undefined, $("f-go"), $("f-out"));
 });
 
 // 2. Demo match: both seats play in this page.
