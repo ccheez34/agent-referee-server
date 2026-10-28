@@ -139,3 +139,100 @@ t("health says ok, then degraded with the reason when a provider is capped, and 
   assert.ok(bad.body.reasons.includes("provider_cap:anthropic:claude-opus-5-5"), JSON.stringify(bad.body));
   assert.equal(bad.body.checks.providers["anthropic:claude-opus-5-5"], "capped");
 });
+
+// ---------- the real x402 paywall (x402-hono) with a stand-in facilitator ----------
+
+const PAYEE = "0x0000000000000000000000000000000000000001";
+const payHeader = (from: string, value = "50000") =>
+  Buffer.from(
+    JSON.stringify({
+      x402Version: 1,
+      scheme: "exact",
+      network: "base-sepolia",
+      payload: {
+        signature: "0x" + "ab".repeat(65),
+        authorization: { from, to: PAYEE, value, validAfter: "0", validBefore: String(Math.floor(Date.now() / 1000) + 300), nonce: "0x" + "1".repeat(64) },
+      },
+    }),
+  ).toString("base64");
+
+/** The facilitator: verify says valid; settle does what `settle` says. Counts calls. */
+function fakeFacilitator(settle: "ok" | "fail" | "down", verify: "ok" | "down" = "ok") {
+  const orig = globalThis.fetch;
+  const calls = { verify: 0, settle: 0 };
+  globalThis.fetch = (async (u: any, init: any) => {
+    const url = String(u);
+    const body = init?.body ? JSON.parse(init.body) : {};
+    const payer = body?.paymentPayload?.payload?.authorization?.from;
+    if (url.endsWith("/verify")) {
+      calls.verify++;
+      if (verify === "down") throw new TypeError("fetch failed");
+      return new Response(JSON.stringify({ isValid: true, payer }), { status: 200 });
+    }
+    if (url.endsWith("/settle")) {
+      calls.settle++;
+      if (settle === "down") throw new TypeError("fetch failed");
+      if (settle === "fail") return new Response(JSON.stringify({ success: false, errorReason: "insufficient_funds", transaction: "", network: "base-sepolia", payer }), { status: 200 });
+      return new Response(JSON.stringify({ success: true, transaction: "0x" + "cd".repeat(32), network: "base-sepolia", payer }), { status: 200 });
+    }
+    return orig(u, init);
+  }) as any;
+  return { calls, restore: () => (globalThis.fetch = orig) };
+}
+const settleWait = () => new Promise((r) => setTimeout(r, 50));
+
+t("paid review through the real paywall: verified, delivered, settled once, with the settlement header", async () => {
+  const f = fakeFacilitator("ok");
+  try {
+    const e = env({ PAYMENTS_ENABLED: "true" });
+    const r = await call(e, "/review", review, { "x-payment": payHeader("0x" + "a".repeat(40)) });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.ok(r.headers.get("x-payment-response"), "the settlement is reported to the client");
+    assert.deepEqual(f.calls, { verify: 1, settle: 1 });
+  } finally {
+    f.restore();
+  }
+});
+
+t("work delivered but not settled: the wallet is blocked before paying again, and repeats pause paid routes", async () => {
+  const f = fakeFacilitator("fail");
+  try {
+    const e = env({ PAYMENTS_ENABLED: "true", SETTLE_FAIL_PAUSE_AFTER: "2" });
+    const w1 = "0x" + "b".repeat(40);
+    const first = await call(e, "/review", review, { "x-payment": payHeader(w1) });
+    assert.equal(first.status, 402, "settle failed: the client sees the payment error");
+    await settleWait();
+    const again = await call(e, "/review", review, { "x-payment": payHeader(w1) });
+    assert.equal(again.status, 403);
+    assert.match(again.body.error, /wallet_blocked/);
+    assert.equal(f.calls.settle, 1, "the blocked wallet never got a second review");
+    await call(e, "/review", review, { "x-payment": payHeader("0x" + "c".repeat(40)) });
+    await settleWait();
+    const paused = await call(e, "/review", review, { "x-payment": payHeader("0x" + "d".repeat(40)) });
+    assert.equal(paused.status, 503, "two settle failures within the hour paused paid routes");
+    assert.match(paused.body.error, /paused/);
+    const h = await call(e, "/health");
+    assert.equal(h.body.status, "degraded");
+    assert.ok(h.body.reasons.some((x: string) => x.startsWith("auto_paused")) && h.body.reasons.includes("settle_failure"), JSON.stringify(h.body));
+  } finally {
+    f.restore();
+  }
+});
+
+t("a facilitator that's down is uncharged for the agent and shows up in /health", async () => {
+  const f = fakeFacilitator("ok", "down");
+  try {
+    const e = env({ PAYMENTS_ENABLED: "true" });
+    for (const ch of ["1", "2", "3"]) {
+      const r = await call(e, "/review", review, { "x-payment": payHeader("0x" + ch.repeat(40)) });
+      assert.equal(r.status, 402, "verification failed: nothing ran, nothing charged");
+      _resetHealthCaches(); // lift the 20 s per-kind write throttle so each failure is recorded
+      await settleWait();
+    }
+    assert.equal(f.calls.settle, 0);
+    const h = await call(e, "/health");
+    assert.ok(h.body.reasons.includes("facilitator_down"), JSON.stringify(h.body));
+  } finally {
+    f.restore();
+  }
+});
