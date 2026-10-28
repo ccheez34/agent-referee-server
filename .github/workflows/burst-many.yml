@@ -1,0 +1,44 @@
+# Many-machine burst against the STAGING Worker: 20 GitHub runners (separate machines and IPs) fire 150 sealed
+# reviews each at the same instant = 3,000 at once. Fake AI, payments off; the script refuses anything else.
+# Runs on every push to the burst-many branch (no secrets needed: staging is public and free).
+name: burst-many
+on:
+  push:
+    branches: [burst-many]
+  workflow_dispatch:
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      start: ${{ steps.t.outputs.start }}
+    steps:
+      - id: t
+        run: echo "start=$(( ($(date +%s) + 150) * 1000 ))" >> "$GITHUB_OUTPUT"
+  burst:
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        runner: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node scripts/burst-many.mjs --url https://agent-referee-staging.fairplayclub.workers.dev --n 150 --start ${{ needs.plan.outputs.start }} --runner ${{ matrix.runner }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: burst-${{ matrix.runner }}
+          path: burst-result.json
+  summary:
+    needs: burst
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: results
+      - run: node scripts/burst-summary.mjs results
