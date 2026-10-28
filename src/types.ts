@@ -18,6 +18,10 @@ export interface Env {
   EXT_FREE_DAILY_BUDGET_USD?: string; // daily budget for free reviews sent by the hosted MCP server (off when unset)
   EXT_FREE_REVIEWS_PER_DAY?: string; // per hosted-server user per UTC day (default 3)
   EXT_FREE_REVIEW3_PER_DAY?: string; // per hosted-server user per UTC day (default 1)
+  // Region rules (regions.ts): each a comma list of ISO codes ("CN", "UA-43") or "none", replacing that list's default.
+  BLOCKED_REGIONS?: string; // every AI and paid route (default: US comprehensive sanctions, Crimea/Sevastopol/Donetsk/Luhansk, Tor)
+  // BLOCKED_REGIONS_<COMPANY>: e.g. BLOCKED_REGIONS_ANTHROPIC, _OPENAI, _GOOGLE (defaults from their published lists)
+  REGION_BLOCK?: string; // "off" turns the region rules off
   LONG_REVIEW_CHARS?: string; // task + output longer than this: light models (LIGHT_REVIEW_MODELS) sit out of reviews (default 6000)
   LIGHT_REVIEW_MODELS?: string; // comma list, default "claude-haiku-5-5"
   PAID_PAUSED?: string; // "true" refuses paid matches (before any payment) and points agents to demo mode

@@ -401,3 +401,76 @@ t("internal free route: each hosted-server user has their own allowance, and the
   // Off when its budget isn't set, even with the token.
   assert.equal((await call(env({ ...FREE, INTERNAL_TOKEN: INTERNAL }), "/internal/free/review", review, as("u"))).status, 503);
 });
+
+// ---------- region rules (regions.ts) ----------
+
+const from = (cc: string, ip = "203.0.113.7") => ({ "cf-ipcountry": cc, "cf-connecting-ip": ip });
+
+t("region rules: a free review from a country a reviewer's company doesn't serve gets 451 and its allowance isn't used", async () => {
+  const e = env(FREE);
+  const hk = await call(e, "/free/review", review, from("HK"));
+  assert.equal(hk.status, 451, JSON.stringify(hk.body));
+  assert.match(hk.body.error, /^not_available_in_region: .*anthropic.*Your free review wasn't used\.$/);
+  assert.equal(hk.body.region, "HK");
+  assert.equal((await call(e, "/free/review-3", review, from("AF"))).status, 451, "review-3 includes Claude and Gemini");
+  const jp = await call(e, "/free/review", review, from("JP"));
+  assert.equal(jp.status, 200);
+  assert.equal(jp.body.free.used_today, 1, "the refused ones used nothing");
+  assert.equal((await call(e, "/free/review", review)).status, 200, "unknown country: allowed");
+  assert.equal((await call(env({ ...FREE, REGION_BLOCK: "off" }), "/free/review", review, from("HK"))).status, 200, "REGION_BLOCK=off");
+  // Sub-regions: Crimea is refused; the rest of Ukraine isn't.
+  assert.equal((await call(e, "/free/review", review, { ...from("UA", "198.51.100.50"), "x-test-country": "UA-43" })).status, 451);
+  assert.equal((await call(e, "/free/review", review, from("UA", "198.51.100.51"))).status, 200);
+});
+
+t("region rules: a paid review is refused before the payment challenge; the internal route isn't checked", async () => {
+  const e = env({ ...FREE, ...EXT, PAYMENTS_ENABLED: "true" });
+  const r = await call(e, "/review", review, from("CN"));
+  assert.equal(r.status, 451);
+  assert.match(r.body.error, /Nothing was charged\.$/);
+  assert.equal((await call(e, "/review", review, from("US"))).status, 402);
+  // The hosted MCP server calls from its own location, so the request's country isn't the person's.
+  assert.equal((await call(e, "/internal/free/review", review, { ...from("HK"), "x-internal-auth": INTERNAL, "x-caller-id": "u" })).status, 200);
+});
+
+t("region rules: sanctioned locations can't create matches or take paid seats, whatever the tier", async () => {
+  const e = env();
+  const m = await call(e, "/matches", { tier: "rps", seats: ["a", "b"] }, from("IR"));
+  assert.equal(m.status, 451);
+  assert.equal(m.body.region, "IR");
+  assert.equal((await call(e, "/join/rps", { match_id: "a".repeat(24), seat: "a" }, from("KP"))).status, 451);
+  assert.equal((await call(e, "/matches", { tier: "rps", seats: ["a", "b"] }, from("HK"))).status, 201, "no AI in rps: only the sanctions list applies");
+  assert.equal((await call(e, "/matches", { tier: "rps", seats: ["a", "b"] }, { "x-test-country": "T1" })).status, 451, "Tor, via the staging test header");
+  // The test header is never read outside staging.
+  assert.equal((await call(env({ STAGING: "false", FAKE_AI: undefined }), "/matches", { tier: "rps", seats: ["a", "b"] }, { "x-test-country": "IR" })).status, 201);
+});
+
+t("region rules: judge seats check the match's judges' companies", async () => {
+  const e = env();
+  const m = await call(e, "/matches", { tier: "judge", seats: ["alpha", "beta"], rules: "Pick the cheaper plan." }, from("US"));
+  assert.equal(m.status, 201, JSON.stringify(m.body));
+  const id = m.body.match_id ?? m.body.id;
+  const hk = await call(e, "/join/judge", { match_id: id, seat: "alpha" }, from("HK"));
+  assert.equal(hk.status, 451, JSON.stringify(hk.body));
+  assert.match(hk.body.error, /anthropic/);
+  assert.notEqual((await call(e, "/join/judge", { match_id: id, seat: "alpha" }, from("JP"))).status, 451);
+});
+
+t("GET /admin/stats: requests by country and region refusals, apart from the usage counts", async () => {
+  const e = env(FREE);
+  await call(e, "/free/review", review, from("JP"));
+  await call(e, "/free/review", review, from("JP", "198.51.100.60"));
+  await call(e, "/free/review", review, from("SG", "198.51.100.61"));
+  await call(e, "/free/review", review, from("HK", "198.51.100.62"));
+  await call(e, "/matches", { tier: "rps", seats: ["a", "b"] }, from("IR"));
+  await tick();
+  const r = await call(e, "/admin/stats", undefined, { authorization: `Bearer ${ADMIN}` });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.deepEqual(r.body.today.countries, { JP: 2, HK: 1, SG: 1 }, "largest first; HK was counted, then refused");
+  assert.deepEqual(r.body.today.region_blocked, { HK: 1, IR: 1 });
+  assert.equal(r.body.today.counts.region_blocked, 2);
+  assert.equal(r.body.today.counts.free_ok_review, 3);
+  assert.ok(!Object.keys(r.body.today.counts).some((k) => k.startsWith("cc_") || k.startsWith("rb_")));
+  assert.deepEqual(r.body.countries_7_days, { JP: 2, HK: 1, SG: 1 });
+  assert.deepEqual(r.body.region_blocked_7_days, { HK: 1, IR: 1 });
+});

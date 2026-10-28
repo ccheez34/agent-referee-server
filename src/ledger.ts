@@ -345,8 +345,8 @@ export class Ledger {
       const from = new Date(Date.parse(`${today}T00:00:00Z`) - 6 * 86_400_000).toISOString().slice(0, 10);
       const byDay: Record<string, Record<string, number>> = {};
       for (let i = 0; i < 7; i++) byDay[new Date(Date.parse(`${today}T00:00:00Z`) - i * 86_400_000).toISOString().slice(0, 10)] = {};
-      // Only the 7 days shown (the alarm deletes older counts; at most a few hundred keys).
-      const found = st.list ? await st.list<number>({ prefix: "st:", start: `st:${from}`, limit: 2_000 }) : new Map<string, number>();
+      // Only the 7 days shown (the alarm deletes older counts). Country counts can add a few hundred keys a day.
+      const found = st.list ? await st.list<number>({ prefix: "st:", start: `st:${from}`, limit: 10_000 }) : new Map<string, number>();
       for (const [k, v] of found) {
         const day = k.slice(3, 13);
         if (day < from || day > today || !byDay[day]) continue;

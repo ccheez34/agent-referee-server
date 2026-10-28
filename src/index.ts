@@ -5,7 +5,7 @@ import { KEY_RE, MEDIATOR, MAX_SERIES_GAMES, doublePrice, idForKey, isJudgeTier,
 import { MatchRoom } from "./match.ts";
 import { Ledger, ledgerShardName, shardLimit } from "./ledger.ts";
 import { landingHtml, llmsTxt, wantsHtml } from "./landing.ts";
-import { JUDGE_MESSAGE_FORMAT, JUDGE_SYSTEM, judgeCommitment, missingJudgeKey, modelPool, optInModels, panelModels, tierCommitment, tierModels, type JudgeTierName } from "./judge.ts";
+import { JUDGE_MESSAGE_FORMAT, JUDGE_SYSTEM, allowedModels, judgeCommitment, missingJudgeKey, modelPool, optInModels, panelModels, tierCommitment, tierModels, type JudgeTierName } from "./judge.ts";
 import type { Env } from "./types.ts";
 import { payaiToken } from "./payai.ts";
 import { signReceipt } from "./receipt.ts";
@@ -17,6 +17,7 @@ import { Health, adminOk, evaluateHealth, healthEvents, listUnjudged, markRefund
 import { acquireSlots, gateStats, gatesOn, poolsOfProvider, quickBusy, resetPools, type SlotLease } from "./gateclient.ts";
 import { classifyPaidResponse, plausiblePayment, priceMicro, reviewBudget, reviewLimitRefusal } from "./paywatch.ts";
 import { fakeAiConfig } from "./fakeai.ts";
+import { blockedStat, countryStat, regionBlock, regionRefusal, whereFrom } from "./regions.ts";
 
 export { MatchRoom, Ledger, Gate, Health };
 
@@ -177,9 +178,45 @@ async function inBackground(c: any, p: Promise<unknown>) {
   }
 }
 
+/** Where the request comes from. Staging tests stand in for other countries with x-test-country; production never reads it. */
+function whereOf(c: any) {
+  const test = c.env.STAGING === "true" && c.env.NETWORK !== "base" ? c.req.header("x-test-country") : undefined;
+  if (test) {
+    const [country, sub] = test.toUpperCase().split("-");
+    return whereFrom({ cf: { country, regionCode: sub } } as any, () => undefined);
+  }
+  return whereFrom(c.req.raw, (n) => c.req.header(n));
+}
+
+/**
+ * Region rule for a request that may reach these models (see regions.ts): null when it may go ahead, otherwise a 451
+ * refusal (counted). `count`: also add one to today's count for the request's country (counts only, never who).
+ */
+function regionCheck(c: any, models: string[], suffix: string, count = false): Response | null {
+  const where = whereOf(c);
+  if (count) stat(c, countryStat(where));
+  const block = regionBlock(c.env, models, where);
+  if (!block) return null;
+  stat(c, "region_blocked");
+  stat(c, blockedStat(block.code));
+  return regionRefusal(block, suffix);
+}
+
+/** Region rule for joining a match: its judges' companies (no judges: the sanctions list only). The match's status is
+ * read only when some allowed model's company would refuse this location, so most requests cost nothing extra. */
+async function matchRegionCheck(c: any, id: string, suffix: string): Promise<Response | null> {
+  if (!regionBlock(c.env, allowedModels(c.env), whereOf(c))) return null;
+  const status: any = await (await forward(c.env, id, "status")).json().catch(() => null);
+  const models: string[] = status?.judge ? (status.judge.panel ?? [{ model: status.judge.model }]).map((p: any) => p.model) : [];
+  return regionCheck(c, models, suffix, models.length > 0);
+}
+
 const paidRoute = async (c: any, next: any) => {
   // Checked before the paywall, so a paused service never asks anyone to pay.
   if (await paidPausedNow(c.env)) return err(503, PAUSED_MSG);
+  // Sanctions list on every paid route (reviews and judge seats also check their models' companies, before this).
+  const sanctioned = regionCheck(c, [], "Nothing was charged.");
+  if (sanctioned) return sanctioned;
   if (c.env.PAYMENTS_ENABLED === "false") return next();
   const hadPayment = !!c.req.header("x-payment");
   const payer = payerFromPaymentHeader(c.req.header("x-payment"));
@@ -233,6 +270,9 @@ async function reviewGuard(c: any, next: any) {
   }
   if (missingReviewKey(c.env, commitment.models)) return err(503, "Sealed review is temporarily unavailable. Nothing was charged.");
   const paying = c.env.PAYMENTS_ENABLED === "false" || !!c.req.header("x-payment");
+  // Counted once per paid review (the call carrying the payment), not again for the unpaid first call.
+  const region = regionCheck(c, commitment.models, "Nothing was charged.", paying);
+  if (region) return region;
   if (!paying) {
     // The first x402 call (no payment yet): answer busy now rather than after the agent signs a payment.
     const b = await quickBusy(c.env, commitment.models);
@@ -305,12 +345,15 @@ const busyWhat = (reason: string) =>
 /** Judge seats: refuse before payment when the match's judges are closed by a provider cap or their queue is full.
  * Judging itself happens later; this only avoids taking money when we already know it can't start soon. */
 async function judgeJoinGuard(c: any, next: any) {
-  if (!gatesOn(c.env)) return next();
   const body: any = await c.req.json().catch(() => null);
   const id = body?.match_id;
   if (typeof id !== "string" || !ID_RE.test(id)) return next(); // the handler gives the proper error, before payment settles
   const status: any = await (await forward(c.env, id, "status")).json().catch(() => null);
   const models: string[] = status?.judge ? (status.judge.panel ?? [{ model: status.judge.model }]).map((p: any) => p.model) : [];
+  // Counted once per paid seat (the call carrying the payment).
+  const region = regionCheck(c, models, "Nothing was charged.", c.env.PAYMENTS_ENABLED === "false" || !!c.req.header("x-payment"));
+  if (region) return region;
+  if (!gatesOn(c.env)) return next();
   const b = models.length ? await quickBusy(c.env, models) : null;
   if (b) return busy(b.retryAfter, "this match's AI judges are at capacity.");
   return next();
@@ -520,14 +563,34 @@ app.get("/admin/stats", async (c) => {
   const usd = (micro: unknown) => (Number.isFinite(micro) ? Math.round((micro as number) / 10_000) / 100 : 0);
   const pub = freeReviewConfig(c.env);
   const ext = freeReviewConfig(c.env, "ext");
+  // Country counts ("cc_jp") and region refusals ("rb_cn") are shown apart from the usage counts, largest first.
+  const sorted = (m: Record<string, number>) => Object.fromEntries(Object.entries(m).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])));
+  const days = s.days.map((d: any) => {
+    const counts: Record<string, number> = {};
+    const countries: Record<string, number> = {};
+    const refused: Record<string, number> = {};
+    for (const [k, v] of Object.entries(d.counts ?? {}) as [string, number][]) {
+      if (k.startsWith("cc_")) countries[k.slice(3).toUpperCase()] = v;
+      else if (k.startsWith("rb_")) refused[k.slice(3).toUpperCase()] = v;
+      else counts[k] = v;
+    }
+    return { day: d.day, counts, countries: sorted(countries), region_blocked: sorted(refused) };
+  });
+  const total = (field: "countries" | "region_blocked") => {
+    const t: Record<string, number> = {};
+    for (const d of days) for (const [k, v] of Object.entries(d[field]) as [string, number][]) t[k] = (t[k] ?? 0) + v;
+    return sorted(t);
+  };
   return c.json({
-    today: s.days[0],
-    last_7_days: s.days,
+    today: days[0],
+    last_7_days: days,
+    countries_7_days: total("countries"),
+    region_blocked_7_days: total("region_blocked"),
     free_budget_today: {
       public: { spent_usd: usd(s.free_spent_micro?.public), budget_usd: usd(pub.budgetMicro) },
       ext: { spent_usd: usd(s.free_spent_micro?.ext), budget_usd: usd(ext.budgetMicro), note: "free reviews from the hosted MCP server (ChatGPT)" },
     },
-    key: "free_* = free reviews from the public routes; ext_* = free reviews from the hosted MCP server (ChatGPT); paid_* = paid reviews. ok_review / ok_review3 = completed, failed = a reviewer failed (not used / not charged), busy = at capacity, refused_caller = that address or user had used today's allowance, refused_budget = the shared budget was used up, bad_input = the request was rejected. Spending is counted at list price, not the real AI cost.",
+    key: "free_* = free reviews from the public routes; ext_* = free reviews from the hosted MCP server (ChatGPT); paid_* = paid reviews. ok_review / ok_review3 = completed, failed = a reviewer failed (not used / not charged), busy = at capacity, refused_caller = that address or user had used today's allowance, refused_budget = the shared budget was used up, bad_input = the request was rejected, region_blocked = refused because of where it came from. countries = AI requests by the country Cloudflare reports (paid reviews and judge seats once paid, free reviews once their input passed; XX = unknown; not the hosted MCP server's, which come from its own location), region_blocked by country = those refused by the region rules (CC-SUB is a region, e.g. UA-43 Crimea; T1 = Tor). Spending is counted at list price, not the real AI cost.",
   });
 });
 
@@ -743,6 +806,11 @@ async function handleFreeReview(c: any, tier: ReviewTier, ext?: { caller: string
     return err(400, `${String(e?.message ?? e)} Your free review wasn't used.`);
   }
   if (missingReviewKey(c.env, commitment.models)) return err(503, "Sealed review is temporarily unavailable. Your free review wasn't used.");
+  // Not for ext: those requests come from the hosted MCP server's own location, not the person's.
+  if (!ext) {
+    const region = regionCheck(c, commitment.models, "Your free review wasn't used.", true);
+    if (region) return region;
+  }
   const caller = ext ? ext.caller : await callerHash(c);
   if (!caller || !c.env.LEDGER) return err(503, "Free reviews aren't available from here. " + FREE_PAID_HINT);
   // Quick capacity check first, so a full pool doesn't use anyone's allowance.
@@ -937,6 +1005,8 @@ app.get("/pubkey", async (c) => {
 // ---------- matches ----------
 
 app.post("/matches", async (c) => {
+  const sanctioned = regionCheck(c, [], "");
+  if (sanctioned) return sanctioned;
   const input: any = await c.req.json().catch(() => null);
   if (isJudgeTier(input?.tier) && missingJudgeKey(c.env, tierModels(c.env, input.tier as JudgeTierName)))
     return err(503, "This judge tier is temporarily unavailable.");
@@ -999,6 +1069,8 @@ app.post("/invite/join", async (c) => {
   const body: any = await c.req.json().catch(() => null);
   if (!body || typeof body.match_id !== "string" || !ID_RE.test(body.match_id)) return err(400, "match_id is required.");
   if (typeof body.invite_token !== "string" || body.invite_token.length > 200) return err(400, "invite_token is required.");
+  const region = await matchRegionCheck(c, body.match_id, "");
+  if (region) return region;
   return forward(c.env, body.match_id, "join", { role: "guest", invite_token: body.invite_token, seat: body.seat });
 });
 
