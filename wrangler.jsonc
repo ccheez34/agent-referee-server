@@ -46,9 +46,12 @@
     // Panel judges, panelist 1 first, from different companies so a panel isn't one model family agreeing with itself.
     // Plain Claude ids go to Anthropic (ANTHROPIC_API_KEY); "provider/model" ids go through OpenRouter (OPENROUTER_API_KEY).
     "PANEL_2_MODELS": "claude-opus-5-5,google/gemini-4-argon",
-    "PANEL_3_MODELS": "claude-opus-5-5,openai/gpt-6-luna,google/gemini-3.7-flash"
-    // Concurrent AI calls per provider pool (defaults: Opus 6, Sonnet 12, Haiku 12, OpenRouter 20). Set from measurements, e.g.
-    // "GATE_SLOTS_ANTHROPIC_CLAUDE_OPUS_5_5": "6", "GATE_SLOTS_OPENROUTER": "20"
+    "PANEL_3_MODELS": "claude-opus-5-5,openai/gpt-6-luna,google/gemini-3.7-flash",
+    // Concurrent AI calls per provider pool (code defaults: Opus 6, Sonnet 12, Haiku 12, OpenRouter 20).
+    // Live starts from what the launch-day stress test ran at once with no 429s: 20 reviews (Sonnet) and 10 review-3s
+    // (10 Opus + 20 OpenRouter calls). The Phase 2b ramp checks Sonnet above that; lower a pool if it shows "throttled".
+    "GATE_SLOTS_ANTHROPIC_CLAUDE_SONNET_5_5": "20",
+    "GATE_SLOTS_ANTHROPIC_CLAUDE_OPUS_5_5": "10"
   },
 
   // Staging copy for free load tests: npx wrangler deploy --env staging. Own Worker (agent-referee-staging), own
