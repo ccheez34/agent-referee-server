@@ -474,3 +474,30 @@ t("GET /admin/stats: requests by country and region refusals, apart from the usa
   assert.deepEqual(r.body.countries_7_days, { JP: 2, HK: 1, SG: 1 });
   assert.deepEqual(r.body.region_blocked_7_days, { HK: 1, IR: 1 });
 });
+
+// ---------- answers cut off at the token limit ----------
+
+t("an answer cut off at the token limit is noted each time: per model in /admin/stats, the details, and a /health warning", async () => {
+  const e = env(FREE);
+  const cut = { "x-test-fake-mix": "cut:1", "x-test-fake-delay": "1-2" };
+  const f = await call(e, "/free/review", review, cut);
+  assert.equal(f.status, 502, JSON.stringify(f.body));
+  assert.match(f.body.error, /ran out of tokens/);
+  await tick();
+  const r = await call(e, "/admin/stats", undefined, { authorization: `Bearer ${ADMIN}` });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const per = r.body.ran_out_of_tokens_7_days;
+  const [[model, n]] = Object.entries(per) as [string, number][];
+  assert.match(model, /^claude-/);
+  assert.equal(n, 2, "both tries were cut off, and each is noted");
+  assert.deepEqual(r.body.today.ran_out_of_tokens, per);
+  assert.ok(!Object.keys(r.body.today.counts).some((k) => k.startsWith("oot_")));
+  const recent = r.body.ran_out_of_tokens_recent;
+  assert.equal(recent.length, 2);
+  assert.equal(recent[0].where, "review");
+  assert.equal(recent[0].max_tokens, 4000);
+  assert.ok(recent[0].prompt_chars > 0);
+  assert.ok(!JSON.stringify(recent).includes(review.task), "never the prompt itself");
+  const h = await call(e, "/health");
+  assert.ok(h.body.warnings.includes("out_of_tokens"), JSON.stringify(h.body));
+});

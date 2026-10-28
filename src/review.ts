@@ -11,7 +11,8 @@
 
 import { LIMITS, canonicalJson, panelShapeError, sha256Hex, validateCriteria } from "./logic.ts";
 import { ProviderCapError, classifyStatus, rateInfo, type CallObservation } from "./providers.ts";
-import { allowedModels, answerText, callModel, choosePanel, modelPool, panelModels, viaOpenRouter, JUDGE_TEMPERATURE, type Confidence, type Criterion, type JudgeKeys, type PanelEnv, type PanelRequest, type PanelSelection } from "./judge.ts";
+import type { CutOff } from "./cutoffs.ts";
+import { allowedModels, answerTokens, answerText, callModel, choosePanel, modelPool, panelModels, viaOpenRouter, JUDGE_TEMPERATURE, type Confidence, type Criterion, type JudgeKeys, type PanelEnv, type PanelRequest, type PanelSelection } from "./judge.ts";
 
 export type ReviewTier = "review" | "review-3";
 export const REVIEW_TIERS: ReviewTier[] = ["review", "review-3"];
@@ -256,7 +257,7 @@ export async function runOneReviewer(
   reviewer: number,
   input: ReviewInput,
   timeoutMs = REVIEWER_CALL_TIMEOUT_MS,
-  opts: { budgetMs?: number; sleep?: (ms: number) => Promise<unknown>; now?: () => number; observe?: (o: CallObservation) => void } = {},
+  opts: { budgetMs?: number; sleep?: (ms: number) => Promise<unknown>; now?: () => number; observe?: (o: CallObservation) => void; onCutOff?: (c: CutOff) => void } = {},
 ): Promise<ReviewVote> {
   const observe = opts.observe ?? (() => {});
   const user = buildReviewMessage(input.task, input.output, input.title, input.criteria);
@@ -310,6 +311,7 @@ export async function runOneReviewer(
       try {
         v = parseReview(answerText(model, data), input.criteria);
       } catch (pe: any) {
+        if (cutOff) opts.onCutOff?.({ where: "review", model, max_tokens: answerTokens(model, REVIEWER_MAX_TOKENS), prompt_chars: REVIEW_SYSTEM.length + user.length, try_number: tryNumber });
         throw new Error(cutOff ? "reviewer ran out of tokens before finishing its answer" : pe?.message ?? "reviewer returned unusable output");
       }
       const vote: ReviewVote = { reviewer, model, ...v };

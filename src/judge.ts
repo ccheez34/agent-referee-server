@@ -437,6 +437,9 @@ function parseVote(text: string, seats: string[], criteria: Criterion[] | undefi
 /** Answer budget for Claude judges (was 1000). A cut-off answer can't be used, and unused tokens cost nothing.
  * OpenRouter models get 6000, since reasoning models spend part of it thinking. */
 export const JUDGE_MAX_TOKENS = 4000;
+/** The answer budget (max_tokens) a model gets: OpenRouter models a fixed 6,000; Claude models `anthropicMaxTokens`. */
+export const OPENROUTER_MAX_TOKENS = 6000;
+export const answerTokens = (model: string, anthropicMaxTokens = JUDGE_MAX_TOKENS) => (viaOpenRouter(model) ? OPENROUTER_MAX_TOKENS : anthropicMaxTokens);
 
 /** anthropicMaxTokens: the answer budget for Claude models (judges and reviewers both get 4000). */
 export async function callModel(keys: JudgeKeys, model: string, system: string, user: string, signal?: AbortSignal, anthropicMaxTokens = JUDGE_MAX_TOKENS): Promise<Response> {
@@ -453,7 +456,7 @@ export async function callModel(keys: JudgeKeys, model: string, system: string, 
       body: JSON.stringify({
         model,
         // Reasoning models spend part of max_tokens thinking; keep effort low and leave room for the JSON answer.
-        max_tokens: 6000,
+        max_tokens: OPENROUTER_MAX_TOKENS,
         reasoning: { effort: "low", exclude: true },
         ...(privacyRouting(model) ? { provider: { data_collection: "deny" } } : {}),
         messages: [
@@ -505,6 +508,8 @@ export async function runOneJudge(opts: {
   sleep?: (ms: number) => Promise<unknown>;
   /** Told about every provider call (for the admission gate's outcome counts and self-throttling). */
   observe?: (o: CallObservation) => void;
+  /** Told when an answer was cut off at the token limit (so the limit can be raised). */
+  onCutOff?: (c: { where: "judge"; model: string; max_tokens: number; prompt_chars: number; try_number?: number }) => void;
 }): Promise<JudgeVote> {
   const v3 = opts.formatVersion !== JUDGE_FORMAT_VERSION_V2;
   const seats = Object.keys(opts.submissions).sort();
@@ -550,14 +555,14 @@ export async function runOneJudge(opts: {
     try {
       const data: any = await res.json();
       if (data?.error) throw new Error(`judge API error: ${String(data.error.message ?? data.error).slice(0, 200)}`);
-      const text = answerText(opts.model, data);
+      const cutOff = data?.stop_reason === "max_tokens" || data?.choices?.[0]?.finish_reason === "length";
       let v;
       try {
-        v = parseVote(text, seats, opts.criteria, v3);
+        v = parseVote(answerText(opts.model, data), seats, opts.criteria, v3);
       } catch (pe: any) {
-        // An answer cut off at the token limit can't be parsed: say so plainly instead of "unparseable".
-        const cutOff = data?.stop_reason === "max_tokens" || data?.choices?.[0]?.finish_reason === "length";
-        throw cutOff ? new Error("judge ran out of tokens before finishing its answer") : pe;
+        // An answer cut off at the token limit can't be parsed: say so plainly instead of "unparseable", and note it.
+        if (cutOff) opts.onCutOff?.({ where: "judge", model: opts.model, max_tokens: answerTokens(opts.model), prompt_chars: system.length + user.length, try_number: attempt + 1 });
+        throw cutOff && !/ran out of tokens/.test(String(pe?.message)) ? new Error("judge ran out of tokens before finishing its answer") : pe;
       }
       const vote: JudgeVote = { panelist: opts.panelist, model: opts.model, order: opts.order, ...v };
       if (typeof data?.model === "string") vote.model_reported = data.model.slice(0, 120);

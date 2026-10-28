@@ -44,6 +44,7 @@ import type { DOState, Env } from "./types.ts";
 import { acquireSlots } from "./gateclient.ts";
 import { fakeAiConfig } from "./fakeai.ts";
 import { addUnjudged } from "./health.ts";
+import { recordCutOff } from "./cutoffs.ts";
 import { GATE_MAX_WAIT_MS } from "./gate.ts";
 
 type Phase = "joining" | "commit" | "reveal" | "submit" | "judging" | "done" | "expired" | "error";
@@ -233,6 +234,7 @@ export class MatchRoom {
       return this.locked(() => this.judgesBusy(retryAfter, slots.reason));
     }
     let settled: PromiseSettledResult<JudgeVote>[];
+    const notes: Promise<void>[] = []; // cut-off notes (never throw)
     try {
       const keys = { ANTHROPIC_API_KEY: this.env.ANTHROPIC_API_KEY, OPENROUTER_API_KEY: this.env.OPENROUTER_API_KEY, fake: fakeAiConfig(this.env) };
       settled = await Promise.allSettled(
@@ -248,11 +250,13 @@ export class MatchRoom {
             criteria: result.criteria,
             submissions: result.submissions,
             observe: (o) => slots.lease.observe(i, o),
+            onCutOff: (cut) => notes.push(recordCutOff(this.env, cut)),
           }),
         ),
       );
     } finally {
       await slots.lease.release();
+      await Promise.all(notes);
     }
     const outcomes = settled.map((s, i) => ({
       index: result.jobs[i].index,

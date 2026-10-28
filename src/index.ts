@@ -17,6 +17,7 @@ import { Health, adminOk, evaluateHealth, healthEvents, listUnjudged, markRefund
 import { acquireSlots, gateStats, gatesOn, poolsOfProvider, quickBusy, resetPools, type SlotLease } from "./gateclient.ts";
 import { classifyPaidResponse, plausiblePayment, priceMicro, reviewBudget, reviewLimitRefusal } from "./paywatch.ts";
 import { fakeAiConfig } from "./fakeai.ts";
+import { recordCutOff } from "./cutoffs.ts";
 import { blockedStat, countryStat, regionBlock, regionRefusal, whereFrom } from "./regions.ts";
 
 export { MatchRoom, Ledger, Gate, Health };
@@ -569,14 +570,16 @@ app.get("/admin/stats", async (c) => {
     const counts: Record<string, number> = {};
     const countries: Record<string, number> = {};
     const refused: Record<string, number> = {};
+    const outOfTokens: Record<string, number> = {};
     for (const [k, v] of Object.entries(d.counts ?? {}) as [string, number][]) {
-      if (k.startsWith("cc_")) countries[k.slice(3).toUpperCase()] = v;
+      if (k.startsWith("oot_")) outOfTokens[k.slice(4)] = v;
+      else if (k.startsWith("cc_")) countries[k.slice(3).toUpperCase()] = v;
       else if (k.startsWith("rb_")) refused[k.slice(3).toUpperCase()] = v;
       else counts[k] = v;
     }
-    return { day: d.day, counts, countries: sorted(countries), region_blocked: sorted(refused) };
+    return { day: d.day, counts, countries: sorted(countries), region_blocked: sorted(refused), ran_out_of_tokens: sorted(outOfTokens) };
   });
-  const total = (field: "countries" | "region_blocked") => {
+  const total = (field: "countries" | "region_blocked" | "ran_out_of_tokens") => {
     const t: Record<string, number> = {};
     for (const d of days) for (const [k, v] of Object.entries(d[field]) as [string, number][]) t[k] = (t[k] ?? 0) + v;
     return sorted(t);
@@ -586,11 +589,14 @@ app.get("/admin/stats", async (c) => {
     last_7_days: days,
     countries_7_days: total("countries"),
     region_blocked_7_days: total("region_blocked"),
+    // AI answers cut off at the token limit, per model (ids with "/" and "." shown as "-"), and the latest 100 in full.
+    ran_out_of_tokens_7_days: total("ran_out_of_tokens"),
+    ran_out_of_tokens_recent: Array.isArray(s.cutoffs) ? s.cutoffs.slice().reverse() : [],
     free_budget_today: {
       public: { spent_usd: usd(s.free_spent_micro?.public), budget_usd: usd(pub.budgetMicro) },
       ext: { spent_usd: usd(s.free_spent_micro?.ext), budget_usd: usd(ext.budgetMicro), note: "free reviews from the hosted MCP server (ChatGPT)" },
     },
-    key: "free_* = free reviews from the public routes; ext_* = free reviews from the hosted MCP server (ChatGPT); paid_* = paid reviews. ok_review / ok_review3 = completed, failed = a reviewer failed (not used / not charged), busy = at capacity, refused_caller = that address or user had used today's allowance, refused_budget = the shared budget was used up, bad_input = the request was rejected, region_blocked = refused because of where it came from. countries = AI requests by the country Cloudflare reports (paid reviews and judge seats once paid, free reviews once their input passed; XX = unknown; not the hosted MCP server's, which come from its own location), region_blocked by country = those refused by the region rules (CC-SUB is a region, e.g. UA-43 Crimea; T1 = Tor). Spending is counted at list price, not the real AI cost.",
+    key: "free_* = free reviews from the public routes; ext_* = free reviews from the hosted MCP server (ChatGPT); paid_* = paid reviews. ok_review / ok_review3 = completed, failed = a reviewer failed (not used / not charged), busy = at capacity, refused_caller = that address or user had used today's allowance, refused_budget = the shared budget was used up, bad_input = the request was rejected, region_blocked = refused because of where it came from. countries = AI requests by the country Cloudflare reports (paid reviews and judge seats once paid, free reviews once their input passed; XX = unknown; not the hosted MCP server's, which come from its own location), ran_out_of_tokens = AI answers cut off at the model's token limit (max_tokens) and so unusable: raise that model's limit if it keeps happening (the recent list has each one's limit and prompt length; GET /health warns for 24 h), region_blocked by country = those refused by the region rules (CC-SUB is a region, e.g. UA-43 Crimea; T1 = Tor). Spending is counted at list price, not the real AI cost.",
   });
 });
 
@@ -657,7 +663,7 @@ function runReviewers(c: any, commitment: any, input: any, lease: SlotLease, bud
   const fake = fakeAiConfig(c.env, { mix: c.req.header("x-test-fake-mix"), delay: c.req.header("x-test-fake-delay") });
   const keys = { ANTHROPIC_API_KEY: c.env.ANTHROPIC_API_KEY, OPENROUTER_API_KEY: c.env.OPENROUTER_API_KEY, fake };
   return Promise.allSettled(
-    commitment.models.map((m: string, i: number) => runOneReviewer(keys, m, i + 1, input, undefined, { budgetMs, observe: (o) => lease.observe(i, o) })),
+    commitment.models.map((m: string, i: number) => runOneReviewer(keys, m, i + 1, input, undefined, { budgetMs, observe: (o) => lease.observe(i, o), onCutOff: (cut) => void inBackground(c, recordCutOff(c.env, cut)) })),
   );
 }
 

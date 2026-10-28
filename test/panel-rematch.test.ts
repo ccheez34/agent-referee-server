@@ -357,14 +357,19 @@ test("judges: a hung call times out and is retried; busy gets a short wait; erro
 
 test("a judge answer cut off at the token limit is reported as such", async () => {
   const { runOneJudge } = await import("../src/judge.ts");
+  const notes: any[] = [];
   const orig = globalThis.fetch;
   globalThis.fetch = (async () =>
     new Response(JSON.stringify({ stop_reason: "max_tokens", content: [{ type: "text", text: '{"winner": "alpha", "confidence": "high", "rule_applied": "cheaper' }] }))) as any;
   try {
     await assert.rejects(
-      runOneJudge({ keys: { ANTHROPIC_API_KEY: "a" }, model: "claude-haiku-5-5", formatVersion: "agent-referee-judge-v4", panelist: 1, order: "sorted", rules: "Pick the cheaper plan.", submissions: { alpha: "A", beta: "B" } }),
+      runOneJudge({ keys: { ANTHROPIC_API_KEY: "a" }, model: "claude-haiku-5-5", formatVersion: "agent-referee-judge-v4", panelist: 1, order: "sorted", rules: "Pick the cheaper plan.", submissions: { alpha: "A", beta: "B" }, onCutOff: (c) => notes.push(c), sleep: async () => {} }),
       /judge ran out of tokens before finishing its answer/,
     );
+    assert.equal(notes.length, 2, "each try's cut-off is noted");
+    assert.equal(notes[0].where, "judge");
+    assert.equal(notes[0].model, "claude-haiku-5-5");
+    assert.equal(notes[0].max_tokens, 4000);
   } finally {
     globalThis.fetch = orig;
   }

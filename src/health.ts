@@ -3,7 +3,7 @@
 // Only rare things are written here, so it never becomes a hot spot: pause state is cached per isolate for 15 s.
 import type { DOState, Env } from "./types.ts";
 
-export type HealthEventKind = "settle_failure" | "facilitator_problem" | "credit_problem" | "ledger_error" | "provider_errors";
+export type HealthEventKind = "settle_failure" | "facilitator_problem" | "credit_problem" | "ledger_error" | "provider_errors" | "out_of_tokens";
 export type HealthEvent = { kind: HealthEventKind; at: number; detail: string };
 export type Pause = { paid: boolean; reviews: boolean; auto?: string };
 export type UnjudgedEntry = { match_id: string; tier: string; reason: string; at: number; payers: { seat: string; wallet: string | null; payment_hash?: string }[]; refunded?: boolean };
@@ -34,7 +34,7 @@ export class Health {
       return json(200, { paid: false, reviews: false, ...((await st.get<Pause>("pause")) ?? {}) });
     }
     if (action === "event") {
-      const kinds: HealthEventKind[] = ["settle_failure", "facilitator_problem", "credit_problem", "ledger_error", "provider_errors"];
+      const kinds: HealthEventKind[] = ["settle_failure", "facilitator_problem", "credit_problem", "ledger_error", "provider_errors", "out_of_tokens"];
       if (!kinds.includes(body?.kind)) return json(400, { error: "Unknown event kind." });
       const events = (await st.get<HealthEvent[]>("events")) ?? [];
       events.push({ kind: body.kind, at: this.now(), detail: String(body.detail ?? "").slice(0, 300) });
@@ -177,6 +177,8 @@ export function evaluateHealth(input: { gates: Record<string, any>; events: Heal
   if (recent.some((e) => e.kind === "ledger_error")) reasons.push("ledger_error_recent");
   const warnings: string[] = [];
   if (recent.some((e) => e.kind === "provider_errors")) warnings.push("provider_errors");
+  // An AI answer was cut off at its token limit: worth raising that model's limit (GET /admin/stats has the details).
+  if (input.events.some((e) => e.kind === "out_of_tokens" && now - e.at < 24 * 3_600_000)) warnings.push("out_of_tokens");
   // A paid match that couldn't be judged is waiting for a refund: that needs the operator, so it alerts.
   if ((input.unjudgedOpen ?? 0) > 0) reasons.push(`unjudged_to_refund:${input.unjudgedOpen}`);
   return { degraded: reasons.length > 0, reasons: [...new Set(reasons)], warnings };

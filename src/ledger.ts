@@ -338,6 +338,22 @@ export class Ledger {
       return json(200, { ok: true });
     }
 
+    if (action === "cutoff") {
+      // body: a CutOff (cutoffs.ts) -> counts it for today ("oot_<model>") and keeps it in the last 100, newest last.
+      const model = typeof body?.model === "string" && /^[\x20-\x7e]{1,120}$/.test(body.model) ? body.model : "";
+      const where = body?.where === "judge" ? "judge" : body?.where === "review" ? "review" : "";
+      if (!model || !where) return json(400, { error: "Bad cut-off note." });
+      const n = (x: unknown) => (Number.isFinite(x) ? Math.max(0, Math.floor(x as number)) : null);
+      const day = nowIso.slice(0, 10);
+      await this.newDay(day);
+      const k = `st:${day}:oot_${model.toLowerCase().replace(/[^a-z0-9_-]/g, "-").slice(0, 44)}`;
+      await this.state.storage.put(k, ((await this.state.storage.get<number>(k)) ?? 0) + 1);
+      const list = (await this.state.storage.get<unknown[]>("cutoffs")) ?? [];
+      list.push({ at: nowIso, where, model, max_tokens: n(body.max_tokens), prompt_chars: n(body.prompt_chars), try_number: n(body.try_number) });
+      await this.state.storage.put("cutoffs", list.slice(-100));
+      return json(200, { ok: true });
+    }
+
     if (action === "stats") {
       // -> { days: [{ day, counts }] } for the last 7 UTC days (newest first), plus today's free-review spending.
       const st = this.state.storage;
@@ -355,6 +371,7 @@ export class Ledger {
       return json(200, {
         days: Object.entries(byDay).map(([day, counts]) => ({ day, counts })),
         free_spent_micro: { public: (await st.get<number>(`frb:${today}`)) ?? 0, ext: (await st.get<number>(`frb:${today}:ext`)) ?? 0 },
+        cutoffs: (await st.get<unknown[]>("cutoffs")) ?? [],
       });
     }
 

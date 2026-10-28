@@ -155,25 +155,35 @@ test("a review cut off at the token limit says so, names the reviewer, and isn't
   const cut = '{"verdict": "needs_changes", "confidence": "high", "issues": ["Claim 5 holds only if';
   const f = fakeApis({ "claude-opus-5-5": () => new Response(JSON.stringify({ model: "claude-opus-5-5", stop_reason: "max_tokens", content: [{ type: "text", text: cut }] })) });
   try {
+    const notes: any[] = [];
     await assert.rejects(
-      runOneReviewer({ ANTHROPIC_API_KEY: "a" }, "claude-opus-5-5", 1, input, undefined, { sleep: async () => {} }),
+      runOneReviewer({ ANTHROPIC_API_KEY: "a" }, "claude-opus-5-5", 1, input, undefined, { sleep: async () => {}, onCutOff: (c) => notes.push(c) }),
       /^Error: claude-opus-5-5: reviewer ran out of tokens before finishing its answer$/,
     );
     assert.equal(f.calls.length, 2, "an unusable answer gets 2 tries");
+    // Each cut-off is noted, with the limit and prompt size (never the prompt).
+    assert.equal(notes.length, 2);
+    assert.deepEqual({ ...notes[0], prompt_chars: 0 }, { where: "review", model: "claude-opus-5-5", max_tokens: 4000, prompt_chars: 0, try_number: 1 });
+    assert.ok(notes[0].prompt_chars > input.task.length + input.output.length);
+    assert.equal(notes[1].try_number, 2);
   } finally {
     f.restore();
   }
   // OpenRouter's version of the same thing.
   const g = fakeApis({ "openai/gpt-6-luna": () => new Response(JSON.stringify({ choices: [{ message: { content: cut }, finish_reason: "length" }] })) });
   try {
-    await assert.rejects(runOneReviewer({ OPENROUTER_API_KEY: "o" }, "openai/gpt-6-luna", 2, input, undefined, { sleep: async () => {} }), /openai\/gpt-6-luna: reviewer ran out of tokens/);
+    const notes: any[] = [];
+    await assert.rejects(runOneReviewer({ OPENROUTER_API_KEY: "o" }, "openai/gpt-6-luna", 2, input, undefined, { sleep: async () => {}, onCutOff: (c) => notes.push(c) }), /openai\/gpt-6-luna: reviewer ran out of tokens/);
+    assert.equal(notes[0].max_tokens, 6000, "OpenRouter models get 6,000");
   } finally {
     g.restore();
   }
   // A complete answer that happens to end exactly at the limit is still accepted.
   const h = fakeApis({ "claude-opus-5-5": () => new Response(JSON.stringify({ stop_reason: "max_tokens", content: [{ type: "text", text: ans("pass") }] })) });
   try {
-    assert.equal((await runOneReviewer({ ANTHROPIC_API_KEY: "a" }, "claude-opus-5-5", 1, input)).verdict, "pass");
+    let noted = 0;
+    assert.equal((await runOneReviewer({ ANTHROPIC_API_KEY: "a" }, "claude-opus-5-5", 1, input, undefined, { onCutOff: () => noted++ })).verdict, "pass");
+    assert.equal(noted, 0, "a usable answer isn't a cut-off");
   } finally {
     h.restore();
   }
