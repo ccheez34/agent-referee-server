@@ -668,7 +668,11 @@ app.post("/settle-up", async (c) => {
   if (early instanceof Response) return early; // the 402 challenge, or a refused payment: nothing charged
   const settlement = c.res?.headers.get("x-payment-response");
   if (c.res?.status !== 200 || !settlement) return c.res; // the settlement failed: nothing was charged, still blocked
-  return c.json(await done(), 200, { "x-payment-response": settlement });
+  // The paywall already set c.res (so Hono would ignore a returned Response): replace it outright.
+  const out = c.json(await done(), 200, { "x-payment-response": settlement });
+  c.res = undefined as any;
+  c.res = out;
+  return out;
 });
 
 // Wallets refused because a payment didn't settle after the work was delivered. GET lists them; POST {"wallet":"0x..."}
