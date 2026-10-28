@@ -162,6 +162,12 @@ const busy = (retryAfterS: number, what: string) =>
   );
 
 /** Runs after the response when the platform allows it (waitUntil), otherwise right away. */
+/** Adds one to today's usage count for GET /admin/stats. Counts only, never who; never delays or fails a request. */
+function stat(c: any, name: string) {
+  if (!c.env.LEDGER) return;
+  void inBackground(c, ledgerJson(c.env, undefined, "stat", { name }));
+}
+
 async function inBackground(c: any, p: Promise<unknown>) {
   const safe = p.catch((e) => console.error(`background task failed: ${String(e?.message ?? e).slice(0, 200)}`));
   try {
@@ -497,6 +503,32 @@ app.post("/admin/unjudged", async (c) => {
   return c.json(await listUnjudged(c.env));
 });
 
+// Usage counts for the last 7 UTC days: reviews done, failed, refused and busy, plus today's free budget used.
+// Counts only: nothing about who asked.
+app.get("/admin/stats", async (c) => {
+  const denied = await admin(c);
+  if (denied) return denied;
+  if (!c.env.LEDGER) return err(503, "Stats need the ledger.");
+  let s: any;
+  try {
+    s = await ledgerJson(c.env, undefined, "stats", {});
+  } catch (e: any) {
+    return err(503, `Stats can't be read right now (${String(e?.message ?? e).slice(0, 100)}).`);
+  }
+  const usd = (micro: number) => Math.round(micro / 10_000) / 100;
+  const pub = freeReviewConfig(c.env);
+  const ext = freeReviewConfig(c.env, "ext");
+  return c.json({
+    today: s.days[0],
+    last_7_days: s.days,
+    free_budget_today: {
+      public: { spent_usd: usd(s.free_spent_micro?.public ?? 0), budget_usd: usd(pub.budgetMicro) },
+      chatgpt: { spent_usd: usd(s.free_spent_micro?.ext ?? 0), budget_usd: usd(ext.budgetMicro) },
+    },
+    key: "free_* = free reviews from the public routes; ext_* = free reviews from the hosted MCP server (ChatGPT); paid_* = paid reviews. ok_review / ok_review3 = completed, failed = a reviewer failed (not used / not charged), busy = at capacity, refused_caller = that address or user had used today's allowance, refused_budget = the shared budget was used up, bad_input = the request was rejected. Spending is counted at list price, not the real AI cost.",
+  });
+});
+
 // Reopen provider pools after a spend cap was lifted (instead of waiting for the hourly probe).
 app.post("/admin/gate-reset", async (c) => {
   const denied = await admin(c);
@@ -615,11 +647,13 @@ async function handleReview(c: any, tier: ReviewTier) {
       return busy(600, "the AI provider's account limit was reached; reviews resume when it's lifted.");
     }
     await record("record");
+    stat(c, "paid_failed");
     return err(502, `A reviewer didn't return a usable verdict (${msg.slice(0, 200)}). Nothing was charged; try again.`);
   }
   const votes = settled.map((r) => (r as PromiseFulfilledResult<any>).value);
   console.log(`review ${tier} ok in ${Date.now() - started}ms: ${votes.map((v) => `${v.model}=${v.verdict}`).join(" ")}`);
   await record("record_ok");
+  stat(c, `paid_ok_${tier.replace("-", "")}`);
   const payload = await reviewPayload({
     tier,
     input,
@@ -647,15 +681,17 @@ app.post("/review-3", (c) => handleReview(c, "review-3"));
 
 /** Free reviews: a few per address per UTC day, inside one daily budget across everyone (counted at list price).
  * Off unless FREE_REVIEW_DAILY_BUDGET_USD is set above 0. */
-function freeReviewConfig(env: Env) {
-  const usd = Number(String(env.FREE_REVIEW_DAILY_BUDGET_USD ?? "").trim() || 0);
+function freeReviewConfig(env: Env, pool: "" | "ext" = "") {
+  const usd = Number(String((pool ? env.EXT_FREE_DAILY_BUDGET_USD : env.FREE_REVIEW_DAILY_BUDGET_USD) ?? "").trim() || 0);
   const whole = (v: string | undefined, d: number) => {
     const n = Number(String(v ?? "").trim());
     return String(v ?? "").trim() !== "" && Number.isFinite(n) && n >= 0 ? Math.floor(n) : d;
   };
   return {
     budgetMicro: Number.isFinite(usd) && usd > 0 ? Math.round(usd * 1_000_000) : 0,
-    perCaller: { review: whole(env.FREE_REVIEWS_PER_DAY, 3), "review-3": whole(env.FREE_REVIEW3_PER_DAY, 1) } as Record<ReviewTier, number>,
+    perCaller: (pool
+      ? { review: whole(env.EXT_FREE_REVIEWS_PER_DAY, 3), "review-3": whole(env.EXT_FREE_REVIEW3_PER_DAY, 1) }
+      : { review: whole(env.FREE_REVIEWS_PER_DAY, 3), "review-3": whole(env.FREE_REVIEW3_PER_DAY, 1) }) as Record<ReviewTier, number>,
   };
 }
 
@@ -681,15 +717,22 @@ function freeReviewInfo(env: Env) {
 
 const FREE_PAID_HINT = "Paid reviews (POST /review or /review-3 with x402) have no daily allowance.";
 
-async function handleFreeReview(c: any, tier: ReviewTier) {
-  const cfg = freeReviewConfig(c.env);
+/** ext: a review sent by the hosted MCP server (ChatGPT) on behalf of one of its users, with its own budget. */
+async function handleFreeReview(c: any, tier: ReviewTier, ext?: { caller: string }) {
+  const pool = ext ? "ext" : "";
+  const p = ext ? "ext_" : "free_"; // usage-count prefix
+  const t = tier.replace("-", "");
+  const cfg = freeReviewConfig(c.env, pool);
   if (!cfg.budgetMicro || !cfg.perCaller[tier]) return err(503, `Free reviews aren't available right now. ${FREE_PAID_HINT}`);
   if (await paidPausedNow(c.env)) return err(503, PAUSED_MSG);
   if (await reviewsPausedNow(c.env)) return err(503, REVIEWS_PAUSED_MSG);
   const t0 = Date.now();
   const body = await c.req.json().catch(() => null);
   const v = validateReview(body, tier);
-  if (!v.ok) return err(400, `${v.error} Your free review wasn't used.`);
+  if (!v.ok) {
+    stat(c, `${p}bad_input`);
+    return err(400, `${v.error} Your free review wasn't used.`);
+  }
   let commitment;
   try {
     commitment = await reviewCommitment(tier, c.env, v.value.panel, undefined, v.value.task.length + v.value.output.length);
@@ -697,25 +740,29 @@ async function handleFreeReview(c: any, tier: ReviewTier) {
     return err(400, `${String(e?.message ?? e)} Your free review wasn't used.`);
   }
   if (missingReviewKey(c.env, commitment.models)) return err(503, "Sealed review is temporarily unavailable. Your free review wasn't used.");
-  const caller = await callerHash(c);
+  const caller = ext ? ext.caller : await callerHash(c);
   if (!caller || !c.env.LEDGER) return err(503, "Free reviews aren't available from here. " + FREE_PAID_HINT);
   // Quick capacity check first, so a full pool doesn't use anyone's allowance.
   const b = await quickBusy(c.env, commitment.models);
-  if (b) return busy(b.retryAfter, "the AI reviewers are at capacity. Your free review wasn't used.");
+  if (b) {
+    stat(c, `${p}busy`);
+    return busy(b.retryAfter, "the AI reviewers are at capacity. Your free review wasn't used.");
+  }
 
   let q: any;
   try {
-    q = await ledgerJson(c.env, undefined, "free-review", { caller, tier, cost_micro: priceMicro(reviewPrices(c.env)[tier]), budget_micro: cfg.budgetMicro, per_caller: cfg.perCaller[tier] }, true);
+    q = await ledgerJson(c.env, undefined, "free-review", { caller, tier, cost_micro: priceMicro(reviewPrices(c.env)[tier]), budget_micro: cfg.budgetMicro, per_caller: cfg.perCaller[tier], ...(pool ? { pool } : {}) }, true);
   } catch (e: any) {
     await recordEvent(c.env, "ledger_error", `free-review: ${String(e?.message ?? e)}`);
     return err(503, "Free reviews are temporarily unavailable (their limits can't be checked right now). Your free review wasn't used; try again in a minute.");
   }
   if (q.__status === 429) {
+    stat(c, q.reason === "per_caller" ? `${p}refused_caller` : `${p}refused_budget`);
     const which = tier === "review-3" ? "review-3" : "single-reviewer";
     return err(
       429,
       q.reason === "per_caller"
-        ? `You've used today's free ${which} reviews (${q.limit} per day from one address). They reset at 00:00 UTC. ${FREE_PAID_HINT}`
+        ? `You've used today's free ${which} reviews (${q.limit} per day ${ext ? "per user" : "from one address"}). They reset at 00:00 UTC. ${FREE_PAID_HINT}`
         : `Today's free reviews are used up for everyone. They reset at 00:00 UTC. ${FREE_PAID_HINT}`,
     );
   }
@@ -745,6 +792,7 @@ async function handleFreeReview(c: any, tier: ReviewTier) {
     const slots = await acquireSlots(c.env, commitment.models, { leaseMs: REVIEWER_BUDGET_MS + 30_000, waitMs: GATE_MAX_WAIT_MS });
     if (!slots.ok) {
       await release(true);
+      stat(c, `${p}busy`);
       return busy(slots.retryAfter, `${busyWhat(slots.reason)} Your free review wasn't used.`);
     }
     lease = slots.lease;
@@ -774,10 +822,12 @@ async function handleFreeReview(c: any, tier: ReviewTier) {
     // single-reviewer review (the provider refused, so nothing was spent). In a review-3 the other reviewers may
     // already have answered and cost money, so the budget keeps the reservation.
     await release(lease.capHit() && commitment.models.length === 1);
+    stat(c, `${p}failed`);
     if (lease.capHit()) return busy(600, "the AI provider's account limit was reached; reviews resume when it's lifted. Your free review wasn't used.");
     return err(502, `A reviewer didn't return a usable verdict (${msg.slice(0, 200)}). Your free review wasn't used; try again.`);
   }
   const votes = settled.map((r) => (r as PromiseFulfilledResult<any>).value);
+  stat(c, `${p}ok_${t}`);
   console.log(`free review ${tier} ok in ${Date.now() - started}ms: ${votes.map((x) => `${x.model}=${x.verdict}`).join(" ")}`);
   const payload = await reviewPayload({ tier, input, commitment, votes, network: c.env.NETWORK, id: randomToken(12), funding: "free" });
   const receipt = await signReceipt(payload, c.env.SIGNING_KEY, c.env.PUBLIC_KEY);
@@ -794,6 +844,41 @@ async function handleFreeReview(c: any, tier: ReviewTier) {
 
 app.post("/free/review", (c) => handleFreeReview(c, "review"));
 app.post("/free/review-3", (c) => handleFreeReview(c, "review-3"));
+
+// ---------- internal: free reviews sent by the hosted MCP server (ChatGPT) ----------
+// Every ChatGPT request comes from OpenAI's addresses, so the hosted server passes its own anonymous id for the
+// person (ChatGPT's "openai/subject") in x-caller-id, proven by the shared INTERNAL_TOKEN secret. Its reviews use a
+// separate budget (EXT_FREE_DAILY_BUDGET_USD) and allowance. 404 unless INTERNAL_TOKEN is set.
+
+async function internalOk(env: Env, header: string | undefined): Promise<boolean> {
+  const want = env.INTERNAL_TOKEN?.trim();
+  if (!want || want.length < 32 || !header) return false;
+  const enc = new TextEncoder();
+  const [a, b] = await Promise.all([crypto.subtle.digest("SHA-256", enc.encode(header.trim())), crypto.subtle.digest("SHA-256", enc.encode(want))]);
+  const x = new Uint8Array(a);
+  const y = new Uint8Array(b);
+  let diff = 0;
+  for (let i = 0; i < x.length; i++) diff |= x[i] ^ y[i];
+  return diff === 0;
+}
+
+/** The hosted server's id for one of its users, as a daily-salted one-way hash (like callerHash for IPs). Users
+ * without an id share one allowance. */
+async function extCallerHash(c: any): Promise<string> {
+  const raw = String(c.req.header("x-caller-id") ?? "").trim();
+  const id = /^[\x21-\x7e]{1,200}$/.test(raw) ? raw : "anonymous";
+  const day = new Date().toISOString().slice(0, 10);
+  return `ext:${(await sha256Hex(`${c.env.SIGNING_KEY || "demo"}|${day}|ext|${id}`)).slice(0, 20)}`;
+}
+
+async function handleInternalFree(c: any, tier: ReviewTier) {
+  if (!c.env.INTERNAL_TOKEN) return err(404, "Not found. GET / for how to use this service.");
+  if (!(await internalOk(c.env, c.req.header("x-internal-auth")))) return err(401, "Wrong or missing internal token.");
+  return handleFreeReview(c, tier, { caller: await extCallerHash(c) });
+}
+
+app.post("/internal/free/review", (c) => handleInternalFree(c, "review"));
+app.post("/internal/free/review-3", (c) => handleInternalFree(c, "review-3"));
 
 // What a review will use, published so an agent can check before paying (free).
 app.get("/reviewers", async (c) => {

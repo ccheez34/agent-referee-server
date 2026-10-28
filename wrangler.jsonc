@@ -56,7 +56,12 @@
     // daily budget counted at list price ($3.00 = at most 60 single or 15 review-3 a day). "0" turns them off.
     "FREE_REVIEW_DAILY_BUDGET_USD": "3.00",
     "FREE_REVIEWS_PER_DAY": "3",
-    "FREE_REVIEW3_PER_DAY": "1"
+    "FREE_REVIEW3_PER_DAY": "1",
+    // Free reviews sent by the hosted MCP server (ChatGPT), with their own budget so they can't use up the public
+    // one: $1.00 = at most 20 single or 5 review-3 a day. Only used once the INTERNAL_TOKEN secret is set.
+    "EXT_FREE_DAILY_BUDGET_USD": "1.00",
+    "EXT_FREE_REVIEWS_PER_DAY": "3",
+    "EXT_FREE_REVIEW3_PER_DAY": "1"
   },
 
   // Staging copy for free load tests: npx wrangler deploy --env staging. Own Worker (agent-referee-staging), own
@@ -98,7 +103,10 @@
         "DEMO_PER_IP_LIMIT": "20",
         "FREE_REVIEW_DAILY_BUDGET_USD": "3.00",
         "FREE_REVIEWS_PER_DAY": "3",
-        "FREE_REVIEW3_PER_DAY": "1"
+        "FREE_REVIEW3_PER_DAY": "1",
+        "EXT_FREE_DAILY_BUDGET_USD": "1.00",
+        "EXT_FREE_REVIEWS_PER_DAY": "3",
+        "EXT_FREE_REVIEW3_PER_DAY": "1"
       }
     }
   }

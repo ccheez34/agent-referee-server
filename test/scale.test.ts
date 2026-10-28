@@ -599,3 +599,53 @@ test("a free review that runs past midnight gives back the day it was taken on",
   assert.equal(again.status, 200);
   assert.equal(again.spent_micro, 200_000);
 });
+
+test("free reviews: the hosted MCP server's pool has its own budget, and its give-backs refund that pool", async () => {
+  const l = new Ledger({ storage: memStorage() } as any, {} as any);
+  l.now = () => Date.parse("2026-10-28T12:00:00Z");
+  const call = async (body: object) => {
+    const r = await l.fetch(new Request("https://ledger/free-review", { method: "POST", body: JSON.stringify(body) }));
+    return { status: r.status, ...((await r.json()) as any) };
+  };
+  const ask = (caller: string, pool?: string) => call({ caller, tier: "review-3", cost_micro: 200_000, budget_micro: 400_000, per_caller: 5, ...(pool ? { pool } : {}) });
+  assert.equal((await ask("a", "ext")).status, 200);
+  const second = await ask("b", "ext");
+  assert.equal(second.spent_micro, 400_000);
+  assert.equal((await ask("c", "ext")).reason, "budget");
+  assert.equal((await ask("c")).spent_micro, 200_000, "the public pool is separate");
+  await call({ release_token: second.token, refund_budget: true });
+  const again = await ask("d", "ext");
+  assert.equal(again.status, 200, "the refund went back to the ext pool");
+  assert.equal(again.spent_micro, 400_000);
+  assert.equal((await ask("e")).spent_micro, 400_000, "and not to the public one");
+});
+
+test("usage stats: counts per name per day, 7 days shown, older ones cleaned up, bad names refused", async () => {
+  const d = new Map<string, unknown>();
+  const l = new Ledger({ storage: memStorage(d) } as any, {} as any);
+  let now = Date.parse("2026-10-20T12:00:00Z");
+  l.now = () => now;
+  const post = async (action: string, body: object = {}) => {
+    const r = await l.fetch(new Request(`https://ledger/${action}`, { method: "POST", body: JSON.stringify(body) }));
+    return { status: r.status, ...((await r.json()) as any) };
+  };
+  await post("stat", { name: "free_ok_review" });
+  now += 9 * 86_400_000; // 2026-10-29
+  await post("stat", { name: "free_ok_review" });
+  await post("stat", { name: "free_ok_review" });
+  await post("stat", { name: "paid_failed" });
+  assert.equal((await post("stat", { name: "Bad Name!" })).status, 400);
+  assert.equal((await post("stat", { name: "x".repeat(49) })).status, 400);
+  await post("free-review", { caller: "a", tier: "review", cost_micro: 50_000, budget_micro: 3_000_000, per_caller: 3 });
+  const s = await post("stats");
+  assert.equal(s.days.length, 7);
+  assert.equal(s.days[0].day, "2026-10-29");
+  assert.deepEqual(s.days[0].counts, { free_ok_review: 2, paid_failed: 1 });
+  assert.equal(s.days[6].day, "2026-10-23");
+  assert.equal(s.free_spent_micro.public, 50_000);
+  assert.equal(s.free_spent_micro.ext, 0);
+  assert.ok(d.has("st:2026-10-20:free_ok_review"));
+  await l.alarm();
+  assert.ok(!d.has("st:2026-10-20:free_ok_review"), "counts older than 8 days are deleted");
+  assert.ok(d.has("st:2026-10-29:free_ok_review"));
+});

@@ -161,6 +161,16 @@ export class Ledger {
         if (found.size < 128) break;
       }
     }
+    // Usage counts ("st:<day>:<name>") are kept 8 days for GET /admin/stats, then deleted.
+    const cutoff = new Date(Date.parse(`${today}T00:00:00Z`) - 8 * 86_400_000).toISOString().slice(0, 10);
+    while (deleted < 5_000) {
+      const found = await st.list({ prefix: "st:", limit: 128 });
+      const old = [...found.keys()].filter((k) => k.slice(3, 13) < cutoff);
+      if (!old.length) break;
+      await st.delete(old);
+      deleted += old.length;
+      if (found.size < 128) break;
+    }
     if (deleted >= 5_000) await st.setAlarm(this.now() + 1_000);
   }
 
@@ -281,17 +291,21 @@ export class Ledger {
       const day = nowIso.slice(0, 10);
       await this.newDay(day);
       const st = this.state.storage;
-      const spentKey = `frb:${day}`;
+      // Two separate budgets: the public one, and "ext" for reviews sent by the hosted MCP server (ChatGPT),
+      // so one can't use up the other.
+      const pool = body?.pool === "ext" ? "ext" : "";
+      const budgetKey = (d: string, p: string) => (p ? `frb:${d}:${p}` : `frb:${d}`);
+      const spentKey = budgetKey(day, pool);
       let spent = (await st.get<number>(spentKey)) ?? 0;
       if (typeof body?.release_token === "string") {
         // The token names the day it was taken on, so a review that runs past midnight gives back that day's count.
         const tday = /^\d{4}-\d{2}-\d{2}\|/.test(body.release_token) ? body.release_token.slice(0, 10) : day;
         const tk = `frt:${tday}:${body.release_token}`;
-        const r = await st.get<{ who: string; tier: string; cost: number }>(tk);
+        const r = await st.get<{ who: string; tier: string; cost: number; pool?: string }>(tk);
         if (!r) return json(200, { released: false });
         const ck = `fr:${tday}:${r.tier}:${r.who}`;
         await st.put(ck, Math.max(0, ((await st.get<number>(ck)) ?? 0) - 1));
-        const sk = `frb:${tday}`;
+        const sk = budgetKey(tday, r.pool ?? "");
         if (body.refund_budget === true) await st.put(sk, Math.max(0, ((await st.get<number>(sk)) ?? 0) - r.cost));
         await st.put(tk, null); // the old day's cleanup deletes it
         return json(200, { released: true });
@@ -309,8 +323,38 @@ export class Ledger {
       const token = `${day}|${crypto.randomUUID()}`;
       await st.put(ck, used + 1);
       await st.put(spentKey, (spent += cost));
-      await st.put(`frt:${day}:${token}`, { who, tier, cost });
+      await st.put(`frt:${day}:${token}`, { who, tier, cost, ...(pool ? { pool } : {}) });
       return json(200, { ok: true, token, used: used + 1, limit, spent_micro: spent, budget_micro: budget });
+    }
+
+    if (action === "stat") {
+      // body: { name } -> adds one to today's count for that name. Counts only (never who), for GET /admin/stats.
+      const name = typeof body?.name === "string" ? body.name : "";
+      if (!/^[a-z0-9_-]{1,48}$/.test(name)) return json(400, { error: "Bad stat name." });
+      const day = nowIso.slice(0, 10);
+      await this.newDay(day);
+      const k = `st:${day}:${name}`;
+      await this.state.storage.put(k, ((await this.state.storage.get<number>(k)) ?? 0) + 1);
+      return json(200, { ok: true });
+    }
+
+    if (action === "stats") {
+      // -> { days: [{ day, counts }] } for the last 7 UTC days (newest first), plus today's free-review spending.
+      const st = this.state.storage;
+      const today = nowIso.slice(0, 10);
+      const from = new Date(Date.parse(`${today}T00:00:00Z`) - 6 * 86_400_000).toISOString().slice(0, 10);
+      const byDay: Record<string, Record<string, number>> = {};
+      for (let i = 0; i < 7; i++) byDay[new Date(Date.parse(`${today}T00:00:00Z`) - i * 86_400_000).toISOString().slice(0, 10)] = {};
+      const found = st.list ? await st.list<number>({ prefix: "st:" }) : new Map<string, number>();
+      for (const [k, v] of found) {
+        const day = k.slice(3, 13);
+        if (day < from || day > today || !byDay[day]) continue;
+        byDay[day][k.slice(14)] = v;
+      }
+      return json(200, {
+        days: Object.entries(byDay).map(([day, counts]) => ({ day, counts })),
+        free_spent_micro: { public: (await st.get<number>(`frb:${today}`)) ?? 0, ext: (await st.get<number>(`frb:${today}:ext`)) ?? 0 },
+      });
     }
 
     if (action === "agent") {

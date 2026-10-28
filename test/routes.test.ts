@@ -21,7 +21,7 @@ const b64 = (b: ArrayBuffer) => Buffer.from(b).toString("base64");
 const keys = { SIGNING_KEY: b64(await crypto.subtle.exportKey("pkcs8", kp.privateKey)), PUBLIC_KEY: b64((await crypto.subtle.exportKey("raw", kp.publicKey)) as ArrayBuffer) };
 const mem = () => {
   const d = new Map<string, unknown>();
-  return { storage: { async get(k: string) { return structuredClone(d.get(k)); }, async put(k: string, v: unknown) { d.set(k, structuredClone(v)); }, async delete(k: any) { for (const x of [k].flat()) d.delete(x); return true; }, async list() { return new Map(); }, async deleteAll() { d.clear(); }, async setAlarm() {} } };
+  return { storage: { async get(k: string) { return structuredClone(d.get(k)); }, async put(k: string, v: unknown) { d.set(k, structuredClone(v)); }, async delete(k: any) { for (const x of [k].flat()) d.delete(x); return true; }, async list(o: { prefix?: string } = {}) { return new Map([...d.keys()].filter((k) => k.startsWith(o.prefix ?? "")).sort().map((k) => [k, structuredClone(d.get(k))])); }, async deleteAll() { d.clear(); }, async setAlarm() {} } };
 };
 function ns<T extends { fetch(r: Request): Promise<Response> }>(make: () => T) {
   const objs = new Map<string, T>();
@@ -336,4 +336,68 @@ t("GET /reviewers says whether free reviews are on", async () => {
   const on = (await call(env(FREE), "/reviewers")).body.free;
   assert.equal(on.available, true);
   assert.deepEqual(on.per_address_per_day, { review: 3, "review-3": 1 });
+});
+
+// ---------- usage stats and the hosted MCP server's internal route ----------
+
+const INTERNAL = "i".repeat(40);
+const EXT = { INTERNAL_TOKEN: INTERNAL, EXT_FREE_DAILY_BUDGET_USD: "1.00" };
+const tick = () => new Promise((r) => setTimeout(r, 20));
+
+t("GET /admin/stats: counts of reviews done, failed and refused, and today's free budget; admin token only", async () => {
+  const e = env({ ...FREE, ...EXT });
+  assert.equal((await call(e, "/admin/stats")).status, 401);
+  assert.equal((await call(e, "/admin/stats", undefined, { authorization: "Bearer wrong-token-wrong-token-wrong-token" })).status, 401);
+  assert.equal((await call(env({ ADMIN_TOKEN: undefined }), "/admin/stats", undefined, { authorization: `Bearer ${ADMIN}` })).status, 404);
+  for (let i = 0; i < 4; i++) await call(e, "/free/review", review); // 3 done, 1 refused
+  await call(e, "/free/review", { task: "short", output: "4" }, { "cf-connecting-ip": "198.51.100.40" });
+  await call(e, "/free/review", review, { "x-test-fake-mix": "500:1", "x-test-fake-delay": "1-2", "cf-connecting-ip": "198.51.100.41" });
+  await call(e, "/internal/free/review", review, { "x-internal-auth": INTERNAL, "x-caller-id": "user-1" });
+  await tick();
+  const r = await call(e, "/admin/stats", undefined, { authorization: `Bearer ${ADMIN}` });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const today = r.body.today.counts;
+  assert.equal(today.free_ok_review, 3);
+  assert.equal(today.free_refused_caller, 1);
+  assert.equal(today.free_bad_input, 1);
+  assert.equal(today.free_failed, 1);
+  assert.equal(today.ext_ok_review, 1);
+  assert.equal(r.body.last_7_days.length, 7);
+  assert.deepEqual(r.body.free_budget_today.public, { spent_usd: 0.2, budget_usd: 3 }, "3 done + 1 failed (a called reviewer keeps its cost)");
+  assert.deepEqual(r.body.free_budget_today.chatgpt, { spent_usd: 0.05, budget_usd: 1 });
+  assert.ok(!JSON.stringify(r.body).includes("198.51.100"), "no addresses");
+  assert.ok(!JSON.stringify(r.body).includes("user-1"), "no user ids");
+});
+
+t("internal free route: 404 without INTERNAL_TOKEN, 401 with a wrong one", async () => {
+  assert.equal((await call(env(FREE), "/internal/free/review", review, { "x-internal-auth": INTERNAL })).status, 404);
+  const e = env({ ...FREE, ...EXT });
+  assert.equal((await call(e, "/internal/free/review", review)).status, 401);
+  assert.equal((await call(e, "/internal/free/review", review, { "x-internal-auth": INTERNAL + "x" })).status, 401);
+  assert.equal((await call(env({ ...FREE, INTERNAL_TOKEN: "short", EXT_FREE_DAILY_BUDGET_USD: "1" }), "/internal/free/review", review, { "x-internal-auth": "short" })).status, 401, "a too-short token is never accepted");
+});
+
+t("internal free route: each hosted-server user has their own allowance, and the budget is separate from the public one", async () => {
+  const e = env({ ...FREE, ...EXT });
+  const as = (id?: string) => ({ "x-internal-auth": INTERNAL, ...(id ? { "x-caller-id": id } : {}) });
+  for (let i = 1; i <= 3; i++) assert.equal((await call(e, "/internal/free/review", review, as("user-a"))).status, 200);
+  assert.equal((await call(e, "/internal/free/review", review, as("user-a"))).status, 429);
+  assert.equal((await call(e, "/internal/free/review", review, as("user-b"))).status, 200, "another user has their own allowance");
+  // All ChatGPT traffic shares OpenAI's addresses: the hosted server's users don't use the public allowance of that address.
+  const pub = await call(e, "/free/review", review);
+  assert.equal(pub.status, 200);
+  assert.equal(pub.body.free.used_today, 1);
+  // Without an id, callers share one allowance.
+  for (let i = 1; i <= 3; i++) assert.equal((await call(e, "/internal/free/review", review, as())).status, 200);
+  assert.equal((await call(e, "/internal/free/review", review, as())).status, 429);
+  // Its own budget: $0.40 = two review-3s.
+  const small = env({ ...FREE, INTERNAL_TOKEN: INTERNAL, EXT_FREE_DAILY_BUDGET_USD: "0.40" });
+  assert.equal((await call(small, "/internal/free/review-3", review, as("x1"))).status, 200);
+  assert.equal((await call(small, "/internal/free/review-3", review, as("x2"))).status, 200);
+  const over = await call(small, "/internal/free/review-3", review, as("x3"));
+  assert.equal(over.status, 429);
+  assert.match(over.body.error, /used up/);
+  assert.equal((await call(small, "/free/review-3", review)).status, 200, "the public budget is untouched");
+  // Off when its budget isn't set, even with the token.
+  assert.equal((await call(env({ ...FREE, INTERNAL_TOKEN: INTERNAL }), "/internal/free/review", review, as("u"))).status, 503);
 });
