@@ -708,7 +708,7 @@ async function handleFreeReview(c: any, tier: ReviewTier) {
     q = await ledgerJson(c.env, undefined, "free-review", { caller, tier, cost_micro: priceMicro(reviewPrices(c.env)[tier]), budget_micro: cfg.budgetMicro, per_caller: cfg.perCaller[tier] }, true);
   } catch (e: any) {
     await recordEvent(c.env, "ledger_error", `free-review: ${String(e?.message ?? e)}`);
-    return err(503, "Free reviews are temporarily unavailable (their limits can't be checked right now). Try again in a minute.");
+    return err(503, "Free reviews are temporarily unavailable (their limits can't be checked right now). Your free review wasn't used; try again in a minute.");
   }
   if (q.__status === 429) {
     const which = tier === "review-3" ? "review-3" : "single-reviewer";
@@ -725,10 +725,14 @@ async function handleFreeReview(c: any, tier: ReviewTier) {
   const release = async (refundBudget: boolean) => {
     if (released) return;
     released = true;
-    try {
-      await ledgerJson(c.env, undefined, "free-review", { release_token: token, refund_budget: refundBudget });
-    } catch (e: any) {
-      await recordEvent(c.env, "ledger_error", `free-review release: ${String(e?.message ?? e)}`);
+    // Tried twice: a give-back that never lands would cost the person a review they didn't get.
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        await ledgerJson(c.env, undefined, "free-review", { release_token: token, refund_budget: refundBudget });
+        return;
+      } catch (e: any) {
+        if (attempt === 2) await recordEvent(c.env, "ledger_error", `free-review release: ${String(e?.message ?? e)}`);
+      }
     }
   };
 
