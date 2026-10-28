@@ -51,7 +51,12 @@
     // Live starts from what the launch-day stress test ran at once with no 429s: 20 reviews (Sonnet) and 10 review-3s
     // (10 Opus + 20 OpenRouter calls). The Phase 2b ramp checks Sonnet above that; lower a pool if it shows "throttled".
     "GATE_SLOTS_ANTHROPIC_CLAUDE_SONNET_5_5": "20",
-    "GATE_SLOTS_ANTHROPIC_CLAUDE_OPUS_5_5": "10"
+    "GATE_SLOTS_ANTHROPIC_CLAUDE_OPUS_5_5": "10",
+    // Free sealed reviews (the operator pays): 3 single + 1 review-3 per address per UTC day, all inside one
+    // daily budget counted at list price ($3.00 = at most 60 single or 15 review-3 a day). "0" turns them off.
+    "FREE_REVIEW_DAILY_BUDGET_USD": "3.00",
+    "FREE_REVIEWS_PER_DAY": "3",
+    "FREE_REVIEW3_PER_DAY": "1"
   },
 
   // Staging copy for free load tests: npx wrangler deploy --env staging. Own Worker (agent-referee-staging), own
@@ -90,7 +95,10 @@
         "REVEAL_WINDOW_SECONDS": "600",
         "PANEL_2_MODELS": "claude-opus-5-5,google/gemini-4-argon",
         "PANEL_3_MODELS": "claude-opus-5-5,openai/gpt-6-luna,google/gemini-3.7-flash",
-        "DEMO_PER_IP_LIMIT": "20"
+        "DEMO_PER_IP_LIMIT": "20",
+        "FREE_REVIEW_DAILY_BUDGET_USD": "3.00",
+        "FREE_REVIEWS_PER_DAY": "3",
+        "FREE_REVIEW3_PER_DAY": "1"
       }
     }
   }

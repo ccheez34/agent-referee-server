@@ -22,7 +22,7 @@ What you still take on the operator's word is listed in the client README under 
 | `src/logic.ts` | Pure logic: validation, commitments, joint randomness, canonical JSON, prices |
 | `src/judge.ts` | Judge prompts (versioned and fingerprinted), panels, vote combining, model calls (Anthropic directly; Google and OpenAI through OpenRouter) |
 | `src/review.ts` | Sealed review: reviewer prompt, parsing, decision rule, receipt payload |
-| `src/ledger.ts` | Per-wallet records (one global object) and, in 16 shards by caller, the daily demo quotas and failed-review limits |
+| `src/ledger.ts` | Per-wallet records and free-review allowances (one global object) and, in 16 shards by caller, the daily demo quotas and failed-review limits |
 | `src/gate.ts`, `src/gateclient.ts` | Admission gates: one Durable Object per AI provider pool caps how many calls run at once; extra requests wait briefly or get "busy, nothing charged" |
 | `src/providers.ts` | What a provider's answer means: rate limits, spend caps, credit errors, rate-limit headers |
 | `src/health.ts` | Pause switches, rare failure events, the refund list for paid matches that couldn't be judged, the `/health` verdict |
@@ -67,6 +67,7 @@ You'll need a [Cloudflare](https://dash.cloudflare.com/sign-up) account (the Wor
 - **Concurrency per provider pool:** `GATE_SLOTS_<POOL>` vars, e.g. `GATE_SLOTS_OPENROUTER` and `GATE_SLOTS_ANTHROPIC_CLAUDE_OPUS_5_5` (defaults: Opus 6, Sonnet 12, Haiku 12, OpenRouter 20). Set them at about 80% of what your provider accounts handle. Beyond that, requests wait up to 20 s, then get `503` with `Retry-After` before any payment.
 - **Admin token:** `npx wrangler secret put ADMIN_TOKEN` (32+ random characters). It unlocks `POST /admin/pause` (`{"scope":"paid"|"reviews","on":true}`, applies within 15 s), `POST /admin/unjudged` (paid judge matches that couldn't be judged, to refund by hand; send `{"refunded_match_id":"…"}` to mark one done) and `POST /admin/gate-reset` (reopen pools after a spend cap is lifted). Send it as `Authorization: Bearer <token>`.
 - **Payments that fail to settle after the work was delivered:** the paying wallet is refused from then on, and `SETTLE_FAIL_PAUSE_AFTER` (default 5) of them within an hour pause all paid routes; `/health` says `auto_paused` until you resume with `POST /admin/pause {"scope":"paid","on":false}`.
+- **Free reviews:** `FREE_REVIEW_DAILY_BUDGET_USD` (in `wrangler.jsonc`) turns on `POST /free/review` and `/free/review-3`, which the operator pays for. Each address gets `FREE_REVIEWS_PER_DAY` (default 3) single reviews and `FREE_REVIEW3_PER_DAY` (default 1) review-3s per UTC day, and all of them together stay inside the daily budget, counted at list price. Set the budget to `"0"` to turn them off; both pause switches stop them too.
 - **Pause without the token:** `npx wrangler secret put PAID_PAUSED` (all paid routes) or `REVIEWS_PAUSED` (reviews only), value `true`; delete the secret to resume.
 - **Monitoring:** `GET /health` answers `"status":"ok"`, `"paused"`, `"degraded"` (with `reasons`) or `"down"`. A keyword monitor on `"status":"ok"` catches all of them.
 - **Staging:** `npx wrangler deploy --env staging` makes `agent-referee-staging` with its own storage, no payments and fake AI answers (`FAKE_AI_DELAY_MS`, `FAKE_AI_MIX`). Give it its own secrets, including a new signing key pair.

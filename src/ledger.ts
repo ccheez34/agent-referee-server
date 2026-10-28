@@ -151,7 +151,7 @@ export class Ledger {
     if (!st.list || !st.delete) return;
     const today = (await st.get<string>("counters_day")) ?? new Date(this.now()).toISOString().slice(0, 10);
     let deleted = 0;
-    for (const prefix of ["rf:", "ro:", "rft:", "rfi:", "dm:", "dmc:", "reviewfail:", "reviewok:", "reviewfailtotal:", "demo:", "demoip:"]) {
+    for (const prefix of ["rf:", "ro:", "rft:", "rfi:", "dm:", "dmc:", "fr:", "frb:", "frt:", "reviewfail:", "reviewok:", "reviewfailtotal:", "demo:", "demoip:"]) {
       while (deleted < 5_000) {
         const found = await st.list({ prefix, limit: 128 });
         const old = [...found.keys()].filter((k) => !k.slice(prefix.length).startsWith(today) || prefix.startsWith("review") || prefix.startsWith("demo"));
@@ -270,6 +270,44 @@ export class Ledger {
       await st.put(`dm:${day}`, used + 1);
       if (who) await st.put(`dmc:${day}:${who}`, mine + 1);
       return json(200, { ok: true, used: used + 1, limit });
+    }
+
+    if (action === "free-review") {
+      // body: { caller, tier, cost_micro, budget_micro, per_caller } to reserve one free review, or { release_token, refund_budget }
+      // to give one back. Free reviews cost the operator real AI money, so two limits apply per UTC day: a few per
+      // address (the caller is the same daily-salted one-way hash as above) and one budget across everyone, counted at
+      // list price. Always called on the single "global" shard, so the budget is one counter, never split.
+      // A reservation is counted immediately; it's only given back if the review didn't happen.
+      const day = nowIso.slice(0, 10);
+      await this.newDay(day);
+      const st = this.state.storage;
+      const spentKey = `frb:${day}`;
+      let spent = (await st.get<number>(spentKey)) ?? 0;
+      if (typeof body?.release_token === "string") {
+        const tk = `frt:${day}:${body.release_token}`;
+        const r = await st.get<{ who: string; tier: string; cost: number }>(tk);
+        if (!r) return json(200, { released: false });
+        const ck = `fr:${day}:${r.tier}:${r.who}`;
+        await st.put(ck, Math.max(0, ((await st.get<number>(ck)) ?? 0) - 1));
+        if (body.refund_budget === true) await st.put(spentKey, (spent = Math.max(0, spent - r.cost)));
+        await st.put(tk, null); // the old day's cleanup deletes it
+        return json(200, { released: true, spent_micro: spent });
+      }
+      const who = typeof body?.caller === "string" ? body.caller : "";
+      const tier = body?.tier === "review-3" ? "review-3" : "review";
+      const cost = Number.isFinite(body?.cost_micro) ? Math.max(0, body.cost_micro) : 0;
+      const budget = Number.isFinite(body?.budget_micro) ? Math.max(0, body.budget_micro) : 0;
+      const limit = Number.isFinite(body?.per_caller) ? Math.max(0, body.per_caller) : 0;
+      if (!who) return json(400, { error: "No caller." });
+      const ck = `fr:${day}:${tier}:${who}`;
+      const used = (await st.get<number>(ck)) ?? 0;
+      if (used >= limit) return json(429, { reason: "per_caller", used, limit });
+      if (cost <= 0 || spent + cost > budget) return json(429, { reason: "budget", spent_micro: spent, budget_micro: budget });
+      const token = crypto.randomUUID();
+      await st.put(ck, used + 1);
+      await st.put(spentKey, (spent += cost));
+      await st.put(`frt:${day}:${token}`, { who, tier, cost });
+      return json(200, { ok: true, token, used: used + 1, limit, spent_micro: spent, budget_micro: budget });
     }
 
     if (action === "agent") {

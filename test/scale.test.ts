@@ -538,3 +538,44 @@ test("a request too big for a pool doesn't make the next caller see it as full",
   assert.equal(r.ok, false);
   assert.equal(await quickBusy(env, ["openai/gpt-6-luna"]), null, "a single OpenRouter reviewer still fits");
 });
+
+// ---------- free sealed reviews (the operator pays) ----------
+
+test("free reviews: a few per address per day, one shared budget, nothing lost when a review doesn't happen", async () => {
+  const l = new Ledger({ storage: memStorage() } as any, {} as any);
+  let now = Date.parse("2026-10-28T12:00:00Z");
+  l.now = () => now;
+  const call = async (body: object) => {
+    const r = await l.fetch(new Request("https://ledger/free-review", { method: "POST", body: JSON.stringify(body) }));
+    return { status: r.status, ...((await r.json()) as any) };
+  };
+  const ask = (caller: string, tier = "review", cost = 50_000) => call({ caller, tier, cost_micro: cost, budget_micro: 3_000_000, per_caller: tier === "review" ? 3 : 1 });
+  // 3 single reviews, then refused for this address; review-3 has its own allowance of 1.
+  const singles = await Promise.all([1, 2, 3, 4, 5].map(() => ask("aa")));
+  assert.equal(singles.filter((r) => r.status === 200).length, 3, "parallel asks can't overshoot the per-address allowance");
+  assert.ok(singles.filter((r) => r.status === 429).every((r) => r.reason === "per_caller"));
+  assert.equal((await ask("aa", "review-3", 200_000)).status, 200);
+  assert.equal((await ask("aa", "review-3", 200_000)).reason, "per_caller");
+  // Giving one back (busy, or a reviewer failed) frees the address's allowance; the budget refund is separate.
+  const t = singles.find((r) => r.status === 200)!.token;
+  const before = (await ask("zz")).spent_micro;
+  assert.equal((await call({ release_token: t, refund_budget: false })).released, true);
+  assert.equal((await call({ release_token: t, refund_budget: true })).released, false, "a token is given back only once");
+  const again = await ask("aa");
+  assert.equal(again.status, 200);
+  assert.equal(again.spent_micro, before + 50_000, "without refund_budget the money already spent stays counted");
+  const r3 = await ask("bb", "review-3", 200_000);
+  await call({ release_token: r3.token, refund_budget: true });
+  assert.equal((await ask("cc")).spent_micro, again.spent_micro + 50_000, "a refunded reservation costs the budget nothing");
+  // The shared budget: once the next review would go over it, everyone is refused until the next UTC day.
+  let last: any;
+  for (let i = 0; i < 100 && (!last || last.status === 200); i++) last = await ask(`u${i}`, "review-3", 200_000);
+  assert.deepEqual([last.status, last.reason], [429, "budget"]);
+  assert.ok(last.spent_micro <= 3_000_000 && last.spent_micro + 200_000 > 3_000_000, "never over the budget");
+  assert.equal((await ask("new-person")).status, last.spent_micro + 50_000 <= 3_000_000 ? 200 : 429, "a cheaper review still fits if there's room");
+  now += 24 * 3600_000;
+  assert.equal((await ask("aa")).status, 200, "a new UTC day starts fresh");
+  assert.equal((await ask("aa", "review-3", 200_000)).status, 200);
+  // A zero or missing budget refuses everything (free reviews are off unless the operator sets one).
+  assert.equal((await call({ caller: "dd", tier: "review", cost_micro: 50_000, budget_micro: 0, per_caller: 3 })).reason, "budget");
+});

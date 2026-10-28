@@ -10,6 +10,10 @@ export interface Env {
   FACILITATOR_URL?: string; // defaults to https://x402.org/facilitator (testnet only)
   PAYMENTS_ENABLED?: string; // "false" turns the paywall off for local testing
   REVIEW_PARALLEL_PER_ADDRESS?: string; // reviews one address may run at once beyond its remaining failure allowance (default 20)
+  // Free sealed reviews (the operator pays): off unless the daily budget (USD, counted at list price) is above 0.
+  FREE_REVIEW_DAILY_BUDGET_USD?: string;
+  FREE_REVIEWS_PER_DAY?: string; // free single-reviewer reviews per address per UTC day (default 3)
+  FREE_REVIEW3_PER_DAY?: string; // free review-3 reviews per address per UTC day (default 1)
   LONG_REVIEW_CHARS?: string; // task + output longer than this: light models (LIGHT_REVIEW_MODELS) sit out of reviews (default 8000)
   LIGHT_REVIEW_MODELS?: string; // comma list, default "claude-haiku-5-5"
   PAID_PAUSED?: string; // "true" refuses paid matches (before any payment) and points agents to demo mode

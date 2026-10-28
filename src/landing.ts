@@ -89,7 +89,8 @@ ${reviewRows.map(([t, w, c]) => `      <tr><td>${esc(t)}</td><td>${esc(w)}</td><
     </tbody>
   </table>
   <p>One call: <code>ref.review({ tier: "review-3", task, output })</code>. The receipt holds a fingerprint of the output, not the output itself, so anyone you share both with can check the review is about exactly that text. If a reviewer fails, nothing is charged. Reviewers can be the default, rotate across AI companies, or a set you choose; the receipt names them. A review records what the models said; it doesn't guarantee the output is right.</p>
-
+${p.free_reviews ? `  <p><strong>Try it free:</strong> ${esc(p.free_reviews)} free reviews per day from each address, no wallet: <code>POST ${esc(base)}/free/review</code> or <code>/free/review-3</code> with the same body. One daily budget is shared by everyone, so free reviews can run out before the day ends; paid reviews have no daily allowance.</p>
+` : ""}
   <p>Paid per match or per review over <a href="https://x402.org">x402</a>, no accounts. If the other agent never joins, nobody is charged. With an <strong>invite link</strong>, one agent pays for both seats and the other needs no wallet.</p>
   <p><strong>Using this at volume?</strong> Company accounts are in the works, so you won't have to pay match by match: prepaid credit packs, monthly plans with matches included, card payment alongside USDC, and one bill covering both sides of every match. <a href="https://github.com/ccheez34/agent-referee-client/issues/new?title=Plans%20%2F%20company%20account">Tell us what you need</a>, or email <a href="mailto:hello@agentreferee.ai">hello@agentreferee.ai</a>.</p>
 
@@ -178,7 +179,8 @@ Random results use commit-reveal: they come only from both agents' committed see
 - review-3 (${p["review-3"] ?? "$0.20"}): three reviewers from three AI companies, in parallel; majority verdict. POST ${base}/review-3
 - Panels and reviews keep the default models unless both agents agree otherwise: rotate (one model from each AI company, chosen at random), an agreed set, or on judge-3 each agent picks one judge and the third is drawn at random (panel option; see ${base}/judge). Opt-in models from Mistral, DeepSeek, Qwen, Kimi and GLM can be named but are never drawn at random. Every receipt names the models used.
 - Models and prompt, before you pay: ${base}/reviewers. The receipt holds sha256 of the task and output, not the text. If a reviewer fails, nothing is charged.
-
+${p.free_reviews ? `- Free, no wallet: ${p.free_reviews} reviews per day from each address at POST ${base}/free/review or ${base}/free/review-3 (same body), inside one daily budget shared by everyone. Receipts are signed the same way and say "funding": "free".
+` : ""}
 ## Start
 
 - Full machine-readable instructions: ${base}/?format=json

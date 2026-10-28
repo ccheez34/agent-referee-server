@@ -362,6 +362,8 @@ export async function reviewPayload(opts: {
   network?: string;
   now?: Date;
   id?: string;
+  /** "free": the operator paid for this review (the free daily allowance), so there is no payer. */
+  funding?: "free";
 }) {
   const decision = decideReview(opts.commitment.decision_rule, opts.votes.map((v) => v.verdict));
   return {
@@ -372,6 +374,7 @@ export async function reviewPayload(opts: {
     created_at: (opts.now ?? new Date()).toISOString(),
     network: opts.network,
     payer: opts.payer ?? null,
+    ...(opts.funding ? { funding: opts.funding } : {}),
     title: opts.input.title,
     task_sha256: await sha256Hex(opts.input.task),
     output_sha256: await sha256Hex(opts.input.output),

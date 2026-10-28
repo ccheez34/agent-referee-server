@@ -259,3 +259,81 @@ t("one address: reviews beyond its in-flight room answer busy (503, Retry-After)
   assert.equal(typeof refused.body.error, "string");
   assert.match(refused.body.error, /^review_fail_limit: /);
 });
+
+// ---------- free sealed reviews (the operator pays) ----------
+
+const FREE = { FREE_REVIEW_DAILY_BUDGET_USD: "3.00" };
+
+t("a free review needs no payment, even with payments on, and its signed receipt says funding: free", async () => {
+  const { verifyReviewOutcome, verifySignature } = await import("agent-referee-client");
+  const e = env({ ...FREE, PAYMENTS_ENABLED: "true" });
+  const r = await call(e, "/free/review", review);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.receipt.payload.funding, "free");
+  assert.equal(r.body.receipt.payload.payer, null);
+  assert.deepEqual(r.body.free, { used_today: 1, per_day: 3, left_today: 2 });
+  assert.equal(await verifySignature(r.body.receipt, [keys.PUBLIC_KEY]), true);
+  assert.equal((await verifyReviewOutcome(r.body.receipt, { ...review, tier: "review" })).ok, true);
+  // The paid route still asks for payment: the free route doesn't open it.
+  assert.equal((await call(e, "/review", review)).status, 402);
+});
+
+t("free reviews: 3 single and 1 review-3 per address per day; other addresses aren't affected", async () => {
+  const e = env(FREE);
+  for (let i = 1; i <= 3; i++) assert.equal((await call(e, "/free/review", review)).status, 200);
+  const fourth = await call(e, "/free/review", review);
+  assert.equal(fourth.status, 429);
+  assert.match(fourth.body.error, /today's free single-reviewer reviews \(3 per day/);
+  assert.equal((await call(e, "/free/review-3", review)).status, 200);
+  assert.equal((await call(e, "/free/review-3", review)).status, 429);
+  assert.equal((await call(e, "/free/review", review, { "cf-connecting-ip": "198.51.100.20" })).status, 200, "another address has its own allowance");
+});
+
+t("free reviews stop for everyone when the shared daily budget is used up", async () => {
+  const e = env({ FREE_REVIEW_DAILY_BUDGET_USD: "0.40", FREE_REVIEW3_PER_DAY: "5" });
+  assert.equal((await call(e, "/free/review-3", review, { "cf-connecting-ip": "198.51.100.30" })).status, 200);
+  assert.equal((await call(e, "/free/review-3", review, { "cf-connecting-ip": "198.51.100.31" })).status, 200);
+  const over = await call(e, "/free/review-3", review, { "cf-connecting-ip": "198.51.100.32" });
+  assert.equal(over.status, 429);
+  assert.match(over.body.error, /used up for everyone/);
+});
+
+t("free reviews are off without a budget, and the pause switches stop them", async () => {
+  assert.equal((await call(env(), "/free/review", review)).status, 503, "no budget set: off");
+  assert.equal((await call(env({ FREE_REVIEW_DAILY_BUDGET_USD: "0" }), "/free/review", review)).status, 503);
+  assert.equal((await call(env({ ...FREE, REVIEWS_PAUSED: "true" }), "/free/review", review)).status, 503);
+  assert.equal((await call(env({ ...FREE, PAID_PAUSED: "true" }), "/free/review", review)).status, 503);
+});
+
+t("a busy pool or a failed reviewer doesn't use up the free review", async () => {
+  const full = env({ ...FREE, GATE_SLOTS_ANTHROPIC_CLAUDE_SONNET_5_5: "0" });
+  const b = await call(full, "/free/review", review);
+  assert.equal(b.status, 503);
+  assert.equal(b.body.busy, true);
+  assert.match(b.body.error, /wasn't used/);
+  const e = env(FREE);
+  const fail = { "x-test-fake-mix": "500:1", "x-test-fake-delay": "1-2" };
+  for (let i = 0; i < 2; i++) {
+    const f = await call(e, "/free/review", review, fail);
+    assert.equal(f.status, 502, JSON.stringify(f.body));
+    assert.match(f.body.error, /wasn't used/);
+  }
+  const ok = await call(e, "/free/review", review);
+  assert.equal(ok.status, 200);
+  assert.equal(ok.body.free.used_today, 1, "the failures were given back");
+});
+
+t("bad input on the free route is refused before anything is counted", async () => {
+  const e = env(FREE);
+  const bad = await call(e, "/free/review", { task: "short", output: "4" });
+  assert.equal(bad.status, 400);
+  assert.match(bad.body.error, /wasn't used/);
+  assert.equal((await call(e, "/free/review", review)).body.free.used_today, 1);
+});
+
+t("GET /reviewers says whether free reviews are on", async () => {
+  assert.equal((await call(env(), "/reviewers")).body.free.available, false);
+  const on = (await call(env(FREE), "/reviewers")).body.free;
+  assert.equal(on.available, true);
+  assert.deepEqual(on.per_address_per_day, { review: 3, "review-3": 1 });
+});

@@ -348,7 +348,7 @@ app.get("/", (c) => {
   // The same address answers with HTML or JSON depending on Accept, so caches must keep them apart.
   c.header("Vary", "Accept");
   // A person in a browser gets a readable page; agents and tools get the JSON instructions below.
-  if (wantsHtml(c.req.header("accept"), c.req.query("format"))) return c.html(landingHtml({ ...p, ...reviewPrices(c.env) }, base, c.env.DEMO_PER_IP_LIMIT || "20"));
+  if (wantsHtml(c.req.header("accept"), c.req.query("format"))) return c.html(landingHtml({ ...p, ...reviewPrices(c.env), free_reviews: freeReviewsLabel(c.env) }, base, c.env.DEMO_PER_IP_LIMIT || "20"));
   return c.json({
     service: "Agent Referee",
     docs: "https://github.com/ccheez34/agent-referee-client",
@@ -394,6 +394,7 @@ app.get("/", (c) => {
       `Rematch (rps, rps-bo3, weighted): after a result, each party calls POST ${base}/matches/<id>/rematch {seat, seat_token}. Once both have, the response (and the match status) gives next_match_id: join it like any match (paid per seat). Seats are locked to the wallets that paid this game. Each receipt carries the series tally and the previous receipt's hash. Up to ${MAX_SERIES_GAMES} games per series.`,
       `Lost your seat_token after paying? POST ${base}/matches/<id>/recover {payment: "<the exact X-PAYMENT header you paid with>"} re-issues your seat with a new token, free.`,
       `Sealed review (one agent, no match): POST ${base}/review or ${base}/review-3 (x402 paid) {task, output, title?, criteria?} -> {result:{verdict, tally}, votes, receipt}. Usually seconds, but up to 4 minutes if a provider is slow: keep your HTTP timeout at least 300 seconds. Failed reviews aren't charged (up to 10 per IP address per day, plus one per successful review). Verdicts: pass, needs_changes, fail, cannot_assess (review-3 can be split). The receipt holds sha256 of the task and output; anyone holding the output can check it. If a reviewer fails, nothing is charged. GET ${base}/reviewers shows the models and prompt before you pay.`,
+      ...(freeReviewConfig(c.env).budgetMicro ? [`Free sealed review (no wallet): POST ${base}/free/review or ${base}/free/review-3 with the same body. ${freeReviewConfig(c.env).perCaller.review} single-reviewer and ${freeReviewConfig(c.env).perCaller["review-3"]} review-3 per IP address per UTC day, inside one shared daily budget; receipts are signed the same way and say "funding": "free". A busy service or a failed reviewer doesn't use up a free review.`] : []),
       `GET ${base}/matches/<id> for status, result and signed receipt; GET ${base}/pubkey to verify receipts`,
       `Records: GET ${base}/agents/<wallet> shows a paying wallet's judge record, luck record, completed vs forfeited matches and badges, so an agent can check a counterparty before trusting it. Records only cover matches the wallet actually joined, so an empty record means unknown, not reliable. Add "private_record": true (or false) to any paid join to hide (or show) your own record; the setting sticks to your wallet until you change it. The same wallet in two seats never counts.`,
       `Free demo (no wallet): add "demo": true to POST /matches, then join at ${base}/demo/join/<tier> instead of /join/<tier>. Same protocol, signed receipts marked demo, nothing recorded, no judge tier, up to ${c.env.DEMO_PER_IP_LIMIT || 20} demo matches per day per IP address (${c.env.DEMO_DAILY_LIMIT || 2000} across all users).`,
@@ -410,7 +411,7 @@ app.get("/", (c) => {
 // Plain-text summary for AI agents and LLM crawlers.
 app.get("/llms.txt", (c) => {
   const base = new URL(c.req.url).origin;
-  return c.text(llmsTxt({ ...prices(c.env), ...reviewPrices(c.env) }, base, c.env.DEMO_PER_IP_LIMIT || "20"));
+  return c.text(llmsTxt({ ...prices(c.env), ...reviewPrices(c.env), free_reviews: freeReviewsLabel(c.env) }, base, c.env.DEMO_PER_IP_LIMIT || "20"));
 });
 
 // Health check for uptime monitors (free, no AI calls, no payments). 200 + "status":"ok" = all good; "degraded" names
@@ -553,6 +554,16 @@ async function callerHash(c: any): Promise<string | undefined> {
   return ip ? (await sha256Hex(`${c.env.SIGNING_KEY || "demo"}|${day}|${ip}`)).slice(0, 20) : undefined;
 }
 
+/** Runs every committed reviewer in parallel, so no reviewer sees another's verdict. All are waited for before the
+ * caller gives the slots back. */
+function runReviewers(c: any, commitment: any, input: any, lease: SlotLease, budgetMs: number) {
+  const fake = fakeAiConfig(c.env, { mix: c.req.header("x-test-fake-mix"), delay: c.req.header("x-test-fake-delay") });
+  const keys = { ANTHROPIC_API_KEY: c.env.ANTHROPIC_API_KEY, OPENROUTER_API_KEY: c.env.OPENROUTER_API_KEY, fake };
+  return Promise.allSettled(
+    commitment.models.map((m: string, i: number) => runOneReviewer(keys, m, i + 1, input, undefined, { budgetMs, observe: (o) => lease.observe(i, o) })),
+  );
+}
+
 async function handleReview(c: any, tier: ReviewTier) {
   // reviewGuard (before the paywall) already checked the input, drew the panel and took the reviewer slots.
   const g = c.get("review") as
@@ -584,12 +595,7 @@ async function handleReview(c: any, tier: ReviewTier) {
     // What's left of the reviewers' budget, never past the payment authorization's own deadline.
     const budgetMs = reviewBudget({ budgetMs: REVIEWER_BUDGET_MS, elapsedMs: started - g.t0, header: c.req.header("x-payment") });
     if (budgetMs === null) return busy(10, "not enough time was left in this payment's window for a full review.");
-    const fake = fakeAiConfig(c.env, { mix: c.req.header("x-test-fake-mix"), delay: c.req.header("x-test-fake-delay") });
-    const keys = { ANTHROPIC_API_KEY: c.env.ANTHROPIC_API_KEY, OPENROUTER_API_KEY: c.env.OPENROUTER_API_KEY, fake };
-    // In parallel, so no reviewer sees another's verdict. All are waited for before the slots go back.
-    settled = await Promise.allSettled(
-      commitment.models.map((m: string, i: number) => runOneReviewer(keys, m, i + 1, input, undefined, { budgetMs, observe: (o) => lease.observe(i, o) })),
-    );
+    settled = await runReviewers(c, commitment, input, lease, budgetMs);
   } finally {
     await lease.release();
   }
@@ -637,6 +643,127 @@ async function handleReview(c: any, tier: ReviewTier) {
 app.post("/review", (c) => handleReview(c, "review"));
 app.post("/review-3", (c) => handleReview(c, "review-3"));
 
+// ---------- free sealed review (the operator pays; small daily allowance) ----------
+
+/** Free reviews: a few per address per UTC day, inside one daily budget across everyone (counted at list price).
+ * Off unless FREE_REVIEW_DAILY_BUDGET_USD is set above 0. */
+function freeReviewConfig(env: Env) {
+  const usd = Number(String(env.FREE_REVIEW_DAILY_BUDGET_USD ?? "").trim() || 0);
+  const whole = (v: string | undefined, d: number) => {
+    const n = Number(String(v ?? "").trim());
+    return String(v ?? "").trim() !== "" && Number.isFinite(n) && n >= 0 ? Math.floor(n) : d;
+  };
+  return {
+    budgetMicro: Number.isFinite(usd) && usd > 0 ? Math.round(usd * 1_000_000) : 0,
+    perCaller: { review: whole(env.FREE_REVIEWS_PER_DAY, 3), "review-3": whole(env.FREE_REVIEW3_PER_DAY, 1) } as Record<ReviewTier, number>,
+  };
+}
+
+/** "3 single-reviewer and 1 review-3" for the landing page and llms.txt, or "" when free reviews are off. */
+function freeReviewsLabel(env: Env) {
+  const cfg = freeReviewConfig(env);
+  return cfg.budgetMicro ? `${cfg.perCaller.review} single-reviewer and ${cfg.perCaller["review-3"]} review-3` : "";
+}
+
+/** What /reviewers, / and llms.txt say about free reviews. */
+function freeReviewInfo(env: Env) {
+  const cfg = freeReviewConfig(env);
+  if (!cfg.budgetMicro) return { available: false };
+  return {
+    available: true,
+    how: "POST /free/review or /free/review-3 with the same body as the paid routes. No wallet or payment.",
+    per_address_per_day: cfg.perCaller,
+    shared_daily_limit: "One daily budget covers everyone's free reviews; once it's used up, free reviews pause until 00:00 UTC.",
+    receipts: 'Signed like paid ones, with "funding": "free" and no payer.',
+    failures: "If a reviewer fails or the service is busy, your free review isn't used.",
+  };
+}
+
+const FREE_PAID_HINT = "Paid reviews (POST /review or /review-3 with x402) have no daily allowance.";
+
+async function handleFreeReview(c: any, tier: ReviewTier) {
+  const cfg = freeReviewConfig(c.env);
+  if (!cfg.budgetMicro || !cfg.perCaller[tier]) return err(503, `Free reviews aren't available right now. ${FREE_PAID_HINT}`);
+  if (await paidPausedNow(c.env)) return err(503, PAUSED_MSG);
+  if (await reviewsPausedNow(c.env)) return err(503, REVIEWS_PAUSED_MSG);
+  const t0 = Date.now();
+  const body = await c.req.json().catch(() => null);
+  const v = validateReview(body, tier);
+  if (!v.ok) return err(400, `${v.error} Your free review wasn't used.`);
+  let commitment;
+  try {
+    commitment = await reviewCommitment(tier, c.env, v.value.panel, undefined, v.value.task.length + v.value.output.length);
+  } catch (e: any) {
+    return err(400, `${String(e?.message ?? e)} Your free review wasn't used.`);
+  }
+  if (missingReviewKey(c.env, commitment.models)) return err(503, "Sealed review is temporarily unavailable. Your free review wasn't used.");
+  const caller = await callerHash(c);
+  if (!caller || !c.env.LEDGER) return err(503, "Free reviews aren't available from here. " + FREE_PAID_HINT);
+  // Quick capacity check first, so a full pool doesn't use anyone's allowance.
+  const b = await quickBusy(c.env, commitment.models);
+  if (b) return busy(b.retryAfter, "the AI reviewers are at capacity. Your free review wasn't used.");
+
+  let q: any;
+  try {
+    q = await ledgerJson(c.env, undefined, "free-review", { caller, tier, cost_micro: priceMicro(reviewPrices(c.env)[tier]), budget_micro: cfg.budgetMicro, per_caller: cfg.perCaller[tier] }, true);
+  } catch (e: any) {
+    await recordEvent(c.env, "ledger_error", `free-review: ${String(e?.message ?? e)}`);
+    return err(503, "Free reviews are temporarily unavailable (their limits can't be checked right now). Try again in a minute.");
+  }
+  if (q.__status === 429) {
+    const which = tier === "review-3" ? "review-3" : "single-reviewer";
+    return err(
+      429,
+      q.reason === "per_caller"
+        ? `You've used today's free ${which} reviews (${q.limit} per day from one address). They reset at 00:00 UTC. ${FREE_PAID_HINT}`
+        : `Today's free reviews are used up for everyone. They reset at 00:00 UTC. ${FREE_PAID_HINT}`,
+    );
+  }
+  const token: string = q.token;
+  const release = (refundBudget: boolean) => ledgerJson(c.env, undefined, "free-review", { release_token: token, refund_budget: refundBudget }).catch(() => {});
+
+  const slots = await acquireSlots(c.env, commitment.models, { leaseMs: REVIEWER_BUDGET_MS + 30_000, waitMs: GATE_MAX_WAIT_MS });
+  if (!slots.ok) {
+    await release(true);
+    return busy(slots.retryAfter, `${busyWhat(slots.reason)} Your free review wasn't used.`);
+  }
+  const lease = slots.lease;
+  const input = v.value;
+  const started = Date.now();
+  let settled: PromiseSettledResult<any>[];
+  try {
+    settled = await runReviewers(c, commitment, input, lease, Math.max(30_000, REVIEWER_BUDGET_MS - (started - t0)));
+  } finally {
+    await lease.release();
+  }
+  const failed = settled.find((r) => r.status === "rejected") as PromiseRejectedResult | undefined;
+  if (failed) {
+    const msg = String(failed.reason?.message ?? failed.reason);
+    console.error(`free review ${tier} failed after ${Date.now() - started}ms: ${msg.slice(0, 200)}`);
+    // The person gets their review back. The budget keeps what the AI calls may already have cost, unless the
+    // provider's account limit stopped them (no answer, so nothing spent).
+    await release(lease.capHit());
+    if (lease.capHit()) return busy(600, "the AI provider's account limit was reached; reviews resume when it's lifted. Your free review wasn't used.");
+    return err(502, `A reviewer didn't return a usable verdict (${msg.slice(0, 200)}). Your free review wasn't used; try again.`);
+  }
+  const votes = settled.map((r) => (r as PromiseFulfilledResult<any>).value);
+  console.log(`free review ${tier} ok in ${Date.now() - started}ms: ${votes.map((x) => `${x.model}=${x.verdict}`).join(" ")}`);
+  const payload = await reviewPayload({ tier, input, commitment, votes, network: c.env.NETWORK, id: randomToken(12), funding: "free" });
+  const receipt = await signReceipt(payload, c.env.SIGNING_KEY, c.env.PUBLIC_KEY);
+  return c.json({
+    review_id: payload.review_id,
+    tier,
+    result: payload.result,
+    votes,
+    receipt,
+    free: { used_today: q.used, per_day: q.limit, left_today: Math.max(0, q.limit - q.used) },
+    note: "A free review (the receipt says funding: free). Save the receipt with the task and output: anyone holding all three can check the signature and that task_sha256 and output_sha256 match. The service keeps no copy of the review; the receipt you hold is the only record. It is not a guarantee the output is correct.",
+  });
+}
+
+app.post("/free/review", (c) => handleFreeReview(c, "review"));
+app.post("/free/review-3", (c) => handleFreeReview(c, "review-3"));
+
 // What a review will use, published so an agent can check before paying (free).
 app.get("/reviewers", async (c) => {
   const rp = reviewPrices(c.env);
@@ -646,6 +773,7 @@ app.get("/reviewers", async (c) => {
       "review-3": { price: rp["review-3"], ...(await reviewCommitment("review-3", c.env)) },
     },
     how: `POST /review or /review-3 (x402 paid, one agent) with {task, output, title?, criteria?}. Returns result, votes and a signed receipt. If a reviewer fails, the request fails and nothing is charged.`,
+    free: freeReviewInfo(c.env),
     verdicts: REVIEW_VERDICTS,
     model_pool: modelPool(c.env),
     opt_in_models: optInModels(c.env),
