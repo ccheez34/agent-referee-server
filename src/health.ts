@@ -65,6 +65,14 @@ export class Health {
       return json(200, { ok: true, recent: times.length, paused });
     }
     if (action === "blocked") return json(200, (await st.get<string[]>("blocked_wallets")) ?? []);
+    if (action === "unblock") {
+      // The operator looked at a wallet's unsettled payment (it was settled, refunded or written off): let it pay again.
+      const wallet = typeof body?.wallet === "string" ? body.wallet.toLowerCase() : "";
+      const blocked = (await st.get<string[]>("blocked_wallets")) ?? [];
+      const left = blocked.filter((w) => w !== wallet);
+      await st.put("blocked_wallets", left);
+      return json(200, { unblocked: left.length < blocked.length, blocked: left });
+    }
     if (action === "unjudged") {
       const list = (await st.get<UnjudgedEntry[]>("unjudged")) ?? [];
       if (req.method === "POST") {
@@ -195,6 +203,15 @@ export async function adminOk(env: Env, header: string | undefined): Promise<boo
   let diff = 0;
   for (let i = 0; i < x.length; i++) diff |= x[i] ^ y[i];
   return diff === 0;
+}
+
+export const listBlocked = (env: Env): Promise<string[]> => healthCall(env, "blocked");
+
+/** Let a blocked wallet pay again (admin). Clears this isolate's cache; others refresh within 30 s. */
+export async function unblockWallet(env: Env, wallet: string): Promise<{ unblocked: boolean; blocked: string[] }> {
+  const r = await healthCall(env, "unblock", { wallet });
+  blockedCache = null;
+  return r;
 }
 
 /** Tests only. */

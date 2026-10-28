@@ -13,7 +13,7 @@ import {
   REVIEW_LIMITS, REVIEW_MESSAGE_FORMAT, longReviewRule, REVIEW_SYSTEM, REVIEW_VERDICTS, REVIEWER_BUDGET_MS, missingReviewKey, reviewCommitment, reviewModels, reviewPayload, runOneReviewer, validateReview, type ReviewTier,
 } from "./review.ts";
 import { Gate, GATE_MAX_WAIT_MS } from "./gate.ts";
-import { Health, adminOk, evaluateHealth, healthEvents, listUnjudged, markRefunded, pauseState, recordEvent, recordSettleFailure, setPause, walletBlocked } from "./health.ts";
+import { Health, adminOk, evaluateHealth, healthEvents, listUnjudged, markRefunded, pauseState, recordEvent, recordSettleFailure, setPause, listBlocked, unblockWallet, walletBlocked } from "./health.ts";
 import { acquireSlots, gateStats, gatesOn, poolsOfProvider, quickBusy, resetPools, type SlotLease } from "./gateclient.ts";
 import { classifyPaidResponse, plausiblePayment, priceMicro, reviewBudget, reviewLimitRefusal } from "./paywatch.ts";
 import { fakeAiConfig } from "./fakeai.ts";
@@ -559,6 +559,24 @@ app.post("/admin/unjudged", async (c) => {
   const body: any = await c.req.json().catch(() => ({}));
   if (typeof body?.refunded_match_id === "string") await markRefunded(c.env, body.refunded_match_id);
   return c.json(await listUnjudged(c.env));
+});
+
+// Wallets refused because a payment didn't settle after the work was delivered. GET lists them; POST {"wallet":"0x..."}
+// lets one pay again, once the operator has looked at what happened (settled it, refunded it, or written it off).
+app.get("/admin/blocked", async (c) => {
+  const denied = await admin(c);
+  if (denied) return denied;
+  if (!c.env.HEALTH) return err(503, "Needs the health store.");
+  return c.json({ blocked: await listBlocked(c.env) });
+});
+app.post("/admin/unblock", async (c) => {
+  const denied = await admin(c);
+  if (denied) return denied;
+  const body: any = await c.req.json().catch(() => null);
+  const wallet = typeof body?.wallet === "string" ? body.wallet.trim().toLowerCase() : "";
+  if (!/^0x[0-9a-f]{40}$/.test(wallet)) return err(400, 'Send {"wallet":"0x..."} (the 0x wallet address).');
+  if (!c.env.HEALTH) return err(503, "Needs the health store.");
+  return c.json(await unblockWallet(c.env, wallet));
 });
 
 // Usage counts for the last 7 UTC days: reviews done, failed, refused and busy, plus today's free budget used.

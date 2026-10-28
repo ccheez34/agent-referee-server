@@ -509,3 +509,26 @@ t("an answer cut off at the token limit is noted each time: per model in /admin/
   const h = await call(e, "/health");
   assert.ok(h.body.warnings.includes("out_of_tokens"), JSON.stringify(h.body));
 });
+
+t("a blocked wallet can be let back in by the operator (admin token only)", async () => {
+  const f = fakeFacilitator("fail");
+  try {
+    const e = env({ PAYMENTS_ENABLED: "true" });
+    const w = "0x" + "e".repeat(40);
+    await call(e, "/review", review, { "x-payment": payHeader(w) });
+    await settleWait();
+    assert.equal((await call(e, "/review", review, { "x-payment": payHeader(w) })).status, 403);
+    const auth = { authorization: `Bearer ${ADMIN}` };
+    assert.equal((await call(e, "/admin/blocked")).status, 401);
+    assert.deepEqual((await call(e, "/admin/blocked", undefined, auth)).body.blocked, [w]);
+    assert.equal((await call(e, "/admin/unblock", { wallet: w })).status, 401, "no token");
+    assert.equal((await call(e, "/admin/unblock", { wallet: "nope" }, auth)).status, 400);
+    const u = await call(e, "/admin/unblock", { wallet: w.toUpperCase().replace("0X", "0x") }, auth);
+    assert.equal(u.status, 200, JSON.stringify(u.body));
+    assert.equal(u.body.unblocked, true);
+    assert.deepEqual(u.body.blocked, []);
+    assert.notEqual((await call(e, "/review", review, { "x-payment": payHeader(w) })).status, 403, "it can pay again");
+  } finally {
+    f.restore();
+  }
+});
