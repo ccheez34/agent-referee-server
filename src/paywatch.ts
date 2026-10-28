@@ -76,3 +76,28 @@ export function reviewBudget(opts: { budgetMs: number; elapsedMs: number; header
   }
   return budget >= (opts.minMs ?? 30_000) ? budget : null;
 }
+
+/**
+ * What to answer when the failed-review ledger blocks a review (all before payment, so nothing is charged).
+ * f is the ledger's answer: { reason?, count, ok }. Too many reviews in flight from one address is a capacity
+ * refusal (503 busy, retry soon); the per-address failure limit and the global free-failure ceiling are 429s.
+ * Older ledger answers without a reason fall back to comparing the counts.
+ */
+export function reviewLimitRefusal(
+  f: { reason?: string; count?: number; ok?: number },
+  failLimit: number,
+  parallel: number,
+): { busy: true; retryAfterS: number; message: string } | { busy: false; status: 429; message: string } {
+  if (f.reason === "too_many_in_flight") {
+    const atOnce = parallel + Math.max(0, failLimit + (f.ok ?? 0) - (f.count ?? 0));
+    return { busy: true, retryAfterS: 10, message: `too many of your reviews are running at once (about ${atOnce} at a time from one address).` };
+  }
+  const perAddress = f.reason ? f.reason === "fail_limit" : (f.count ?? 0) >= failLimit + (f.ok ?? 0);
+  return {
+    busy: false,
+    status: 429,
+    message: perAddress
+      ? `review_fail_limit: too many failed reviews from your IP address today (${failLimit}, plus one per successful review). Resets at 00:00 UTC. Nothing was charged.`
+      : `free_failure_ceiling: failed reviews across all users hit today's ceiling, so addresses without a successful review today are paused until 00:00 UTC. Nothing was charged.`,
+  };
+}

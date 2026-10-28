@@ -236,3 +236,26 @@ t("a facilitator that's down is uncharged for the agent and shows up in /health"
     f.restore();
   }
 });
+
+t("one address: reviews beyond its in-flight room answer busy (503, Retry-After); failures past the allowance get the true 429", async () => {
+  // Allowance 1 failure + 2 parallel room = 3 reviews at once from one address.
+  const e = env({ REVIEW_FAIL_LIMIT: "1", REVIEW_PARALLEL_PER_ADDRESS: "2", FAKE_AI_DELAY_MS: "300-400" });
+  const all = await Promise.all(Array.from({ length: 6 }, () => call(e, "/review", review)));
+  const ok = all.filter((r) => r.status === 200);
+  const busy = all.filter((r) => r.status === 503);
+  assert.equal(ok.length, 3, JSON.stringify(all.map((r) => r.status)));
+  assert.equal(busy.length, 3);
+  for (const r of busy) {
+    assert.equal(r.body.busy, true);
+    assert.equal(r.headers.get("retry-after"), "10");
+    assert.match(r.body.error, /running at once/);
+    assert.match(r.body.error, /Nothing was charged/);
+  }
+  // Two failed reviews from another address (allowance 1, no success): the next one is a 429 naming its own limit.
+  const fail = { "x-test-fake-mix": "500:1", "x-test-fake-delay": "1-2", "cf-connecting-ip": "198.51.100.9" };
+  await call(e, "/review", review, fail);
+  const refused = await call(e, "/review", review, fail);
+  assert.equal(refused.status, 429, JSON.stringify(refused.body));
+  assert.equal(typeof refused.body.error, "string");
+  assert.match(refused.body.error, /^review_fail_limit: /);
+});

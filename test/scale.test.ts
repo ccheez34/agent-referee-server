@@ -5,7 +5,7 @@ import { Gate } from "../src/gate.ts";
 import { acquireSlots, quickBusy, slotsFor, poolsOfProvider, _clearSnapshots } from "../src/gateclient.ts";
 import { classifyStatus, isSpendCap, poolOf, rateInfo, summarize, ProviderCapError } from "../src/providers.ts";
 import { Health, adminOk, evaluateHealth, pauseState, recordEvent, _resetHealthCaches } from "../src/health.ts";
-import { classifyPaidResponse, plausiblePayment, priceMicro, reviewBudget } from "../src/paywatch.ts";
+import { classifyPaidResponse, plausiblePayment, priceMicro, reviewBudget, reviewLimitRefusal } from "../src/paywatch.ts";
 import { recordSettleFailure, walletBlocked } from "../src/health.ts";
 import { fakeAiConfig, fakeModelResponse } from "../src/fakeai.ts";
 import { Ledger, ledgerShardName, shardLimit, LEDGER_SHARDS } from "../src/ledger.ts";
@@ -497,6 +497,26 @@ test("parallel paid reviews from one caller can't all slip past the failed-revie
   for (const r of wide.filter((r) => r.token).slice(0, 3)) await call({ caller: "cc", limit: 3, parallel: 20, record: true, release_token: r.token });
   const full = await call({ caller: "cc", limit: 3, parallel: 20, reserve: true });
   assert.deepEqual([full.blocked, full.reason, full.count], [true, "fail_limit", 3]);
+  // The global ceiling on free failures: an address with no success today is refused with its own reason,
+  // and one with a success today keeps going.
+  for (let i = 0; i < 5; i++) await call({ caller: `g${i}`, limit: 10, global_limit: 5, record: true });
+  const capped = await call({ caller: "fresh", limit: 10, global_limit: 5, parallel: 20, reserve: true });
+  assert.deepEqual([capped.blocked, capped.reason], [true, "global_ceiling"]);
+  await call({ caller: "paying", limit: 10, global_limit: 5, record_ok: true });
+  assert.ok((await call({ caller: "paying", limit: 10, global_limit: 5, parallel: 20, reserve: true })).token);
+});
+
+test("a blocked review gets the right answer for each reason: busy (503, retry soon) or a 429 with the true cause", () => {
+  const inFlight = reviewLimitRefusal({ reason: "too_many_in_flight", count: 0, ok: 13 }, 10, 20);
+  assert.equal(inFlight.busy, true);
+  assert.ok(inFlight.busy && inFlight.retryAfterS === 10 && /about 43 at a time/.test(inFlight.message));
+  const own = reviewLimitRefusal({ reason: "fail_limit", count: 10, ok: 0 }, 10, 20);
+  assert.ok(!own.busy && own.status === 429 && typeof own.message === "string" && own.message.startsWith("review_fail_limit:") && /Nothing was charged/.test(own.message));
+  const global = reviewLimitRefusal({ reason: "global_ceiling", count: 0, ok: 0 }, 10, 20);
+  assert.ok(!global.busy && typeof global.message === "string" && global.message.startsWith("free_failure_ceiling:"));
+  // An older ledger answer without a reason still picks the right message from the counts.
+  assert.ok(!reviewLimitRefusal({ count: 10, ok: 0 }, 10, 20).busy && reviewLimitRefusal({ count: 10, ok: 0 }, 10, 20).message.startsWith("review_fail_limit:"));
+  assert.ok(reviewLimitRefusal({ count: 2, ok: 0 }, 10, 20).message.startsWith("free_failure_ceiling:"));
 });
 
 test("the review's time budget never runs past the payment authorization", () => {
