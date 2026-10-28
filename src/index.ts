@@ -272,8 +272,9 @@ async function releaseReservation(c: any, caller: string | undefined, failLimit:
 
 /** Extra reviews one address may have in flight beyond its remaining failure allowance (REVIEW_PARALLEL_PER_ADDRESS, default 20). */
 const reviewParallel = (env: Env) => {
-  const n = Number(env.REVIEW_PARALLEL_PER_ADDRESS);
-  return Number.isFinite(n) && n >= 0 ? n : 20;
+  const raw = String(env.REVIEW_PARALLEL_PER_ADDRESS ?? "").trim();
+  const n = Number(raw);
+  return raw !== "" && Number.isFinite(n) && n >= 0 ? Math.floor(n) : 20;
 };
 
 /** The failed-review allowance for this caller, reserving one in-flight review (released when the result is

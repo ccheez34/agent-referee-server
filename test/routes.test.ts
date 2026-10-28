@@ -251,7 +251,7 @@ t("one address: reviews beyond its in-flight room answer busy (503, Retry-After)
     assert.match(r.body.error, /running at once/);
     assert.match(r.body.error, /Nothing was charged/);
   }
-  // Two failed reviews from another address (allowance 1, no success): the next one is a 429 naming its own limit.
+  // One failed review from another address uses its whole allowance (1, no success): the next one is a 429 naming its own limit.
   const fail = { "x-test-fake-mix": "500:1", "x-test-fake-delay": "1-2", "cf-connecting-ip": "198.51.100.9" };
   await call(e, "/review", review, fail);
   const refused = await call(e, "/review", review, fail);
