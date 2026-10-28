@@ -13,7 +13,7 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "keys": "node scripts/gen-keys.mjs",
-    "test": "node --test test/referee.test.ts test/verify-outcome.test.ts test/old-client-compat.test.ts test/demo.test.ts test/payai.test.ts test/panel-rematch.test.ts test/client-v05.test.ts test/invite.test.ts test/review.test.ts test/scale.test.ts test/judge-gate.test.ts test/routes.test.ts test/regions.test.ts",
+    "test": "node --test test/referee.test.ts test/verify-outcome.test.ts test/old-client-compat.test.ts test/demo.test.ts test/payai.test.ts test/panel-rematch.test.ts test/client-v05.test.ts test/invite.test.ts test/review.test.ts test/scale.test.ts test/judge-gate.test.ts test/routes.test.ts test/regions.test.ts test/multipart.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

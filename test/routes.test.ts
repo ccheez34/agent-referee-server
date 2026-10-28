@@ -703,3 +703,114 @@ t("GET /try serves the browser page with a tight CSP, and the landing page, llms
   assert.match(llms, /Try it in your browser[^\n]*https:\/\/x\/try/);
   assert.equal((await call(e, "/")).body.try_in_browser, "https://x/try");
 });
+
+// ---------- multi-part review (spec section 1) ----------
+
+const MP = { MULTI_PART_ENABLED: "true" };
+const multi = (n: number, extra: object = {}) => ({ task: "Check the handoff: every fact is right and nothing open is missing.", pieces: Array.from({ length: n }, (_, i) => ({ ...(i === 0 ? { name: "Server" } : {}), text: `Piece ${i + 1} of the handoff.` })), ...extra });
+
+t("multi-part: off for the public until MULTI_PART_ENABLED; the operator's token opens it for testing", async () => {
+  const e = env();
+  const off = await call(e, "/review-3x3", multi(3));
+  assert.equal(off.status, 503);
+  assert.match(off.body.error, /isn't open yet\. Nothing was charged/);
+  assert.equal((await call(e, "/review-3x3", multi(3), { "x-operator-token": "wrong".repeat(10) })).status, 503, "a wrong token");
+  const op = await call(e, "/review-3x3", multi(3), { "x-operator-token": ADMIN });
+  assert.equal(op.status, 200, JSON.stringify(op.body));
+  assert.equal((await call(env(MP), "/review-3x2", multi(2))).status, 200);
+  const paused = await call(env({ ...MP, REVIEWS_PAUSED: "true" }), "/review-3x2", multi(2));
+  assert.equal(paused.status, 503, "the reviews pause switch stops them too");
+});
+
+t("multi-part: a completed review returns three votes and a review-multi-v1 receipt that checks out", async () => {
+  const { sha256Hex, canonicalJson } = await import("../src/logic.ts");
+  const { verifyReceipt } = await import("../src/receipt.ts");
+  const e = env(MP);
+  const body = multi(3);
+  const r = await call(e, "/review-3x3", body);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const p = r.body.receipt.payload;
+  assert.equal(p.tier, "review-3x3");
+  assert.equal(p.receipt_format, "review-multi-v1");
+  assert.equal(p.task_sha256, await sha256Hex(body.task));
+  assert.equal(p.output_sha256, undefined);
+  assert.equal(p.pieces.length, 3);
+  assert.deepEqual(p.pieces.map((x: any) => x.name), ["Server", "", ""]);
+  for (let i = 0; i < 3; i++) assert.equal(p.pieces[i].sha256, await sha256Hex(body.pieces[i].text));
+  assert.equal(p.pieces_sha256, await sha256Hex(canonicalJson(p.pieces)));
+  assert.equal(p.votes.length, 3);
+  assert.ok(p.votes.every((v: any) => v.issues_dropped === 0));
+  assert.equal(new Set(p.reviewers.models.map((m: string) => (m.includes("/") ? m.split("/")[0] : "anthropic"))).size, 3);
+  assert.ok(!p.reviewers.models.includes("claude-haiku-5-5"));
+  assert.equal(p.reviewers.format_version, "agent-referee-review-v4-multi");
+  assert.equal(await verifyReceipt(r.body.receipt, e.PUBLIC_KEY), true);
+});
+
+t("multi-part: refused before payment with 400 (counts, sizes, Haiku, opt-in, one company twice) and 413 over 256 KB", async () => {
+  const e = env({ ...MP, PAYMENTS_ENABLED: "true" });
+  const bad = [
+    ["/review-3x3", multi(2)],
+    ["/review-3x2", multi(3)],
+    ["/review-3x2", { ...multi(2), pieces: [{ text: "x".repeat(12_001) }, { text: "y" }] }],
+    ["/review-3x2", multi(2, { panel: ["claude-haiku-5-5", "openai/gpt-6-luna", "google/gemini-4-argon"] })],
+    ["/review-3x2", multi(2, { panel: ["moonshotai/kimi-k3", "openai/gpt-6-luna", "google/gemini-4-argon"] })],
+    ["/review-3x2", multi(2, { panel: ["claude-opus-5-5", "claude-sonnet-5-5", "openai/gpt-6-luna"] })],
+    ["/review-3x2", multi(2, { output: "x" })],
+  ] as const;
+  for (const [path, body] of bad) {
+    const r = await call(e, path, body);
+    assert.equal(r.status, 400, `${path} ${JSON.stringify(body).slice(0, 120)}: ${JSON.stringify(r.body)}`);
+    assert.match(r.body.error, /Nothing was charged\.$/);
+  }
+  const huge = { ...multi(2), pieces: [{ text: "\u0001".repeat(50_000) }, { text: "y" }] }; // 300 KB escaped
+  const r = await call(e, "/review-3x2", huge);
+  assert.equal(r.status, 413);
+  assert.equal((await call(e, "/review-3x2", multi(2))).status, 402, "a valid request gets the payment challenge");
+});
+
+t("multi-part: a company with no eligible model answers 503 before payment", async () => {
+  const r = await call(env({ ...MP, PAYMENTS_ENABLED: "true", MULTI_PART_EXCLUDE: "openai/gpt-6-luna" }), "/review-3x3", multi(3));
+  assert.equal(r.status, 503);
+  assert.match(r.body.error, /closed for now.*openai.*Nothing was charged/);
+});
+
+t("multi-part: a failed review isn't charged and uses up as many allowed failures as it has pieces", async () => {
+  const e = env({ ...MP, REVIEW_FAIL_LIMIT: "4" });
+  const fail = { "x-test-fake-mix": "500:1", "x-test-fake-delay": "1-2", "cf-connecting-ip": "198.51.100.20" };
+  const f1 = await call(e, "/review-3x3", multi(3), fail);
+  assert.equal(f1.status, 502);
+  assert.match(f1.body.error, /counts as 3 of today's allowed failures/);
+  const f2 = await call(e, "/review-3x2", multi(2), fail); // 3 + 2 = 5 >= 4
+  assert.equal(f2.status, 502);
+  const refused = await call(e, "/review-3x2", multi(2), fail);
+  assert.equal(refused.status, 429, JSON.stringify(refused.body));
+  assert.match(refused.body.error, /^review_fail_limit: /);
+  assert.equal((await call(e, "/review-3x2", multi(2), { "cf-connecting-ip": "198.51.100.21" })).status, 200, "another address isn't affected");
+});
+
+t("multi-part: paid through the real paywall at its own price, settled once", async () => {
+  const f = fakeFacilitator("ok");
+  try {
+    const e = env({ ...MP, PAYMENTS_ENABLED: "true" });
+    const challenge = await call(e, "/review-3x3", multi(3));
+    assert.equal(challenge.status, 402);
+    assert.equal(challenge.body.accepts?.[0]?.maxAmountRequired, "500000", "$0.50");
+    const r = await call(e, "/review-3x3", multi(3), { "x-payment": payHeader("0x" + "c".repeat(40), "500000") });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.equal(r.body.receipt.payload.payer?.toLowerCase(), "0x" + "c".repeat(40));
+    assert.deepEqual(f.calls, { verify: 1, settle: 1 });
+  } finally {
+    f.restore();
+  }
+});
+
+t("multi-part: GET /reviewers describes the tiers, the eligible models and the prompt", async () => {
+  const r = await call(env(), "/reviewers");
+  const m = r.body.multi_part;
+  assert.equal(m.status, "not open yet");
+  assert.equal(m.tiers["review-3x3"].price, "$0.50");
+  assert.ok(!m.eligible_models.includes("claude-haiku-5-5"));
+  assert.equal(m.format_version, "agent-referee-review-v4-multi");
+  assert.match(m.prompt_sha256, /^[0-9a-f]{64}$/);
+  assert.equal((await call(env(MP), "/reviewers")).body.multi_part.status, "on");
+});

@@ -20,6 +20,10 @@ import { classifyPaidResponse, plausiblePayment, priceMicro, reviewBudget, revie
 import { fakeAiConfig } from "./fakeai.ts";
 import { recordCutOff } from "./cutoffs.ts";
 import { blockedStat, countryStat, regionBlock, regionRefusal, whereFrom } from "./regions.ts";
+import {
+  MULTI_BUDGET_MS, MULTI_CALL_TIMEOUT_MS, MULTI_FORMAT_VERSION, MULTI_LEASE_MS, MULTI_LIMITS, MULTI_MAX_ISSUES, MULTI_MESSAGE_FORMAT, MULTI_PIECES, MULTI_RECEIPT_FORMAT, MULTI_SYSTEM,
+  MultiClosedError, boundaryToken, multiCommitment, multiMaxTokens, multiModels, multiReviewPayload, multiReviewerHow, readJsonCapped, validateMultiReview, type MultiTier,
+} from "./multipart.ts";
 
 export { MatchRoom, Ledger, Gate, Health };
 
@@ -70,6 +74,18 @@ function prices(env: Env) {
 // Sealed review: one agent, one paid call, priced per review (not per seat).
 function reviewPrices(env: Env): Record<ReviewTier, string> {
   return { review: env.PRICE_REVIEW || "$0.05", "review-3": env.PRICE_REVIEW_3 || "$0.20" };
+}
+// Multi-part review: one price per route (x402 prices are fixed per route). Provisional until the cost test (spec 4.3).
+function multiPrices(env: Env): Record<MultiTier, string> {
+  return { "review-3x2": env.PRICE_REVIEW_3X2 || "$0.35", "review-3x3": env.PRICE_REVIEW_3X3 || "$0.50" };
+}
+/** The multi-part routes are off for the public until MULTI_PART_ENABLED=true; the operator can test them with
+ * x-operator-token: <ADMIN_TOKEN>. */
+const multiOnForAll = (env: Env) => env.MULTI_PART_ENABLED === "true";
+async function multiOn(c: any): Promise<boolean> {
+  if (multiOnForAll(c.env)) return true;
+  const t = c.req.header("x-operator-token");
+  return !!t && (await adminOk(c.env, `Bearer ${t}`));
 }
 
 // The 2-seat tiers an invite match (host pays for both seats) is available for.
@@ -149,6 +165,32 @@ function getPaywall(env: Env): MiddlewareHandler {
       discoverable: true,
     },
   });
+  const mp = multiPrices(env);
+  const multiRoute = (price: string, n: number) => ({
+    price,
+    network,
+    config: {
+      description: `Agent Referee multi-part sealed review — one piece of work in ${n} pieces (up to ${MULTI_LIMITS.maxPiece} characters each, ${MULTI_LIMITS.maxTotal} in all): three independent AI reviewers from three different companies each read every piece in one call, in parallel, without seeing each other's verdicts; majority verdict, every vote in a signed receipt with each piece's hash. One agent, one call; charged only if the review completes.`,
+      mimeType: "application/json",
+      maxTimeoutSeconds: 300,
+      inputSchema: {
+        bodyType: "json" as const,
+        bodyFields: {
+          task: { type: "string", required: true, description: `What the agent was asked to do (10-${REVIEW_LIMITS.maxTask} chars)` },
+          pieces: { type: "array", required: true, description: `Exactly ${n} items {name?, text}: text 1-${MULTI_LIMITS.maxPiece} chars, ${MULTI_LIMITS.maxTotal} in all; name optional, 1-${MULTI_LIMITS.maxName} chars` },
+          title: { type: "string", required: false, description: "Optional short title" },
+          criteria: { type: "array", required: false, description: 'Optional weighted criteria, e.g. [{"name":"accuracy","weight":3}]' },
+        },
+      },
+      outputSchema: {
+        result: { type: "object", description: "verdict: pass | needs_changes | fail | cannot_assess | split, plus the tally" },
+        votes: { type: "array", description: "Each reviewer's verdict, issues found (each starting [piece N] or [all]), reasoning and scores" },
+        receipt: { type: "object", description: "Ed25519-signed receipt (receipt_format review-multi-v1) with hashes of the task and each piece" },
+      },
+      // Not listed in discovery catalogs until the tiers are open to everyone.
+      discoverable: multiOnForAll(env),
+    },
+  });
   paywall = paymentMiddleware(
     env.PAY_TO as `0x${string}`,
     {
@@ -161,6 +203,8 @@ function getPaywall(env: Env): MiddlewareHandler {
       "/join/judge-3": route(p["judge-3"], "Agent Referee — a panel of 3 independent AI judges from three different companies (sealed verdicts) decides between two AI agents by rules both agreed to; the majority wins and dissent is kept in the signed receipt. Each agent pays this to join."),
       "/review": reviewRoute(rp.review, "Agent Referee sealed review — one AI reviewer checks your agent's output against its task and returns a verdict (pass, needs_changes, fail or cannot_assess), the problems it found and a signed receipt. One agent, one call; charged only if the review completes."),
       "/review-3": reviewRoute(rp["review-3"], "Agent Referee sealed review — three independent AI reviewers from three different companies check your agent's output in parallel, without seeing each other's verdicts; majority verdict, every vote in a signed receipt. One agent, one call; charged only if the review completes."),
+      "/review-3x2": multiRoute(mp["review-3x2"], 2),
+      "/review-3x3": multiRoute(mp["review-3x3"], 3),
       // Invite matches: the host pays for both seats here; the guest joins free with the invite token.
       ...Object.fromEntries(
         INVITE_TIERS.map((t) => [
@@ -400,10 +444,10 @@ const LEDGER_RETRY_MS = 300;
 
 /** The failed-review allowance for this caller, reserving one in-flight review (released when the result is
  * recorded). Fails closed when the ledger can't answer. Returns a refusal, or the reservation token (or null). */
-async function failLimitCheck(c: any, caller: string | undefined, failLimit: number): Promise<Response | { token?: string } | null> {
+async function failLimitCheck(c: any, caller: string | undefined, failLimit: number, weight = 1): Promise<Response | { token?: string } | null> {
   if (!caller || !c.env.LEDGER) return null;
   let f: any;
-  const ask = () => ledgerJson(c.env, caller, "review-fails", { caller, limit: failLimit, global_limit: shardLimit(c.env.REVIEW_FAIL_GLOBAL_LIMIT, 500), parallel: reviewParallel(c.env), reserve: true });
+  const ask = () => ledgerJson(c.env, caller, "review-fails", { caller, limit: failLimit, global_limit: shardLimit(c.env.REVIEW_FAIL_GLOBAL_LIMIT, 500), parallel: reviewParallel(c.env), reserve: true, ...(weight > 1 ? { weight } : {}) });
   try {
     f = await ask();
   } catch (first: any) {
@@ -430,6 +474,66 @@ async function failLimitCheck(c: any, caller: string | undefined, failLimit: num
 const busyWhat = (reason: string) =>
   reason === "provider_cap" ? "the AI provider's account limit was reached; reviews resume when it's lifted." : "the AI reviewers are at capacity.";
 
+/**
+ * Multi-part review, before the paywall (spec section 1). Same order and guarantees as reviewGuard, plus: the routes
+ * are off unless MULTI_PART_ENABLED (or the operator's token), the body is refused over 256 KB before it's parsed,
+ * only eligible models from three companies may review (a company with none closes the tier: 503), and a failed
+ * review uses up as many of the address's allowed failures as it has pieces. Every refusal here is before payment.
+ */
+async function multiGuard(c: any, next: any) {
+  const tier: MultiTier = c.req.path === "/review-3x2" ? "review-3x2" : "review-3x3";
+  const weight = MULTI_PIECES[tier];
+  const t0 = Date.now();
+  if (await paidPausedNow(c.env)) return err(503, PAUSED_MSG);
+  if (await reviewsPausedNow(c.env)) return err(503, REVIEWS_PAUSED_MSG);
+  if (!(await multiOn(c))) return err(503, `${tier} isn't open yet. Nothing was charged. POST /review-3 reviews one piece of up to ${REVIEW_LIMITS.maxOutput} characters.`);
+  const body = await readJsonCapped(c.req.raw, MULTI_LIMITS.maxBodyBytes);
+  if (body === "too_big") return err(413, `The request body is over ${MULTI_LIMITS.maxBodyBytes / 1024} KB. Nothing was charged.`);
+  const v = validateMultiReview(body, tier);
+  if (!v.ok) return err(400, `${v.error} Nothing was charged.`);
+  let commitment;
+  try {
+    commitment = await multiCommitment(tier, c.env, v.value.panel);
+  } catch (e: any) {
+    if (e instanceof MultiClosedError) return err(503, `${e.message} Nothing was charged.`);
+    return err(400, `${String(e?.message ?? e)} Nothing was charged.`);
+  }
+  if (missingReviewKey(c.env, commitment.models)) return err(503, "Sealed review is temporarily unavailable. Nothing was charged.");
+  const paying = c.env.PAYMENTS_ENABLED === "false" || !!c.req.header("x-payment");
+  const region = regionCheck(c, commitment.models, "Nothing was charged.", paying);
+  if (region) return region;
+  if (!paying) {
+    const b = await quickBusy(c.env, commitment.models);
+    if (b) return busy(b.retryAfter, "the AI reviewers are at capacity.");
+    c.set("review", { tier, input: v.value, commitment, t0 });
+    return next();
+  }
+  const caller = await callerHash(c);
+  const failLimit = Number(c.env.REVIEW_FAIL_LIMIT || 10);
+  const price = priceMicro(multiPrices(c.env)[tier]);
+  const plausible = c.env.PAYMENTS_ENABLED === "false" || plausiblePayment(c.req.header("x-payment"), { payTo: c.env.PAY_TO, network: c.env.NETWORK, minMicro: price });
+  if (!plausible) {
+    c.set("review", { tier, input: v.value, commitment, t0, caller, failLimit });
+    return next();
+  }
+  const check = await failLimitCheck(c, caller, failLimit, weight);
+  if (check instanceof Response) return check;
+  const reservation = check?.token;
+  const slots = await acquireSlots(c.env, commitment.models, { leaseMs: MULTI_LEASE_MS, waitMs: GATE_MAX_WAIT_MS });
+  if (!slots.ok) {
+    await releaseReservation(c, caller, failLimit, reservation);
+    return busy(slots.retryAfter, busyWhat(slots.reason));
+  }
+  const g: any = { tier, input: v.value, commitment, t0, lease: slots.lease, caller, failLimit, reservation };
+  c.set("review", g);
+  try {
+    await next();
+  } finally {
+    await slots.lease.release();
+    if (!g.recorded) await releaseReservation(c, caller, failLimit, reservation);
+  }
+}
+
 /** Judge seats: refuse before payment when the match's judges are closed by a provider cap or their queue is full.
  * Judging itself happens later; this only avoids taking money when we already know it can't start soon. */
 async function judgeJoinGuard(c: any, next: any) {
@@ -452,10 +556,14 @@ for (const t of ["judge", "judge-2", "judge-3"]) {
 }
 app.use("/review", reviewGuard);
 app.use("/review-3", reviewGuard);
+app.use("/review-3x2", multiGuard);
+app.use("/review-3x3", multiGuard);
 app.use("/join/*", paidRoute);
 app.use("/host/join/*", paidRoute);
 app.use("/review", paidRoute);
 app.use("/review-3", paidRoute);
+app.use("/review-3x2", paidRoute);
+app.use("/review-3x3", paidRoute);
 
 function room(env: Env, id: string) {
   return env.MATCHES.get(env.MATCHES.idFromName(id));
@@ -935,6 +1043,89 @@ async function handleReview(c: any, tier: ReviewTier) {
 app.post("/review", (c) => handleReview(c, "review"));
 app.post("/review-3", (c) => handleReview(c, "review-3"));
 
+/** Multi-part review (spec section 1): every reviewer reads every piece in one call, in parallel. Like handleReview,
+ * a failure answers >= 400, so the payment never settles; a failure here uses up as many allowed failures as pieces. */
+async function handleMultiReview(c: any, tier: MultiTier) {
+  const g = c.get("review") as
+    | { tier: string; input: any; commitment: any; t0: number; lease?: SlotLease; caller?: string; failLimit?: number; reservation?: string; recorded?: boolean }
+    | undefined;
+  if (!g || g.tier !== tier) return err(503, "Sealed review is temporarily unavailable. Nothing was charged.");
+  const weight = MULTI_PIECES[tier];
+  const failLimit = g.failLimit ?? 10;
+  if (!g.lease) {
+    console.warn(JSON.stringify({ late_admission: true, path: c.req.path, note: "verified payment failed the local plausibility check" }));
+    const check = await failLimitCheck(c, g.caller, failLimit, weight);
+    if (check instanceof Response) return check;
+    g.reservation = check?.token;
+    const late = await acquireSlots(c.env, g.commitment.models, { leaseMs: MULTI_LEASE_MS, waitMs: GATE_MAX_WAIT_MS });
+    if (!late.ok) {
+      await releaseReservation(c, g.caller, failLimit, g.reservation);
+      g.recorded = true;
+      return busy(late.retryAfter, busyWhat(late.reason));
+    }
+    g.lease = late.lease;
+  }
+  const { input, commitment, caller } = g;
+  const lease = g.lease;
+  const started = Date.now();
+  let settled: PromiseSettledResult<any>[];
+  try {
+    const budgetMs = reviewBudget({ budgetMs: MULTI_BUDGET_MS, elapsedMs: started - g.t0, header: c.req.header("x-payment") });
+    if (budgetMs === null) return busy(10, "not enough time was left in this payment's window for a full review.");
+    const fake = fakeAiConfig(c.env, { mix: c.req.header("x-test-fake-mix"), delay: c.req.header("x-test-fake-delay") });
+    const keys = { ANTHROPIC_API_KEY: c.env.ANTHROPIC_API_KEY, OPENROUTER_API_KEY: c.env.OPENROUTER_API_KEY, fake };
+    const token = boundaryToken(); // one per request, the same for every reviewer
+    settled = await Promise.allSettled(
+      commitment.models.map((m: string, i: number) =>
+        runOneReviewer(keys, m, i + 1, input, MULTI_CALL_TIMEOUT_MS, {
+          budgetMs,
+          how: multiReviewerHow(m, input, token, c.env),
+          observe: (o) => lease.observe(i, o),
+          onCutOff: (cut) => void inBackground(c, recordCutOff(c.env, cut)),
+        }),
+      ),
+    );
+  } finally {
+    await lease.release();
+  }
+  const record = async (what: "record" | "record_ok") => {
+    g.recorded = true;
+    if (caller && c.env.LEDGER)
+      await ledgerJson(c.env, caller, "review-fails", { caller, limit: failLimit, [what]: true, release_token: g.reservation, ...(what === "record" ? { weight } : {}) }).catch(() => {});
+  };
+  const failed = settled.find((r) => r.status === "rejected") as PromiseRejectedResult | undefined;
+  if (failed) {
+    const msg = String(failed.reason?.message ?? failed.reason);
+    console.error(`review ${tier} failed after ${Date.now() - started}ms: ${msg.slice(0, 200)}`);
+    if (lease.capHit()) {
+      await releaseReservation(c, caller, failLimit, g.reservation);
+      g.recorded = true;
+      return busy(600, "the AI provider's account limit was reached; reviews resume when it's lifted.");
+    }
+    await record("record");
+    stat(c, "paid_failed");
+    stat(c, `paid_failed_${tier.replace("-", "")}`);
+    return err(502, `A reviewer didn't return a usable verdict (${msg.slice(0, 200)}). Nothing was charged; this failed review counts as ${weight} of today's allowed failures. Try again.`);
+  }
+  const votes = settled.map((r) => (r as PromiseFulfilledResult<any>).value);
+  console.log(`review ${tier} ok in ${Date.now() - started}ms: ${votes.map((v) => `${v.model}=${v.verdict}${v.issues_dropped ? ` (dropped ${v.issues_dropped})` : ""}`).join(" ")}`);
+  await record("record_ok");
+  stat(c, `paid_ok_${tier.replace("-", "")}`);
+  const payload = await multiReviewPayload({ tier, input, commitment, votes, payer: payerFromPaymentHeader(c.req.header("x-payment")), network: c.env.NETWORK, id: randomToken(12) });
+  const receipt = await signReceipt(payload, c.env.SIGNING_KEY, c.env.PUBLIC_KEY);
+  return c.json({
+    review_id: payload.review_id,
+    tier,
+    result: payload.result,
+    votes: payload.votes,
+    receipt,
+    note: "Save the receipt with the task and every piece (with its name, if you gave one): anyone holding them can check the signature, task_sha256, each piece's sha256 and chars, and pieces_sha256. The service keeps no copy of the review; the receipt you hold is the only record. It is not a guarantee the work is correct.",
+  });
+}
+
+app.post("/review-3x2", (c) => handleMultiReview(c, "review-3x2"));
+app.post("/review-3x3", (c) => handleMultiReview(c, "review-3x3"));
+
 // ---------- free sealed review (the operator pays; small daily allowance) ----------
 
 /** Free reviews: a few per address per UTC day, inside one daily budget across everyone (counted at list price).
@@ -1175,8 +1366,31 @@ app.get("/reviewers", async (c) => {
     system_prompt: REVIEW_SYSTEM,
     message_format: REVIEW_MESSAGE_FORMAT,
     privacy: "The task and output are sent to the AI companies running the reviewers (Anthropic; Google and OpenAI through OpenRouter for review-3). The receipt holds only their SHA-256 hashes, but reviewers' issues and reasoning may quote the output. Nothing is stored by the service.",
+    multi_part: await multiPartInfo(c.env),
   });
 });
+
+/** What GET /reviewers says about the multi-part tiers. */
+async function multiPartInfo(env: Env) {
+  const mp = multiPrices(env);
+  const m = multiModels(env);
+  const prompt = { format_version: MULTI_FORMAT_VERSION, system_prompt: MULTI_SYSTEM, message_format: MULTI_MESSAGE_FORMAT };
+  return {
+    status: !multiOnForAll(env) ? "not open yet" : m.missing.length ? "closed (a company has no eligible model)" : "on",
+    tiers: { "review-3x2": { price: mp["review-3x2"], pieces: 2, max_issues: MULTI_MAX_ISSUES[2] }, "review-3x3": { price: mp["review-3x3"], pieces: 3, max_issues: MULTI_MAX_ISSUES[3] } },
+    how: "POST /review-3x2 or /review-3x3 (x402 paid only; no free allowance) with {task, pieces: [{name?, text}], title?, criteria?, panel?}. Three reviewers from three companies each read every piece in one call. If a reviewer fails, nothing is charged, and the failure uses up as many of the address's allowed failures as the review has pieces.",
+    limits: { task: `10 to ${REVIEW_LIMITS.maxTask}`, piece_text: `1 to ${MULTI_LIMITS.maxPiece}`, all_pieces: MULTI_LIMITS.maxTotal, piece_name: `optional, 1 to ${MULTI_LIMITS.maxName} printable characters, no line breaks`, body_bytes: MULTI_LIMITS.maxBodyBytes, counting: "characters are UTF-16 code units (JavaScript .length)" },
+    eligible_models: m.eligible,
+    drawn_from: m.drawable,
+    panel: 'Default and "rotate": one model from each of three companies, drawn from drawn_from. An exact list or agreed sets must name eligible models from three different companies. Light models (Haiku) and opt-in models are refused.',
+    max_tokens: Object.fromEntries(m.eligible.map((x) => [x, multiMaxTokens(x, env)])),
+    timeouts: "Each reviewer call is limited to 120 seconds (or the reviewer's remaining time less 5 seconds). A second try starts only with at least 60 seconds left. Each reviewer has 240 seconds in all, and the three run in parallel, inside the 300-second payment authorization.",
+    issues: 'Each issue starts with "[piece N]" or "[all]" (a hint, not checked). The service keeps the first 10 (2 pieces) or 15 (3 pieces) issues of each vote; issues_dropped in each signed vote says how many it left out.',
+    receipt: `receipt_format "${MULTI_RECEIPT_FORMAT}": every review-3 field (task_sha256 included) except output_sha256, replaced by pieces [{index, name, sha256, chars}] and pieces_sha256 = sha256 of the canonical JSON of pieces. Older clients refuse these receipts.`,
+    prompt_sha256: await sha256Hex(`${prompt.format_version}\n${prompt.system_prompt}\n${prompt.message_format}`),
+    ...prompt,
+  };
+}
 
 // Current signing key plus every retired key, so old receipts stay verifiable forever.
 app.get("/pubkey", async (c) => {

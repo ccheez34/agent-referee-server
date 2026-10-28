@@ -189,9 +189,17 @@ export type ReviewVote = {
   model_reported?: string; // the model id the provider says answered (can differ from an alias)
   scores?: Record<string, number>; // criterion -> 0..10 (only with criteria)
   total?: number; // weighted total, computed by the service
+  issues_dropped?: number; // multi-part tiers only, always present there: usable issues left out by the issue cap
 };
 
 export function parseReview(text: string, criteria?: Criterion[]): Omit<ReviewVote, "reviewer" | "model"> {
+  const { dropped: _dropped, ...v } = parseReviewCapped(text, criteria, REVIEW_LIMITS.maxIssues);
+  return v;
+}
+
+/** parseReview with a chosen issue cap, also saying how many usable issues the cap left out (the multi-part tiers
+ * record that in the signed vote, so nothing disappears silently). */
+export function parseReviewCapped(text: string, criteria: Criterion[] | undefined, maxIssues: number): Omit<ReviewVote, "reviewer" | "model"> & { dropped: number } {
   let parsed: any;
   try {
     parsed = JSON.parse(text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1));
@@ -201,10 +209,8 @@ export function parseReview(text: string, criteria?: Criterion[]): Omit<ReviewVo
   const verdict = String(parsed?.verdict ?? "").trim().toLowerCase();
   if (!(REVIEW_VERDICTS as readonly string[]).includes(verdict)) throw new Error("reviewer returned an invalid verdict");
   if (typeof parsed.reasoning !== "string") throw new Error("reviewer returned no reasoning");
-  const issues = (Array.isArray(parsed.issues) ? parsed.issues : [])
-    .filter((x: unknown) => typeof x === "string" && x.trim())
-    .slice(0, REVIEW_LIMITS.maxIssues)
-    .map((x: string) => x.slice(0, REVIEW_LIMITS.maxIssueLen));
+  const usable = (Array.isArray(parsed.issues) ? parsed.issues : []).filter((x: unknown) => typeof x === "string" && x.trim());
+  const issues = usable.slice(0, maxIssues).map((x: string) => x.slice(0, REVIEW_LIMITS.maxIssueLen));
   let scores: Record<string, number> | undefined;
   if (criteria?.length && verdict !== "cannot_assess") {
     const s = parsed.scores;
@@ -223,8 +229,22 @@ export function parseReview(text: string, criteria?: Criterion[]): Omit<ReviewVo
     issues,
     reasoning: parsed.reasoning.slice(0, 2000),
     ...(scores ? { scores } : {}),
+    dropped: usable.length - issues.length,
   };
 }
+
+/** How a reviewer is asked and answered, when it differs from the single-piece review (the multi-part tiers). */
+export type ReviewerHow = {
+  system: string;
+  user: string;
+  anthropicMaxTokens: number;
+  openRouterMaxTokens: number;
+  maxTries: number;
+  minTryMs: number;
+  /** Taken off the time left when capping a call's limit (the remaining budget less this). */
+  callMarginMs: number;
+  parse: (text: string) => Omit<ReviewVote, "reviewer" | "model">;
+};
 
 /** Per-call limit. Each call's limit is also capped at what's left of REVIEWER_BUDGET_MS, so all tries end inside it. */
 export const REVIEWER_CALL_TIMEOUT_MS = 100_000;
@@ -258,23 +278,29 @@ export async function runOneReviewer(
   reviewer: number,
   input: ReviewInput,
   timeoutMs = REVIEWER_CALL_TIMEOUT_MS,
-  opts: { budgetMs?: number; sleep?: (ms: number) => Promise<unknown>; now?: () => number; observe?: (o: CallObservation) => void; onCutOff?: (c: CutOff) => void } = {},
+  opts: { budgetMs?: number; sleep?: (ms: number) => Promise<unknown>; now?: () => number; observe?: (o: CallObservation) => void; onCutOff?: (c: CutOff) => void; how?: ReviewerHow } = {},
 ): Promise<ReviewVote> {
   const observe = opts.observe ?? (() => {});
-  const user = buildReviewMessage(input.task, input.output, input.title, input.criteria);
+  const how = opts.how;
+  const system = how?.system ?? REVIEW_SYSTEM;
+  const user = how?.user ?? buildReviewMessage(input.task, input.output, input.title, input.criteria);
+  const maxTries = how?.maxTries ?? REVIEWER_MAX_TRIES;
+  const minTryMs = how?.minTryMs ?? REVIEWER_MIN_TRY_MS;
+  const parse = how?.parse ?? ((text: string) => parseReview(text, input.criteria));
   const now = opts.now ?? Date.now;
   const sleep = opts.sleep ?? sleepMs;
   const deadline = now() + (opts.budgetMs ?? REVIEWER_BUDGET_MS);
   let lastErr = "unknown error";
   let hangsOrBadAnswers = 0;
-  for (let tryNumber = 1; tryNumber <= REVIEWER_MAX_TRIES; tryNumber++) {
+  for (let tryNumber = 1; tryNumber <= maxTries; tryNumber++) {
     const left = deadline - now();
-    if (left < REVIEWER_MIN_TRY_MS && tryNumber > 1) break; // not enough time left for a real try
-    // Each call's limit is capped at the time left, so the tries together stay inside the budget.
-    const callTimeoutMs = Math.min(timeoutMs, Math.max(left, 1));
+    if (left < minTryMs && tryNumber > 1) break; // not enough time left for a real try
+    // Each call's limit is capped at the time left (less a margin, for the multi-part tiers), so the tries together
+    // stay inside the budget.
+    const callTimeoutMs = Math.min(timeoutMs, Math.max(left - (how?.callMarginMs ?? 0), 1));
     let res: Response;
     try {
-      res = await callModel(keys, model, REVIEW_SYSTEM, user, AbortSignal.timeout(callTimeoutMs), REVIEWER_MAX_TOKENS);
+      res = await callModel(keys, model, system, user, AbortSignal.timeout(callTimeoutMs), how?.anthropicMaxTokens ?? REVIEWER_MAX_TOKENS, how?.openRouterMaxTokens);
     } catch (e: any) {
       const timedOut = e?.name === "TimeoutError" || e?.name === "AbortError";
       observe({ kind: timedOut ? "timeout" : "network" });
@@ -310,9 +336,10 @@ export async function runOneReviewer(
       const cutOff = data?.stop_reason === "max_tokens" || data?.choices?.[0]?.finish_reason === "length";
       let v;
       try {
-        v = parseReview(answerText(model, data), input.criteria);
+        v = parse(answerText(model, data));
       } catch (pe: any) {
-        if (cutOff) opts.onCutOff?.({ where: "review", model, max_tokens: answerTokens(model, REVIEWER_MAX_TOKENS), prompt_chars: REVIEW_SYSTEM.length + user.length, try_number: tryNumber });
+        if (cutOff)
+          opts.onCutOff?.({ where: "review", model, max_tokens: answerTokens(model, how?.anthropicMaxTokens ?? REVIEWER_MAX_TOKENS, how?.openRouterMaxTokens), prompt_chars: system.length + user.length, try_number: tryNumber });
         throw new Error(cutOff ? "reviewer ran out of tokens before finishing its answer" : pe?.message ?? "reviewer returned unusable output");
       }
       const vote: ReviewVote = { reviewer, model, ...v };
@@ -331,9 +358,9 @@ export async function runOneReviewer(
 
   /** Waits before the next try if there's time for it after the wait. Returns false when there isn't. */
   async function waitBeforeRetry(tryNumber: number, retryAfter: string | null): Promise<boolean> {
-    if (tryNumber >= REVIEWER_MAX_TRIES) return false;
+    if (tryNumber >= maxTries) return false;
     const wait = retryDelayMs(tryNumber, retryAfter);
-    if (deadline - now() - wait < REVIEWER_MIN_TRY_MS) return false;
+    if (deadline - now() - wait < minTryMs) return false;
     await sleep(wait);
     return true;
   }

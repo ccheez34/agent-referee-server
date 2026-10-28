@@ -439,10 +439,20 @@ function parseVote(text: string, seats: string[], criteria: Criterion[] | undefi
 export const JUDGE_MAX_TOKENS = 4000;
 /** The answer budget (max_tokens) a model gets: OpenRouter models a fixed 10,000; Claude models `anthropicMaxTokens`. */
 export const OPENROUTER_MAX_TOKENS = 10000;
-export const answerTokens = (model: string, anthropicMaxTokens = JUDGE_MAX_TOKENS) => (viaOpenRouter(model) ? OPENROUTER_MAX_TOKENS : anthropicMaxTokens);
+export const answerTokens = (model: string, anthropicMaxTokens = JUDGE_MAX_TOKENS, openRouterMaxTokens = OPENROUTER_MAX_TOKENS) =>
+  viaOpenRouter(model) ? openRouterMaxTokens : anthropicMaxTokens;
 
-/** anthropicMaxTokens: the answer budget for Claude models (judges and reviewers both get 4000). */
-export async function callModel(keys: JudgeKeys, model: string, system: string, user: string, signal?: AbortSignal, anthropicMaxTokens = JUDGE_MAX_TOKENS): Promise<Response> {
+/** anthropicMaxTokens: the answer budget for Claude models; openRouterMaxTokens: for OpenRouter models (the multi-part
+ * review tiers raise both to 12,000). */
+export async function callModel(
+  keys: JudgeKeys,
+  model: string,
+  system: string,
+  user: string,
+  signal?: AbortSignal,
+  anthropicMaxTokens = JUDGE_MAX_TOKENS,
+  openRouterMaxTokens = OPENROUTER_MAX_TOKENS,
+): Promise<Response> {
   if (keys.fake) return fakeModelResponse(keys.fake, model, user, signal);
   if (viaOpenRouter(model)) {
     return fetch("https://openrouter.ai/api/v1/chat/completions", {
@@ -457,7 +467,7 @@ export async function callModel(keys: JudgeKeys, model: string, system: string, 
         model,
         // Reasoning models spend part of max_tokens thinking; keep effort low and leave room for the JSON answer.
         // 6,000 wasn't enough for DeepSeek V4 Pro or Mistral Large 4 on a 12,000-character code review (Oct 28).
-        max_tokens: OPENROUTER_MAX_TOKENS,
+        max_tokens: openRouterMaxTokens,
         reasoning: { effort: "low", exclude: true },
         ...(privacyRouting(model) ? { provider: { data_collection: "deny" } } : {}),
         messages: [

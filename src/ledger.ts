@@ -213,7 +213,8 @@ export class Ledger {
     }
 
     if (action === "review-fails") {
-      // body: { caller, limit, global_limit?, parallel?, reserve?, record?, record_ok?, release_token? } -> counts failed paid reviews per address today (UTC).
+      // body: { caller, limit, global_limit?, parallel?, reserve?, record?, record_ok?, release_token?, weight? } -> counts failed paid reviews per address today (UTC).
+      // weight (1 to 3, default 1): a multi-part review counts as many failures, and holds as much in-flight room, as it has pieces.
       // A failed review isn't charged, so this stops one address from getting free AI calls by making reviews fail on
       // purpose. The caller is a daily-salted one-way hash (see index.ts); no IP address is stored. One small key per
       // caller per day (not one growing map), and the Worker spreads callers over 16 ledger shards.
@@ -226,7 +227,8 @@ export class Ledger {
       // paid reviews can't all pass the check before any failure is written. A reservation left by a crashed
       // request expires after 5 minutes (longer than any review).
       const ik = `rfi:${day}:${who}`;
-      let inflight = who ? ((await st.get<{ id: string; t: number }[]>(ik)) ?? []).filter((r) => this.now() - r.t < 300_000) : [];
+      const weight = Number.isInteger(body?.weight) && body.weight >= 1 && body.weight <= 3 ? (body.weight as number) : 1;
+      let inflight = who ? ((await st.get<{ id: string; t: number; w?: number }[]>(ik)) ?? []).filter((r) => this.now() - r.t < 300_000) : [];
       if (typeof body?.release_token === "string" && who) {
         inflight = inflight.filter((r) => r.id !== body.release_token);
         await st.put(ik, inflight);
@@ -236,8 +238,10 @@ export class Ledger {
       let total = (await st.get<number>(`rft:${day}`)) ?? 0;
       let count = who ? ((await st.get<number>(`rf:${day}:${who}`)) ?? 0) : 0;
       if (body?.record && who) {
-        await st.put(`rft:${day}`, ++total);
-        await st.put(`rf:${day}:${who}`, ++count);
+        total += weight;
+        count += weight;
+        await st.put(`rft:${day}`, total);
+        await st.put(`rf:${day}:${who}`, count);
       }
       // Each successful (paid) review today earns one more allowed failure, so a paying user isn't locked out
       // by a bad provider hour, while free failures stay capped.
@@ -250,16 +254,18 @@ export class Ledger {
       // every review fail gets `parallel` extra free failures once, after which its recorded failures block it.
       const parallel = Number.isFinite(body?.parallel) ? Math.max(0, body.parallel) : 0;
       const failBlocked = count >= limit + ok;
-      const inflightBlocked = count + inflight.length >= limit + ok + parallel;
+      const inflightWeight = inflight.reduce((sum, r) => sum + (r.w ?? 1), 0);
+      // A new reservation needs room for its own weight (a 3-piece review could become 3 failures).
+      const inflightBlocked = count + inflightWeight + (body?.reserve ? weight - 1 : 0) >= limit + ok + parallel;
       const blocked = failBlocked || inflightBlocked || overGlobal;
       const reason = failBlocked ? "fail_limit" : overGlobal ? "global_ceiling" : inflightBlocked ? "too_many_in_flight" : undefined;
       let token: string | undefined;
       if (body?.reserve && who && !blocked) {
         token = crypto.randomUUID();
-        inflight.push({ id: token, t: this.now() });
+        inflight.push(weight > 1 ? { id: token, t: this.now(), w: weight } : { id: token, t: this.now() });
         await st.put(ik, inflight);
       }
-      return json(200, { count, ok, limit, total, inflight: inflight.length, blocked, ...(reason ? { reason } : {}), ...(token ? { token } : {}) });
+      return json(200, { count, ok, limit, total, inflight: inflight.reduce((sum, r) => sum + (r.w ?? 1), 0), blocked, ...(reason ? { reason } : {}), ...(token ? { token } : {}) });
     }
 
     if (action === "demo-quota") {
