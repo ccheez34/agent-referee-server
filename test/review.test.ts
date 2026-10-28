@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  buildReviewMessage, decideReview, parseReview, reviewCommitment, reviewModels, reviewPayload, runOneReviewer, validateReview, REVIEW_LIMITS,
+  buildReviewMessage, decideReview, longReviewRule, parseReview, reviewCommitment, reviewModels, reviewPayload, runOneReviewer, validateReview, REVIEW_LIMITS,
   REVIEWER_BUDGET_MS, REVIEWER_MAX_TRIES, REVIEWER_MAX_TOKENS, REVIEWER_MIN_TRY_MS, retryDelayMs,
 } from "../src/review.ts";
 import { signReceipt } from "../src/receipt.ts";
@@ -350,4 +350,31 @@ test("review-3 with panel: rotate draws one reviewer per company; the client che
   await assert.rejects(reviewCommitment("review-3", {}, ["claude-opus-5-5", "openai/gpt-6-luna", "nope/model"]), /Not in the approved model pool/);
   assert.equal(validateReview({ task: "A task long enough", output: "ok", panel: ["claude-opus-5-5"] }, "review-3").ok, false);
   assert.equal(validateReview({ task: "A task long enough", output: "ok", panel: ["claude-sonnet-5-5"] }, "review").ok, true);
+});
+
+test("long inputs: rotate leaves light models (Haiku) out, and naming one is refused before payment", async () => {
+  // 200 draws of a short and a long input: Haiku can appear for short ones, never for long ones.
+  let seq = 0;
+  const rand = () => ((seq = (seq * 9301 + 49297) % 233280) / 233280);
+  const seenShort = new Set<string>(), seenLong = new Set<string>();
+  for (let i = 0; i < 200; i++) {
+    for (const m of (await reviewCommitment("review-3", {}, "rotate", rand, 100)).models) seenShort.add(m);
+    const long = await reviewCommitment("review-3", {}, "rotate", rand, 12000);
+    for (const m of long.models) seenLong.add(m);
+    assert.equal(new Set(long.models.map((m) => (m.includes("/") ? m.split("/")[0] : "anthropic"))).size, 3);
+    assert.ok(!(long.panel_selection?.pool ?? []).includes("claude-haiku-5-5"), "the receipt's pool shows what the draw used");
+  }
+  assert.ok(seenShort.has("claude-haiku-5-5"));
+  assert.ok(!seenLong.has("claude-haiku-5-5"));
+  // Named explicitly (an exact list or an agreed set) with a long input: refused, with the reason and the limit.
+  const ds = "deepseek/deepseek-v4-pro-0813";
+  await assert.rejects(reviewCommitment("review-3", {}, [ds, "claude-haiku-5-5", "openai/gpt-6-luna"], undefined, 12000), /claude-haiku-5-5 can't reliably review inputs this long \(task \+ output is 12000 characters; the limit for this model is 8000\)/);
+  await assert.rejects(reviewCommitment("review", {}, [["claude-haiku-5-5"], ["claude-sonnet-5-5"]], undefined, 9000), /can't reliably review/);
+  // Short inputs, other models, and the default panels are unaffected.
+  assert.deepEqual((await reviewCommitment("review-3", {}, [ds, "claude-haiku-5-5", "openai/gpt-6-luna"], undefined, 500)).models, [ds, "claude-haiku-5-5", "openai/gpt-6-luna"]);
+  assert.deepEqual((await reviewCommitment("review-3", {}, [ds, "claude-opus-5-5", "openai/gpt-6-luna"], undefined, 12000)).models, [ds, "claude-opus-5-5", "openai/gpt-6-luna"]);
+  assert.equal((await reviewCommitment("review-3", env, undefined, undefined, 12000)).models.length, 3);
+  // The limit and the light list are settings.
+  assert.deepEqual(longReviewRule({ LONG_REVIEW_CHARS: "5000", LIGHT_REVIEW_MODELS: "claude-haiku-5-5, google/gemini-3.7-flash" }), { max_chars_for_light_models: 5000, light_models: ["claude-haiku-5-5", "google/gemini-3.7-flash"] });
+  assert.deepEqual((await reviewCommitment("review-3", { LONG_REVIEW_CHARS: "20000" }, [ds, "claude-haiku-5-5", "openai/gpt-6-luna"], undefined, 12000)).models.length, 3);
 });

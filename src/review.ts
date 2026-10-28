@@ -98,9 +98,45 @@ export type ReviewCommitment = {
   panel_selection?: PanelSelection; // how the reviewers were chosen, when the request asked for something other than the default
 };
 
-export async function reviewCommitment(tier: ReviewTier, env: PanelEnv & { REVIEW_MODEL?: string; MODEL_POOL?: string; OPT_IN_MODELS?: string }, panel?: PanelRequest, rand?: () => number): Promise<ReviewCommitment> {
+/**
+ * Long reviews and small models: a light model (default Claude Haiku) can run out of room on a long task + output
+ * and return no usable verdict (uncharged, but the agent gets nothing). So when task + output is longer than
+ * LONG_REVIEW_CHARS (default 8,000), random draws ("rotate") leave light models out, and a request that names one
+ * itself is refused before payment with a clear message.
+ */
+export const DEFAULT_LONG_REVIEW_CHARS = 8000;
+export const DEFAULT_LIGHT_REVIEW_MODELS = "claude-haiku-5-5";
+type LongEnv = { LONG_REVIEW_CHARS?: string; LIGHT_REVIEW_MODELS?: string };
+export function longReviewRule(env: LongEnv) {
+  const n = Number(env.LONG_REVIEW_CHARS);
+  return {
+    max_chars_for_light_models: Number.isFinite(n) && n > 0 ? n : DEFAULT_LONG_REVIEW_CHARS,
+    light_models: String(env.LIGHT_REVIEW_MODELS ?? DEFAULT_LIGHT_REVIEW_MODELS).split(",").map((m) => m.trim()).filter(Boolean),
+  };
+}
+
+export async function reviewCommitment(
+  tier: ReviewTier,
+  env: PanelEnv & LongEnv & { REVIEW_MODEL?: string; MODEL_POOL?: string; OPT_IN_MODELS?: string },
+  panel?: PanelRequest,
+  rand?: () => number,
+  inputChars = 0,
+): Promise<ReviewCommitment> {
+  const rule = longReviewRule(env);
+  const long = inputChars > rule.max_chars_for_light_models;
+  const light = (m: string) => rule.light_models.includes(m);
+  let pool = modelPool(env);
+  if (long) {
+    pool = pool.filter((m) => !light(m));
+    const named = panel === "rotate" || panel === undefined ? [] : (Array.isArray(panel) ? (panel as any[]).flat() : Object.values((panel as any).picks ?? {})).map(String);
+    const tooSmall = [...new Set(named.filter(light))];
+    if (tooSmall.length)
+      throw new Error(
+        `${tooSmall.join(", ")} can't reliably review inputs this long (task + output is ${inputChars} characters; the limit for ${tooSmall.length > 1 ? "these models" : "this model"} is ${rule.max_chars_for_light_models}). Choose other reviewers, use "rotate" (it leaves them out for long inputs), or shorten the input.`,
+      );
+  }
   // Throws a readable Error if the request names a model outside the pool.
-  const picked = panel ? choosePanel(panel, REVIEW_SIZE[tier], modelPool(env), rand, allowedModels(env)) : undefined;
+  const picked = panel ? choosePanel(panel, REVIEW_SIZE[tier], pool, rand, allowedModels(env)) : undefined;
   return {
     ...(picked ? { panel_selection: picked.selection } : {}),
     models: picked ? picked.models : reviewModels(tier, env),

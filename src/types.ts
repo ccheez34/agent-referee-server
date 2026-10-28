@@ -9,6 +9,8 @@ export interface Env {
   NETWORK: string; // "base-sepolia" for testing, "base" for real money
   FACILITATOR_URL?: string; // defaults to https://x402.org/facilitator (testnet only)
   PAYMENTS_ENABLED?: string; // "false" turns the paywall off for local testing
+  LONG_REVIEW_CHARS?: string; // task + output longer than this: light models (LIGHT_REVIEW_MODELS) sit out of reviews (default 8000)
+  LIGHT_REVIEW_MODELS?: string; // comma list, default "claude-haiku-5-5"
   PAID_PAUSED?: string; // "true" refuses paid matches (before any payment) and points agents to demo mode
   REVIEWS_PAUSED?: string; // "true" refuses sealed reviews only (before any payment)
   SETTLE_FAIL_PAUSE_AFTER?: string; // payments failing to settle after delivered work, per hour, before paid routes pause (default 5)

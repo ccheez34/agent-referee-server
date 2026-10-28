@@ -10,7 +10,7 @@ import type { Env } from "./types.ts";
 import { payaiToken } from "./payai.ts";
 import { signReceipt } from "./receipt.ts";
 import {
-  REVIEW_LIMITS, REVIEW_MESSAGE_FORMAT, REVIEW_SYSTEM, REVIEW_VERDICTS, REVIEWER_BUDGET_MS, missingReviewKey, reviewCommitment, reviewModels, reviewPayload, runOneReviewer, validateReview, type ReviewTier,
+  REVIEW_LIMITS, REVIEW_MESSAGE_FORMAT, longReviewRule, REVIEW_SYSTEM, REVIEW_VERDICTS, REVIEWER_BUDGET_MS, missingReviewKey, reviewCommitment, reviewModels, reviewPayload, runOneReviewer, validateReview, type ReviewTier,
 } from "./review.ts";
 import { Gate, GATE_MAX_WAIT_MS } from "./gate.ts";
 import { Health, adminOk, evaluateHealth, healthEvents, listUnjudged, markRefunded, pauseState, recordEvent, recordSettleFailure, setPause, walletBlocked } from "./health.ts";
@@ -221,7 +221,7 @@ async function reviewGuard(c: any, next: any) {
   if (!v.ok) return err(400, `${v.error} Nothing was charged.`);
   let commitment;
   try {
-    commitment = await reviewCommitment(tier, c.env, v.value.panel);
+    commitment = await reviewCommitment(tier, c.env, v.value.panel, undefined, v.value.task.length + v.value.output.length);
   } catch (e: any) {
     return err(400, `${String(e?.message ?? e)} Nothing was charged.`);
   }
@@ -659,6 +659,7 @@ app.get("/reviewers", async (c) => {
     decoding: "Model weights and sampling are controlled by each AI provider and are not pinned. Everything the service controls (the prompt, the decision rule, the panel's models and structure) is pinned and recorded in the receipt.",
     limits_criteria: "Up to 8 criteria, names up to 60 characters, whole-number weights 1-100. Title up to 200 characters.",
     limits: REVIEW_LIMITS,
+    long_inputs: { ...longReviewRule(c.env), rule: "When task + output is longer than max_chars_for_light_models, \"rotate\" leaves the light models out, and a request naming one is refused before payment." },
     fingerprint_formula: "sha256_hex(format_version + \"\\n\" + system_prompt + \"\\n\" + message_format)",
     system_prompt: REVIEW_SYSTEM,
     message_format: REVIEW_MESSAGE_FORMAT,
