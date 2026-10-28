@@ -364,7 +364,7 @@ t("GET /admin/stats: counts of reviews done, failed and refused, and today's fre
   assert.equal(today.ext_ok_review, 1);
   assert.equal(r.body.last_7_days.length, 7);
   assert.deepEqual(r.body.free_budget_today.public, { spent_usd: 0.2, budget_usd: 3 }, "3 done + 1 failed (a called reviewer keeps its cost)");
-  assert.deepEqual(r.body.free_budget_today.chatgpt, { spent_usd: 0.05, budget_usd: 1 });
+  assert.deepEqual(r.body.free_budget_today.ext, { spent_usd: 0.05, budget_usd: 1, note: "free reviews from the hosted MCP server (ChatGPT)" });
   assert.ok(!JSON.stringify(r.body).includes("198.51.100"), "no addresses");
   assert.ok(!JSON.stringify(r.body).includes("user-1"), "no user ids");
 });

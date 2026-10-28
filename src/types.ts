@@ -71,7 +71,7 @@ export interface DOStorage {
   deleteAll(): Promise<void>;
   setAlarm(time: number): Promise<void>;
   // Present on real Durable Objects; optional so simple test mocks still fit.
-  list?<T = unknown>(opts: { prefix?: string; limit?: number }): Promise<Map<string, T>>;
+  list?<T = unknown>(opts: { prefix?: string; start?: string; limit?: number }): Promise<Map<string, T>>;
   delete?(keys: string | string[]): Promise<boolean | number>;
 }
 export interface DOState {

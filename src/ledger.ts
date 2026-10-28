@@ -154,7 +154,7 @@ export class Ledger {
     for (const prefix of ["rf:", "ro:", "rft:", "rfi:", "dm:", "dmc:", "fr:", "frb:", "frt:", "reviewfail:", "reviewok:", "reviewfailtotal:", "demo:", "demoip:"]) {
       while (deleted < 5_000) {
         const found = await st.list({ prefix, limit: 128 });
-        const old = [...found.keys()].filter((k) => !k.slice(prefix.length).startsWith(today) || prefix.startsWith("review") || prefix.startsWith("demo"));
+        const old = [...found.keys()].filter((k) => !k.slice(prefix.length).startsWith(today) || prefix.startsWith("review") || prefix.startsWith("demo")).slice(0, 5_000 - deleted);
         if (!old.length) break;
         await st.delete(old);
         deleted += old.length;
@@ -165,7 +165,7 @@ export class Ledger {
     const cutoff = new Date(Date.parse(`${today}T00:00:00Z`) - 8 * 86_400_000).toISOString().slice(0, 10);
     while (deleted < 5_000) {
       const found = await st.list({ prefix: "st:", limit: 128 });
-      const old = [...found.keys()].filter((k) => k.slice(3, 13) < cutoff);
+      const old = [...found.keys()].filter((k) => k.slice(3, 13) < cutoff).slice(0, 5_000 - deleted);
       if (!old.length) break;
       await st.delete(old);
       deleted += old.length;
@@ -345,7 +345,8 @@ export class Ledger {
       const from = new Date(Date.parse(`${today}T00:00:00Z`) - 6 * 86_400_000).toISOString().slice(0, 10);
       const byDay: Record<string, Record<string, number>> = {};
       for (let i = 0; i < 7; i++) byDay[new Date(Date.parse(`${today}T00:00:00Z`) - i * 86_400_000).toISOString().slice(0, 10)] = {};
-      const found = st.list ? await st.list<number>({ prefix: "st:" }) : new Map<string, number>();
+      // Only the 7 days shown (the alarm deletes older counts; at most a few hundred keys).
+      const found = st.list ? await st.list<number>({ prefix: "st:", start: `st:${from}`, limit: 2_000 }) : new Map<string, number>();
       for (const [k, v] of found) {
         const day = k.slice(3, 13);
         if (day < from || day > today || !byDay[day]) continue;

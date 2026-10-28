@@ -161,13 +161,13 @@ const busy = (retryAfterS: number, what: string) =>
     { status: 503, headers: { "content-type": "application/json", "retry-after": String(retryAfterS) } },
   );
 
-/** Runs after the response when the platform allows it (waitUntil), otherwise right away. */
 /** Adds one to today's usage count for GET /admin/stats. Counts only, never who; never delays or fails a request. */
 function stat(c: any, name: string) {
   if (!c.env.LEDGER) return;
   void inBackground(c, ledgerJson(c.env, undefined, "stat", { name }));
 }
 
+/** Runs after the response when the platform allows it (waitUntil), otherwise right away. */
 async function inBackground(c: any, p: Promise<unknown>) {
   const safe = p.catch((e) => console.error(`background task failed: ${String(e?.message ?? e).slice(0, 200)}`));
   try {
@@ -512,18 +512,20 @@ app.get("/admin/stats", async (c) => {
   let s: any;
   try {
     s = await ledgerJson(c.env, undefined, "stats", {});
+    if (!Array.isArray(s?.days) || !s.days.length) throw new Error("unexpected answer");
   } catch (e: any) {
-    return err(503, `Stats can't be read right now (${String(e?.message ?? e).slice(0, 100)}).`);
+    console.error(`admin stats: ${String(e?.message ?? e).slice(0, 200)}`);
+    return err(503, "Stats can't be read right now; try again in a minute.");
   }
-  const usd = (micro: number) => Math.round(micro / 10_000) / 100;
+  const usd = (micro: unknown) => (Number.isFinite(micro) ? Math.round((micro as number) / 10_000) / 100 : 0);
   const pub = freeReviewConfig(c.env);
   const ext = freeReviewConfig(c.env, "ext");
   return c.json({
     today: s.days[0],
     last_7_days: s.days,
     free_budget_today: {
-      public: { spent_usd: usd(s.free_spent_micro?.public ?? 0), budget_usd: usd(pub.budgetMicro) },
-      chatgpt: { spent_usd: usd(s.free_spent_micro?.ext ?? 0), budget_usd: usd(ext.budgetMicro) },
+      public: { spent_usd: usd(s.free_spent_micro?.public), budget_usd: usd(pub.budgetMicro) },
+      ext: { spent_usd: usd(s.free_spent_micro?.ext), budget_usd: usd(ext.budgetMicro), note: "free reviews from the hosted MCP server (ChatGPT)" },
     },
     key: "free_* = free reviews from the public routes; ext_* = free reviews from the hosted MCP server (ChatGPT); paid_* = paid reviews. ok_review / ok_review3 = completed, failed = a reviewer failed (not used / not charged), busy = at capacity, refused_caller = that address or user had used today's allowance, refused_budget = the shared budget was used up, bad_input = the request was rejected. Spending is counted at list price, not the real AI cost.",
   });
