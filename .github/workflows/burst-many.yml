@@ -13,7 +13,7 @@ jobs:
       start: ${{ steps.t.outputs.start }}
     steps:
       - id: t
-        run: echo "start=$(( ($(date +%s) + 150) * 1000 ))" >> "$GITHUB_OUTPUT"
+        run: echo "start=$(( ($(date +%s) + 420) * 1000 ))" >> "$GITHUB_OUTPUT"
   burst:
     needs: plan
     runs-on: ubuntu-latest

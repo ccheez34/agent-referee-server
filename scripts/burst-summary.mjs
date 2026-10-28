@@ -4,9 +4,14 @@ import { join } from "node:path";
 const dir = process.argv[2] || "results";
 const all = [];
 let runners = 0;
+const starts = [];
+const late = [];
 for (const d of await readdir(dir)) {
   const j = JSON.parse(await readFile(join(dir, d, "burst-result.json"), "utf8"));
   runners++;
+  starts.push(j.start);
+  const first = Math.min(...j.results.map((r) => r.sent));
+  if (first - j.start > 1000) late.push(`#${j.runner} +${((first - j.start) / 1000).toFixed(0)} s`);
   all.push(...j.results);
 }
 const by = {};
@@ -25,6 +30,7 @@ const lines = [
   `## Many-machine burst`,
   `- Runners (separate machines): ${runners}; requests: ${all.length}`,
   `- Sent within: ${((sent[sent.length - 1] - sent[0]) / 1000).toFixed(2)} s (first to last request leaving its machine); 95% within ${((pct(sent, 97.5) - pct(sent, 2.5)) / 1000).toFixed(2)} s`,
+  `- Requests sent within 1 s of the planned start: ${all.filter((r) => Math.abs(r.sent - starts[0]) <= 1000).length}; late runners: ${late.length ? late.join(", ") : "none"}`,
   `- Answers: ${JSON.stringify(by)}`,
   `- Time to answer: p50 ${pct(ms, 50)} ms, p95 ${pct(ms, 95)} ms, p99 ${pct(ms, 99)} ms, max ${ms[ms.length - 1]} ms`,
   `- Unexpected answers: ${unexpected.length}${examples.length ? " (" + examples.join("; ") + ")" : ""}`,
