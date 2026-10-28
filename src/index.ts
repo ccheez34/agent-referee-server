@@ -736,6 +736,7 @@ async function handleFreeReview(c: any, tier: ReviewTier) {
   let lease: SlotLease;
   const input = v.value;
   const started = Date.now();
+  let called = false; // set once any reviewer may have been called (and cost money)
   try {
     const slots = await acquireSlots(c.env, commitment.models, { leaseMs: REVIEWER_BUDGET_MS + 30_000, waitMs: GATE_MAX_WAIT_MS });
     if (!slots.ok) {
@@ -744,22 +745,31 @@ async function handleFreeReview(c: any, tier: ReviewTier) {
     }
     lease = slots.lease;
     try {
-      settled = await runReviewers(c, commitment, input, lease, Math.max(30_000, REVIEWER_BUDGET_MS - (started - t0)));
+      // The same time budget as a paid review (there's no payment window to respect here).
+      const budgetMs = reviewBudget({ budgetMs: REVIEWER_BUDGET_MS, elapsedMs: started - t0 });
+      if (budgetMs === null) {
+        await release(true);
+        return busy(10, "not enough time was left for a full review. Your free review wasn't used.");
+      }
+      called = true;
+      settled = await runReviewers(c, commitment, input, lease, budgetMs);
     } finally {
       await lease.release();
     }
   } catch (e: any) {
-    // Anything unexpected after the reservation: the person keeps their review; the budget keeps its share, to be safe.
-    await release(false);
+    // Anything unexpected after the reservation: the person keeps their review. The budget is refunded only if
+    // no reviewer was called yet.
+    await release(!called);
     throw e;
   }
   const failed = settled.find((r) => r.status === "rejected") as PromiseRejectedResult | undefined;
   if (failed) {
     const msg = String(failed.reason?.message ?? failed.reason);
     console.error(`free review ${tier} failed after ${Date.now() - started}ms: ${msg.slice(0, 200)}`);
-    // The person gets their review back. The budget keeps the whole reservation: in a review-3, other reviewers
-    // may already have answered (and cost money) even when one was stopped by a provider's account limit.
-    await release(false);
+    // The person gets their review back. The budget is refunded only when a provider's account limit stopped a
+    // single-reviewer review (the provider refused, so nothing was spent). In a review-3 the other reviewers may
+    // already have answered and cost money, so the budget keeps the reservation.
+    await release(lease.capHit() && commitment.models.length === 1);
     if (lease.capHit()) return busy(600, "the AI provider's account limit was reached; reviews resume when it's lifted. Your free review wasn't used.");
     return err(502, `A reviewer didn't return a usable verdict (${msg.slice(0, 200)}). Your free review wasn't used; try again.`);
   }
