@@ -214,7 +214,9 @@ async function matchJudgeModels(c: any, id: string, judgeTier: boolean): Promise
     if (res.ok) status = await res.json();
   } catch {}
   const models: unknown[] = status?.judge ? (status.judge.panel ?? [{ model: status.judge.model }]).map((p: any) => p?.model) : [];
-  const readable = !!status && models.every((m) => typeof m === "string" && m) && (!judgeTier || models.length > 0);
+  // A judge-tier match must show its judges, whichever route asks (the match's own tier counts, not only the route's).
+  const needsJudges = judgeTier || isJudgeTier(status?.tier);
+  const readable = !!status && models.every((m) => typeof m === "string" && m) && (!needsJudges || models.length > 0);
   return readable ? (models as string[]) : allowedModels(c.env);
 }
 

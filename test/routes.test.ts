@@ -458,6 +458,10 @@ t("region rules: judge seats check the match's judges' companies", async () => {
   e.MATCHES.broken = true;
   assert.equal((await call(e, "/join/judge", { match_id: id, seat: "beta" }, from("HK"))).status, 451);
   assert.equal((await call(e, "/invite/join", { match_id: id, invite_token: "x".repeat(20) }, from("HK"))).status, 451);
+  // A judge-tier match whose status shows no judges is treated as unreadable on the free invite route too.
+  const odd = env();
+  odd.MATCHES = { idFromName: (x: string) => x, get: () => ({ fetch: async () => new Response(JSON.stringify({ match_id: id, tier: "judge-3" }), { status: 200 }) }) };
+  assert.equal((await call(odd, "/invite/join", { match_id: id, invite_token: "x".repeat(20) }, from("HK"))).status, 451);
 });
 
 t("GET /admin/stats: requests by country and region refusals, apart from the usage counts", async () => {
