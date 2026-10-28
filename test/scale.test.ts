@@ -579,3 +579,23 @@ test("free reviews: a few per address per day, one shared budget, nothing lost w
   // A zero or missing budget refuses everything (free reviews are off unless the operator sets one).
   assert.equal((await call({ caller: "dd", tier: "review", cost_micro: 50_000, budget_micro: 0, per_caller: 3 })).reason, "budget");
 });
+
+test("a free review that runs past midnight gives back the day it was taken on", async () => {
+  const l = new Ledger({ storage: memStorage() } as any, {} as any);
+  let now = Date.parse("2026-10-28T23:59:30Z");
+  l.now = () => now;
+  const call = async (body: object) => {
+    const r = await l.fetch(new Request("https://ledger/free-review", { method: "POST", body: JSON.stringify(body) }));
+    return { status: r.status, ...((await r.json()) as any) };
+  };
+  const ask = () => call({ caller: "night", tier: "review-3", cost_micro: 200_000, budget_micro: 3_000_000, per_caller: 1 });
+  const r = await ask();
+  assert.equal(r.status, 200);
+  assert.match(r.token, /^2026-10-28\|/);
+  now += 60_000; // past midnight UTC
+  assert.equal((await call({ release_token: r.token, refund_budget: true })).released, true, "yesterday's token is found");
+  now -= 60_000; // back on the day it was taken: the count and budget were given back
+  const again = await ask();
+  assert.equal(again.status, 200);
+  assert.equal(again.spent_micro, 200_000);
+});

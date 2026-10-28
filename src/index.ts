@@ -720,29 +720,46 @@ async function handleFreeReview(c: any, tier: ReviewTier) {
     );
   }
   const token: string = q.token;
-  const release = (refundBudget: boolean) => ledgerJson(c.env, undefined, "free-review", { release_token: token, refund_budget: refundBudget }).catch(() => {});
+  // Give the person's review back. refundBudget only when no reviewer was called, so nothing can have been spent.
+  let released = false;
+  const release = async (refundBudget: boolean) => {
+    if (released) return;
+    released = true;
+    try {
+      await ledgerJson(c.env, undefined, "free-review", { release_token: token, refund_budget: refundBudget });
+    } catch (e: any) {
+      await recordEvent(c.env, "ledger_error", `free-review release: ${String(e?.message ?? e)}`);
+    }
+  };
 
-  const slots = await acquireSlots(c.env, commitment.models, { leaseMs: REVIEWER_BUDGET_MS + 30_000, waitMs: GATE_MAX_WAIT_MS });
-  if (!slots.ok) {
-    await release(true);
-    return busy(slots.retryAfter, `${busyWhat(slots.reason)} Your free review wasn't used.`);
-  }
-  const lease = slots.lease;
+  let settled: PromiseSettledResult<any>[];
+  let lease: SlotLease;
   const input = v.value;
   const started = Date.now();
-  let settled: PromiseSettledResult<any>[];
   try {
-    settled = await runReviewers(c, commitment, input, lease, Math.max(30_000, REVIEWER_BUDGET_MS - (started - t0)));
-  } finally {
-    await lease.release();
+    const slots = await acquireSlots(c.env, commitment.models, { leaseMs: REVIEWER_BUDGET_MS + 30_000, waitMs: GATE_MAX_WAIT_MS });
+    if (!slots.ok) {
+      await release(true);
+      return busy(slots.retryAfter, `${busyWhat(slots.reason)} Your free review wasn't used.`);
+    }
+    lease = slots.lease;
+    try {
+      settled = await runReviewers(c, commitment, input, lease, Math.max(30_000, REVIEWER_BUDGET_MS - (started - t0)));
+    } finally {
+      await lease.release();
+    }
+  } catch (e: any) {
+    // Anything unexpected after the reservation: the person keeps their review; the budget keeps its share, to be safe.
+    await release(false);
+    throw e;
   }
   const failed = settled.find((r) => r.status === "rejected") as PromiseRejectedResult | undefined;
   if (failed) {
     const msg = String(failed.reason?.message ?? failed.reason);
     console.error(`free review ${tier} failed after ${Date.now() - started}ms: ${msg.slice(0, 200)}`);
-    // The person gets their review back. The budget keeps what the AI calls may already have cost, unless the
-    // provider's account limit stopped them (no answer, so nothing spent).
-    await release(lease.capHit());
+    // The person gets their review back. The budget keeps the whole reservation: in a review-3, other reviewers
+    // may already have answered (and cost money) even when one was stopped by a provider's account limit.
+    await release(false);
     if (lease.capHit()) return busy(600, "the AI provider's account limit was reached; reviews resume when it's lifted. Your free review wasn't used.");
     return err(502, `A reviewer didn't return a usable verdict (${msg.slice(0, 200)}). Your free review wasn't used; try again.`);
   }
