@@ -136,15 +136,22 @@ test("busy provider (429, too many concurrent requests): waits, tries again, and
   assert.equal(retryDelayMs(3, null, () => 0), 4000);
 });
 
-test("Claude reviewers and Claude judges both get a 4,000-token answer budget", async () => {
+test("Claude reviewers get an 8,000-token answer budget, Claude judges 4,000, OpenRouter models 10,000", async () => {
   const f = fakeApis({ "claude-opus-5-5": ans("pass"), "claude-haiku-5-5": "{}" });
   try {
     await runOneReviewer({ ANTHROPIC_API_KEY: "a" }, "claude-opus-5-5", 1, input);
     assert.equal(f.calls[0].body.max_tokens, REVIEWER_MAX_TOKENS);
-    assert.equal(REVIEWER_MAX_TOKENS, 4000);
+    assert.equal(REVIEWER_MAX_TOKENS, 8000);
     const { callModel } = await import("../src/judge.ts");
     await callModel({ ANTHROPIC_API_KEY: "a" }, "claude-haiku-5-5", "s", "u");
-    assert.equal(f.calls[1].body.max_tokens, 4000, "judges get the same room (was 1,000)");
+    assert.equal(f.calls[1].body.max_tokens, 4000, "judges (was 1,000)");
+    const g = fakeApis({ "openai/gpt-6-luna": () => new Response(JSON.stringify({ choices: [{ message: { content: ans("pass") }, finish_reason: "stop" }] })) });
+    try {
+      await callModel({ OPENROUTER_API_KEY: "o" }, "openai/gpt-6-luna", "s", "u");
+      assert.equal(g.calls[0].body.max_tokens, 10000);
+    } finally {
+      g.restore();
+    }
   } finally {
     f.restore();
   }

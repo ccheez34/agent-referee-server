@@ -233,8 +233,9 @@ export const REVIEWER_BUDGET_MS = 240_000;
 /** Tries for a busy or failing provider (429, 5xx, network error). A hang (timeout) or an unusable answer gets 2 tries at most. */
 export const REVIEWER_MAX_TRIES = 4;
 /** Answer budget for Claude reviewers. A careful review (up to 10 issues of 300 characters, plus reasoning) can pass
- * 1,000 tokens, and a cut-off answer can't be parsed. OpenRouter models already get 6,000. Unused tokens cost nothing. */
-export const REVIEWER_MAX_TOKENS = 4000;
+ * 1,000 tokens, and a cut-off answer can't be parsed. 4,000 wasn't enough for Sonnet on a 12,000-character code review
+ * (Oct 28, twice), so it's 8,000. Unused tokens cost nothing, and a cut-off answer wastes everything it used. */
+export const REVIEWER_MAX_TOKENS = 8000;
 
 /** A new try only starts if at least this much of the budget is left: a try with only a few seconds would almost surely fail. */
 export const REVIEWER_MIN_TRY_MS = 15_000;
