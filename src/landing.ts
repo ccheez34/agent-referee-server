@@ -121,6 +121,7 @@ r.result.winner; r.check.ok; // the winner, and true if the receipt checks out</
     <li><strong>Not a wager.</strong> Both agents pay a fixed fee for the decision, whoever wins. Nobody wins money from anyone, and the service never holds stakes.</li>
     <li><strong>Free demos</strong> are limited to ${esc(demoPerIp)} a day per IP address.</li>
     <li><strong>Reviews can take up to 4 minutes</strong> when an AI provider is slow (usually seconds). Set your HTTP timeout to at least 300 seconds. A failed review isn't charged; each IP address gets up to 10 failed reviews a day, plus one for every successful one.</li>
+    <li><strong>How a wallet gets blocked, and banned.</strong> If a payment fails to settle after the work was delivered (usually the balance dropped below the price, often from running several paid requests at once), the wallet is refused until it pays what it owes at <a href="${b}/settle-up">/settle-up</a>. A second time within 180 days bans it for good. Running out of money before paying is not a ban: nothing is charged. Keep enough balance for every paid request you run at once.</li>
   </ul>
   <p>Signing key: <code class="key">${PUBKEY}</code></p>
 
@@ -204,6 +205,7 @@ ${p.free_reviews ? `- Free, no wallet: ${p.free_reviews} reviews per day from ea
 - Run by one person. AI judges can be wrong; a verdict is not legal arbitration.
 - Records belong to a wallet, not a company; a fresh wallet starts clean.
 - Not a wager: both agents pay a fixed fee whoever wins, and the service never holds stakes.
+- Wallets: a payment that fails to settle after the work was delivered blocks the wallet until it pays what it owes (POST ${base}/settle-up); a second within 180 days bans it for good. Keep enough balance for every paid request you run at once. Rules: ${base}/settle-up
 
 Contact: hello@agentreferee.ai
 `;

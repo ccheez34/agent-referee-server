@@ -532,3 +532,74 @@ t("a blocked wallet can be let back in by the operator (admin token only)", asyn
     f.restore();
   }
 });
+
+t("settling up: a blocked wallet pays exactly what it owes and can pay again; a second strike bans it for good", async () => {
+  const fail = fakeFacilitator("fail");
+  const e = env({ PAYMENTS_ENABLED: "true", SETTLE_FAIL_PAUSE_AFTER: "10" });
+  const w = "0x" + "7".repeat(40);
+  try {
+    await call(e, "/review", review, { "x-payment": payHeader(w) });
+    await settleWait();
+  } finally {
+    fail.restore();
+  }
+  // Blocked, with the amount owed and how to pay it.
+  const refused = await call(e, "/review", review, { "x-payment": payHeader(w) });
+  assert.equal(refused.status, 403);
+  assert.match(refused.body.error, /owes \$0\.05: pay it with POST .*\/settle-up/);
+  assert.match(refused.body.error, /second payment that fails to settle within 180 days bans this wallet for good/);
+  const st = await call(e, `/settle-up?wallet=${w}`);
+  assert.equal(st.status, 200);
+  assert.equal(st.body.blocked, true);
+  assert.equal(st.body.owes, "$0.05");
+  assert.equal(st.body.strikes, 1);
+  assert.equal(st.body.can_settle_up, true);
+  assert.ok(st.body.rules.banned_for_good);
+  // Settling up: first the x402 challenge for exactly the amount owed, then a payment from that wallet.
+  const ok = fakeFacilitator("ok");
+  try {
+    const challenge = await call(e, "/settle-up", { wallet: w });
+    assert.equal(challenge.status, 402);
+    assert.equal(challenge.body.accepts[0].maxAmountRequired, "50000");
+    assert.equal((await call(e, "/settle-up", { wallet: w }, { "x-payment": payHeader("0x" + "8".repeat(40)) })).status, 400, "another wallet can't pay it");
+    const paid = await call(e, "/settle-up", { wallet: w }, { "x-payment": payHeader(w) });
+    assert.equal(paid.status, 200, JSON.stringify(paid.body));
+    assert.equal(paid.body.unblocked, true);
+    assert.ok(paid.headers.get("x-payment-response"));
+    assert.notEqual((await call(e, "/review", review, { "x-payment": payHeader(w) })).status, 403, "it can pay again");
+    assert.equal((await call(e, "/settle-up", { wallet: w })).status, 400, "nothing left to settle");
+  } finally {
+    ok.restore();
+  }
+  // A second strike: banned for good, and settling up is refused.
+  const fail2 = fakeFacilitator("fail");
+  try {
+    await call(e, "/review", review, { "x-payment": payHeader(w) });
+    await settleWait();
+  } finally {
+    fail2.restore();
+  }
+  const banned = await call(e, "/review", review, { "x-payment": payHeader(w) });
+  assert.equal(banned.status, 403);
+  assert.match(banned.body.error, /can't pay here anymore/);
+  assert.equal((await call(e, `/settle-up?wallet=${w}`)).body.permanent, true);
+  assert.equal((await call(e, "/settle-up", { wallet: w })).status, 403);
+  // Only the operator can lift it.
+  const u = await call(e, "/admin/unblock", { wallet: w, reset_strikes: true }, { authorization: `Bearer ${ADMIN}` });
+  assert.equal(u.body.unblocked, true);
+  assert.equal(u.body.strikes, 0);
+});
+
+t("browsers may call the public API (CORS), never the admin or internal routes", async () => {
+  const e = env();
+  const pre = await app.fetch(new Request("https://x/review", { method: "OPTIONS", headers: { origin: "https://example.com", "access-control-request-headers": "x-payment" } }), e, ctx);
+  assert.equal(pre.status, 204);
+  assert.equal(pre.headers.get("access-control-allow-origin"), "*");
+  assert.match(pre.headers.get("access-control-allow-headers") ?? "", /x-payment/);
+  const h = await call(e, "/health");
+  assert.equal(h.headers.get("access-control-allow-origin"), "*");
+  assert.match(h.headers.get("access-control-expose-headers") ?? "", /x-payment-response/);
+  assert.equal((await call(e, "/admin/stats")).headers.get("access-control-allow-origin"), null);
+  const ao = await app.fetch(new Request("https://x/admin/stats", { method: "OPTIONS" }), e, ctx);
+  assert.equal(ao.headers.get("access-control-allow-origin"), null);
+});

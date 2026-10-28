@@ -5,6 +5,10 @@ import type { DOState, Env } from "./types.ts";
 
 export type HealthEventKind = "settle_failure" | "facilitator_problem" | "credit_problem" | "ledger_error" | "provider_errors" | "out_of_tokens";
 export type HealthEvent = { kind: HealthEventKind; at: number; detail: string };
+/** A wallet whose payment failed to settle after the work was delivered: what it owes, its strikes, and whether it's banned. */
+export type WalletRecord = { owed_micro: number; strikes: number[]; permanent: boolean; history: { at: number; what: string; micro: number; detail: string }[] };
+/** Two strikes within this window (180 days) ban a wallet for good. */
+export const STRIKE_WINDOW_MS = 180 * 86_400_000;
 export type Pause = { paid: boolean; reviews: boolean; auto?: string };
 export type UnjudgedEntry = { match_id: string; tier: string; reason: string; at: number; payers: { seat: string; wallet: string | null; payment_hash?: string }[]; refunded?: boolean };
 
@@ -49,6 +53,20 @@ export class Health {
       const wallet = typeof body?.wallet === "string" && /^0x[0-9a-f]{40}$/.test(body.wallet) ? body.wallet : null;
       const blocked = (await st.get<string[]>("blocked_wallets")) ?? [];
       if (wallet && !blocked.includes(wallet)) await st.put("blocked_wallets", [...blocked, wallet].slice(-2000));
+      if (wallet) {
+        // What it owes (to settle up) and its strikes: a payment it caused to fail is a strike; a second strike within
+        // STRIKE_WINDOW_MS is a permanent ban (only the operator can lift it). A facilitator-side failure owes, no strike.
+        const recs = (await st.get<Record<string, WalletRecord>>("wallet_records")) ?? {};
+        const r: WalletRecord = recs[wallet] ?? { owed_micro: 0, strikes: [], permanent: false, history: [] };
+        const micro = Number.isFinite(body?.micro) ? Math.max(0, Math.min(Math.floor(body.micro), 5_000_000)) : 0;
+        r.owed_micro += micro;
+        r.strikes = r.strikes.filter((t) => now - t < STRIKE_WINDOW_MS);
+        if (body?.strike === true) r.strikes.push(now);
+        if (r.strikes.length >= 2) r.permanent = true;
+        r.history = [...r.history, { at: now, what: body?.strike === true ? "strike" : "owed (not the payer's fault)", micro, detail: String(body?.detail ?? "").slice(0, 120) }].slice(-20);
+        recs[wallet] = r;
+        await st.put("wallet_records", recs);
+      }
       const times = ((await st.get<number[]>("settle_failures")) ?? []).filter((t) => now - t < 3600_000);
       times.push(now);
       await st.put("settle_failures", times);
@@ -65,13 +83,36 @@ export class Health {
       return json(200, { ok: true, recent: times.length, paused });
     }
     if (action === "blocked") return json(200, (await st.get<string[]>("blocked_wallets")) ?? []);
-    if (action === "unblock") {
-      // The operator looked at a wallet's unsettled payment (it was settled, refunded or written off): let it pay again.
+    if (action === "wallet") {
+      // -> one wallet's standing: blocked, what it owes, strikes, permanent.
+      const wallet = (new URL(req.url).searchParams.get("wallet") ?? "").toLowerCase();
+      const blocked = ((await st.get<string[]>("blocked_wallets")) ?? []).includes(wallet);
+      const r = ((await st.get<Record<string, WalletRecord>>("wallet_records")) ?? {})[wallet];
+      const now = this.now();
+      // A wallet blocked before records existed has no amount on file: only the operator can unblock it.
+      return json(200, { wallet, blocked, owed_micro: r?.owed_micro ?? null, strikes: r ? r.strikes.filter((t) => now - t < STRIKE_WINDOW_MS).length : 0, permanent: !!r?.permanent || (blocked && !r) });
+    }
+    if (action === "unblock" || action === "settled-up") {
+      // unblock: the operator looked (settled, refunded or written off), and may clear strikes too. settled-up: the
+      // wallet paid what it owed through POST /settle-up; its strikes stay, and a permanent ban is never lifted here.
       const wallet = typeof body?.wallet === "string" ? body.wallet.toLowerCase() : "";
+      const recs = (await st.get<Record<string, WalletRecord>>("wallet_records")) ?? {};
+      const r = recs[wallet];
+      if (action === "settled-up" && (!r || r.permanent)) return json(409, { error: "This wallet can't settle up: it's banned for good, or has no amount on file." });
       const blocked = (await st.get<string[]>("blocked_wallets")) ?? [];
       const left = blocked.filter((w) => w !== wallet);
       await st.put("blocked_wallets", left);
-      return json(200, { unblocked: left.length < blocked.length, blocked: left });
+      if (r) {
+        r.history = [...r.history, { at: this.now(), what: action === "unblock" ? "unblocked by the operator" : "settled up", micro: r.owed_micro, detail: "" }].slice(-20);
+        r.owed_micro = 0;
+        if (action === "unblock") {
+          r.permanent = false;
+          if (body?.reset_strikes === true) r.strikes = [];
+        }
+        recs[wallet] = r;
+        await st.put("wallet_records", recs);
+      }
+      return json(200, { unblocked: left.length < blocked.length, blocked: left, strikes: r?.strikes.length ?? 0 });
     }
     if (action === "unjudged") {
       const list = (await st.get<UnjudgedEntry[]>("unjudged")) ?? [];
@@ -140,10 +181,10 @@ export async function recordEvent(env: Env, kind: HealthEventKind, detail: strin
 }
 
 /** Work delivered, payment not settled: counted every time (see the Health DO). Never throws. */
-export async function recordSettleFailure(env: Env, wallet: string | undefined, detail: string) {
+export async function recordSettleFailure(env: Env, wallet: string | undefined, detail: string, owed?: { micro: number; strike: boolean }) {
   console.error(JSON.stringify({ health_event: "settle_failure", wallet, detail: detail.slice(0, 300) }));
   if (!env.HEALTH) return;
-  const r = await healthCall(env, "settle-failure", { wallet, detail, pause_after: Number(env.SETTLE_FAIL_PAUSE_AFTER || 5) }).catch(() => null);
+  const r = await healthCall(env, "settle-failure", { wallet, detail, pause_after: Number(env.SETTLE_FAIL_PAUSE_AFTER || 5), ...(owed ?? {}) }).catch(() => null);
   if (r?.paused) pauseCache = null;
   if (wallet) blockedCache?.set.add(wallet);
 }
@@ -206,10 +247,18 @@ export async function adminOk(env: Env, header: string | undefined): Promise<boo
 }
 
 export const listBlocked = (env: Env): Promise<string[]> => healthCall(env, "blocked");
+export type WalletStanding = { wallet: string; blocked: boolean; owed_micro: number | null; strikes: number; permanent: boolean };
+export const walletStanding = (env: Env, wallet: string): Promise<WalletStanding> => healthCall(env, `wallet?wallet=${encodeURIComponent(wallet)}`);
+/** After a settle-up payment settled: unblock (strikes stay). Throws when the wallet can't settle up. */
+export async function settledUp(env: Env, wallet: string) {
+  const r = await healthCall(env, "settled-up", { wallet });
+  blockedCache = null;
+  return r;
+}
 
 /** Let a blocked wallet pay again (admin). Clears this isolate's cache; others refresh within 30 s. */
-export async function unblockWallet(env: Env, wallet: string): Promise<{ unblocked: boolean; blocked: string[] }> {
-  const r = await healthCall(env, "unblock", { wallet });
+export async function unblockWallet(env: Env, wallet: string, resetStrikes = false): Promise<{ unblocked: boolean; blocked: string[]; strikes: number }> {
+  const r = await healthCall(env, "unblock", { wallet, reset_strikes: resetStrikes });
   blockedCache = null;
   return r;
 }

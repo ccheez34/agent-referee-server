@@ -13,7 +13,7 @@ import {
   REVIEW_LIMITS, REVIEW_MESSAGE_FORMAT, longReviewRule, REVIEW_SYSTEM, REVIEW_VERDICTS, REVIEWER_BUDGET_MS, missingReviewKey, reviewCommitment, reviewModels, reviewPayload, runOneReviewer, validateReview, type ReviewTier,
 } from "./review.ts";
 import { Gate, GATE_MAX_WAIT_MS } from "./gate.ts";
-import { Health, adminOk, evaluateHealth, healthEvents, listUnjudged, markRefunded, pauseState, recordEvent, recordSettleFailure, setPause, listBlocked, unblockWallet, walletBlocked } from "./health.ts";
+import { Health, adminOk, evaluateHealth, healthEvents, listUnjudged, markRefunded, pauseState, recordEvent, recordSettleFailure, setPause, listBlocked, settledUp, unblockWallet, walletBlocked, walletStanding } from "./health.ts";
 import { acquireSlots, gateStats, gatesOn, poolsOfProvider, quickBusy, resetPools, type SlotLease } from "./gateclient.ts";
 import { classifyPaidResponse, plausiblePayment, priceMicro, reviewBudget, reviewLimitRefusal } from "./paywatch.ts";
 import { fakeAiConfig } from "./fakeai.ts";
@@ -23,6 +23,31 @@ import { blockedStat, countryStat, regionBlock, regionRefusal, whereFrom } from 
 export { MatchRoom, Ledger, Gate, Health };
 
 const app = new Hono<{ Bindings: Env }>();
+
+// Browsers (a web app on any site) may call the public API: no cookies or credentials are used, so any origin is fine.
+// The payment header goes in and the settlement header comes out. Admin and internal routes get no CORS headers, so a
+// browser page can never call them.
+const CORS = {
+  "access-control-allow-origin": "*",
+  "access-control-allow-methods": "GET, POST, OPTIONS",
+  "access-control-allow-headers": "content-type, x-payment, accept",
+  "access-control-expose-headers": "x-payment-response, retry-after",
+  "access-control-max-age": "86400",
+};
+const corsFor = (path: string) => !path.startsWith("/admin") && !path.startsWith("/internal");
+app.use("*", async (c, next) => {
+  if (!corsFor(c.req.path)) return next();
+  if (c.req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
+  await next();
+  // Some answers (the paywall's, a passed-through Response) have immutable headers: copy them onto a new Response.
+  try {
+    for (const [k, v] of Object.entries(CORS)) c.res.headers.set(k, v);
+  } catch {
+    const res = new Response(c.res.body, c.res);
+    for (const [k, v] of Object.entries(CORS)) res.headers.set(k, v);
+    c.res = res;
+  }
+});
 
 const ID_RE = /^[a-f0-9]{24}$/;
 // The service answers on several addresses (agentreferee.ai and the original workers.dev one). Invite links always use
@@ -52,6 +77,24 @@ const INVITE_TIERS = ["rps", "rps-bo3", "weighted", "judge", "judge-2", "judge-3
 // Paid routes. Payment only settles when the handler succeeds (status < 400),
 // so a bad match id or a taken seat never costs the agent anything.
 let paywall: MiddlewareHandler | null = null;
+/** The payment facilitator. With PAYAI_API_KEY_ID + PAYAI_API_KEY_SECRET set (wrangler secret put), every facilitator call
+ * carries a short-lived signed token, so settlements draw on the account's paid credits instead of the free allowance. */
+function facilitatorConfig(env: Env) {
+  const keyId = env.PAYAI_API_KEY_ID?.trim();
+  const keySecret = env.PAYAI_API_KEY_SECRET?.trim();
+  return {
+    url: (env.FACILITATOR_URL || "https://x402.org/facilitator") as `${string}://${string}`,
+    ...(keyId && keySecret
+      ? {
+          createAuthHeaders: async () => {
+            const h = { Authorization: `Bearer ${await payaiToken(keyId, keySecret)}` };
+            return { verify: h, settle: h, supported: h, list: h };
+          },
+        }
+      : {}),
+  };
+}
+
 function getPaywall(env: Env): MiddlewareHandler {
   if (paywall) return paywall;
   const p = prices(env);
@@ -78,21 +121,7 @@ function getPaywall(env: Env): MiddlewareHandler {
     config: { description: description + how, mimeType: "application/json", inputSchema: joinInput(seatDesc), outputSchema: joinOutput, discoverable: true },
   });
   // x402.org is testnet-only. For real money set FACILITATOR_URL to a mainnet facilitator (see README).
-  // With PAYAI_API_KEY_ID + PAYAI_API_KEY_SECRET set (wrangler secret put), every facilitator call carries a
-  // short-lived signed token, so settlements draw on the account's paid credits instead of the free allowance.
-  const keyId = env.PAYAI_API_KEY_ID?.trim();
-  const keySecret = env.PAYAI_API_KEY_SECRET?.trim();
-  const facilitator = {
-    url: (env.FACILITATOR_URL || "https://x402.org/facilitator") as `${string}://${string}`,
-    ...(keyId && keySecret
-      ? {
-          createAuthHeaders: async () => {
-            const h = { Authorization: `Bearer ${await payaiToken(keyId, keySecret)}` };
-            return { verify: h, settle: h, supported: h, list: h };
-          },
-        }
-      : {}),
-  };
+  const facilitator = facilitatorConfig(env);
   const rp = reviewPrices(env);
   const reviewRoute = (price: string, description: string) => ({
     price,
@@ -189,6 +218,32 @@ function whereOf(c: any) {
   return whereFrom(c.req.raw, (n) => c.req.header(n));
 }
 
+/** The amount (in micro-USDC) a payment header signs for, or 0 if it can't be read. */
+function paymentMicro(header: string | undefined): number {
+  try {
+    const v = Number(JSON.parse(atob(header ?? ""))?.payload?.authorization?.value);
+    return Number.isFinite(v) && v > 0 ? Math.floor(v) : 0;
+  } catch {
+    return 0;
+  }
+}
+const usd = (micro: number) => `$${(micro / 1_000_000).toFixed(micro % 10_000 === 0 ? 2 : 6).replace(/(\.\d\d\d*?)0+$/, "$1")}`;
+
+/** 403 for a blocked wallet: what it owes and how to settle up, or that it's banned for good. Nothing charged. */
+async function walletBlockedRefusal(c: any, wallet: string) {
+  const s = await walletStanding(c.env, wallet).catch(() => null);
+  const base = "wallet_blocked: an earlier payment from this wallet didn't settle after the work was delivered. Nothing was charged.";
+  if (!s || s.permanent || !s.owed_micro)
+    return c.json({ error: `${base} This wallet can't pay here anymore. Contact hello@agentreferee.ai with the wallet address.`, wallet_status: s }, 403);
+  return c.json(
+    {
+      error: `${base} It owes ${usd(s.owed_micro)}: pay it with POST ${new URL(c.req.url).origin}/settle-up {"wallet":"${wallet}"} (x402, from this wallet) and it can pay again. Warning: a second payment that fails to settle within 180 days bans this wallet for good.`,
+      wallet_status: s,
+    },
+    403,
+  );
+}
+
 /**
  * Region rule for a request that may reach these models (see regions.ts): null when it may go ahead, otherwise a 451
  * refusal (counted). `count`: also add one to today's count for the request's country (counts only, never who).
@@ -236,8 +291,7 @@ const paidRoute = async (c: any, next: any) => {
   const hadPayment = !!c.req.header("x-payment");
   const payer = payerFromPaymentHeader(c.req.header("x-payment"));
   // A wallet whose payment once failed to settle after the work was delivered isn't served again (before payment).
-  if (payer && (await walletBlocked(c.env, payer)))
-    return err(403, "wallet_blocked: an earlier payment from this wallet didn't settle after the work was delivered, so it can't pay here anymore. Nothing was charged. Contact hello@agentreferee.ai with the wallet address.");
+  if (payer && (await walletBlocked(c.env, payer))) return walletBlockedRefusal(c, payer);
   const t0 = Date.now();
   let handlerRan = false;
   let handlerStatus: number | undefined;
@@ -257,7 +311,9 @@ const paidRoute = async (c: any, next: any) => {
     const facilitatorMs = Date.now() - t0 - handlerMs;
     console.log(JSON.stringify({ payment: o.kind, path: c.req.path, facilitator_ms: facilitatorMs, handler_ms: handlerMs, ...("detail" in o ? { stage: o.stage, detail: o.detail } : {}) }));
     // A settle failure means the work was done but not paid for: always worth an alert (even when the payer caused it).
-    if ("stage" in o && o.stage === "settle") await inBackground(c, recordSettleFailure(c.env, payer, `${c.req.path}: ${o.detail}`));
+    // The wallet then owes what it signed for (it can settle up), and a failure it caused is a strike (two = banned).
+    if ("stage" in o && o.stage === "settle")
+      await inBackground(c, recordSettleFailure(c.env, payer, `${c.req.path}: ${o.detail}`, { micro: paymentMicro(c.req.header("x-payment")), strike: o.kind === "payer_problem" }));
     if (o.kind === "facilitator_problem") await inBackground(c, recordEvent(c.env, o.credit ? "credit_problem" : "facilitator_problem", `${o.stage} ${c.req.path}: ${o.detail}`));
   }
   return r;
@@ -422,6 +478,7 @@ app.get("/", (c) => {
     health: `${base}/health`,
     status_page: "https://stats.uptimerobot.com/dh6sVMvo3W",
     llms_txt: `${base}/llms.txt`,
+    wallet_rules: { ...BAN_RULES, check: "GET /settle-up?wallet=0x... shows a wallet's standing." },
     clients: { javascript: "npm install agent-referee-client", python: "pip install agent-referee-client (add [pay] to pay in USDC)", mcp: "npx -y agent-referee-mcp" },
     coming_next: "Batch reviews (one payment for many outputs) and company accounts (see plans).",
     limitations: "Run by one person. AI judges can be wrong; a verdict is not legal arbitration. Records belong to a wallet, not a company, and a fresh wallet starts clean. Not a wager: both agents pay a fixed fee whoever wins; the service never holds stakes.",
@@ -561,6 +618,59 @@ app.post("/admin/unjudged", async (c) => {
   return c.json(await listUnjudged(c.env));
 });
 
+// ---------- settling up (a wallet whose payment failed to settle pays what it owes, once) ----------
+
+const BAN_RULES = {
+  how_a_wallet_gets_blocked:
+    "A paid request whose payment fails to settle after the work was delivered. Usually the wallet's balance dropped below the price before settlement (often from running several paid requests at once from a wallet that can't cover them all), or the signed authorization was revoked, reused or let expire.",
+  blocked: "The wallet is refused (nothing charged) until it settles up: POST /settle-up {\"wallet\"} pays exactly what it owes, from that wallet.",
+  banned_for_good: "A second payment the wallet causes to fail within 180 days bans it permanently; only the operator can lift that (hello@agentreferee.ai).",
+  not_a_ban: "Running out of money before paying (refused, nothing charged), the daily failed-review limit (resets 00:00 UTC), busy answers (503) and region refusals (451).",
+  tip: "Keep enough balance for every paid request you run at the same time.",
+};
+
+// What a wallet owes and how to settle up. Free; anyone can look (a wallet address is public on-chain anyway).
+app.get("/settle-up", async (c) => {
+  const wallet = (c.req.query("wallet") ?? "").trim().toLowerCase();
+  if (!/^0x[0-9a-f]{40}$/.test(wallet)) return c.json({ how: "GET /settle-up?wallet=0x... shows a wallet's standing; POST /settle-up {\"wallet\":\"0x...\"} pays what a blocked wallet owes.", rules: BAN_RULES });
+  if (!c.env.HEALTH) return err(503, "Not available here.");
+  const s = await walletStanding(c.env, wallet);
+  return c.json({ ...s, owes: s.owed_micro ? usd(s.owed_micro) : null, can_settle_up: s.blocked && !s.permanent && !!s.owed_micro, rules: BAN_RULES });
+});
+
+// Pay what a blocked wallet owes (x402, priced at exactly that amount, paid from the blocked wallet itself). Once the
+// payment settles the wallet can pay again; its strike stays. A banned wallet can't settle up.
+app.post("/settle-up", async (c) => {
+  const body: any = await c.req.json().catch(() => null);
+  const wallet = typeof body?.wallet === "string" ? body.wallet.trim().toLowerCase() : "";
+  if (!/^0x[0-9a-f]{40}$/.test(wallet)) return err(400, 'Send {"wallet":"0x..."}: the blocked wallet. Nothing was charged.');
+  if (!c.env.HEALTH) return err(503, "Not available here. Nothing was charged.");
+  const sanctioned = regionCheck(c, [], "Nothing was charged.");
+  if (sanctioned) return sanctioned;
+  const s = await walletStanding(c.env, wallet);
+  if (!s.blocked) return err(400, "This wallet isn't blocked; there's nothing to settle. Nothing was charged.");
+  if (s.permanent || !s.owed_micro) return err(403, "This wallet can't settle up: it's banned for good, or has no amount on file. Contact hello@agentreferee.ai with the wallet address. Nothing was charged.");
+  const header = c.req.header("x-payment");
+  if (header && payerFromPaymentHeader(header) !== wallet) return err(400, "Pay from the blocked wallet itself. Nothing was charged.");
+  const done = async (extra: Record<string, unknown> = {}) => {
+    const r = await settledUp(c.env, wallet);
+    return { settled: true, wallet, paid: usd(s.owed_micro!), unblocked: true, strikes: r.strikes, warning: "One strike is on file: another payment that fails to settle within 180 days bans this wallet for good.", ...extra };
+  };
+  if (c.env.PAYMENTS_ENABLED === "false") return c.json(await done());
+  const mw = paymentMiddleware(
+    c.env.PAY_TO as `0x${string}`,
+    { "/settle-up": { price: usd(s.owed_micro), network: (c.env.NETWORK || "base-sepolia") as any, config: { description: `Agent Referee: settle up ${usd(s.owed_micro)} owed by ${wallet}, so it can pay again.`, mimeType: "application/json", maxTimeoutSeconds: 120 } } },
+    facilitatorConfig(c.env) as any,
+  ) as unknown as MiddlewareHandler;
+  const early = await mw(c, async () => {
+    c.res = new Response(JSON.stringify({ settling: true }), { status: 200, headers: { "content-type": "application/json" } });
+  });
+  if (early instanceof Response) return early; // the 402 challenge, or a refused payment: nothing charged
+  const settlement = c.res?.headers.get("x-payment-response");
+  if (c.res?.status !== 200 || !settlement) return c.res; // the settlement failed: nothing was charged, still blocked
+  return c.json(await done(), 200, { "x-payment-response": settlement });
+});
+
 // Wallets refused because a payment didn't settle after the work was delivered. GET lists them; POST {"wallet":"0x..."}
 // lets one pay again, once the operator has looked at what happened (settled it, refunded it, or written it off).
 app.get("/admin/blocked", async (c) => {
@@ -574,9 +684,9 @@ app.post("/admin/unblock", async (c) => {
   if (denied) return denied;
   const body: any = await c.req.json().catch(() => null);
   const wallet = typeof body?.wallet === "string" ? body.wallet.trim().toLowerCase() : "";
-  if (!/^0x[0-9a-f]{40}$/.test(wallet)) return err(400, 'Send {"wallet":"0x..."} (the 0x wallet address).');
+  if (!/^0x[0-9a-f]{40}$/.test(wallet)) return err(400, 'Send {"wallet":"0x...","reset_strikes"?:true} (the 0x wallet address).');
   if (!c.env.HEALTH) return err(503, "Needs the health store.");
-  return c.json(await unblockWallet(c.env, wallet));
+  return c.json(await unblockWallet(c.env, wallet, body?.reset_strikes === true));
 });
 
 // Usage counts for the last 7 UTC days: reviews done, failed, refused and busy, plus today's free budget used.
