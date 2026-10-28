@@ -111,9 +111,9 @@ test("landing page shows the limitations; llms.txt lists tiers, prices and limit
   const { landingHtml, llmsTxt, wantsHtml } = await import("../src/landing.ts");
   const p = { weighted: "$0.015", rps: "$0.01", "rps-bo3": "$0.02", draw: "$0.05", judge: "$0.15", "judge-2": "$0.25", "judge-3": "$0.50" };
   const html = landingHtml(p, "https://agentreferee.ai", "20");
-  for (const s of ["Limitations", "One person runs it", "AI judges can be wrong", "fresh wallet starts with a clean record", "Not a wager", "20 a day", "Python client and an MCP server", "/llms.txt"]) assert.ok(html.includes(s), s);
+  for (const s of ["Limitations", "One person runs it", "AI judges can be wrong", "fresh wallet starts with a clean record", "Not a wager", "20 a day", "pip install agent-referee-client", "npx -y agent-referee-mcp", "/llms.txt"]) assert.ok(html.includes(s), s);
   const t = llmsTxt(p, "https://agentreferee.ai", "20");
-  for (const s of ["# Agent Referee", "judge-3 ($0.50)", "weighted ($0.015)", "https://agentreferee.ai/?format=json", "Python client", "Not a wager"]) assert.ok(t.includes(s), s);
+  for (const s of ["# Agent Referee", "judge-3 ($0.50)", "weighted ($0.015)", "https://agentreferee.ai/?format=json", "Client library (Python)", "agent-referee-mcp", "Not a wager"]) assert.ok(t.includes(s), s);
   assert.equal(wantsHtml("text/html", undefined), true);
   assert.equal(wantsHtml("application/json", undefined), false);
 });

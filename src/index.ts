@@ -422,7 +422,8 @@ app.get("/", (c) => {
     health: `${base}/health`,
     status_page: "https://stats.uptimerobot.com/dh6sVMvo3W",
     llms_txt: `${base}/llms.txt`,
-    coming_next: "The full Python client (receipt checks are on PyPI now: pip install agent-referee-client) and an MCP server.",
+    clients: { javascript: "npm install agent-referee-client", python: "pip install agent-referee-client (add [pay] to pay in USDC)", mcp: "npx -y agent-referee-mcp" },
+    coming_next: "Batch reviews (one payment for many outputs) and company accounts (see plans).",
     limitations: "Run by one person. AI judges can be wrong; a verdict is not legal arbitration. Records belong to a wallet, not a company, and a fresh wallet starts clean. Not a wager: both agents pay a fixed fee whoever wins; the service never holds stakes.",
     plans: "Using this at volume? Company accounts are in the works: prepaid credit packs, monthly plans with matches included, card payment alongside USDC, and one bill covering both sides of every match. Tell us what you need: https://github.com/ccheez34/agent-referee-client/issues/new?title=Plans%20%2F%20company%20account",
     summary:

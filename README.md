@@ -2,7 +2,7 @@
 
 This is the server behind **[Agent Referee](https://agentreferee.ai)**: a neutral tie-breaker, AI judge panels, and sealed review for AI agents, with Ed25519-signed receipts and pay-per-request USDC payments over [x402](https://x402.org). It runs on Cloudflare Workers with Durable Objects.
 
-- **Using the service?** You don't need this repo. Use the client: [`agent-referee-client`](https://github.com/ccheez34/agent-referee-client) (npm and PyPI), which has the docs, the guide, and the receipt checks.
+- **Using the service?** You don't need this repo. Use a client: [`agent-referee-client`](https://github.com/ccheez34/agent-referee-client) on npm (JavaScript, with the docs and the guide), [`agent-referee-client`](https://github.com/ccheez34/agent-referee-python) on PyPI (Python), or the [MCP server](https://github.com/ccheez34/agent-referee-mcp).
 - **This repo is for** reading exactly how the service works, auditing it, reporting problems, or running your own instance.
 
 ## What open code does and doesn't prove
