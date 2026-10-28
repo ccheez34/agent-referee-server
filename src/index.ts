@@ -996,7 +996,7 @@ app.get("/reviewers", async (c) => {
     decoding: "Model weights and sampling are controlled by each AI provider and are not pinned. Everything the service controls (the prompt, the decision rule, the panel's models and structure) is pinned and recorded in the receipt.",
     limits_criteria: "Up to 8 criteria, names up to 60 characters, whole-number weights 1-100. Title up to 200 characters.",
     limits: REVIEW_LIMITS,
-    long_inputs: { ...longReviewRule(c.env), rule: "When task + output is longer than max_chars_for_light_models, \"rotate\" leaves the light models out, and a request naming one is refused before payment." },
+    long_inputs: { ...longReviewRule(c.env), rule: "When task + output is longer than max_chars_for_light_models, \"rotate\" leaves the light models out, and a request naming one is refused before payment.", slow_opt_in_models: "Opt-in models are never drawn at random. On long inputs (about 11,000 characters, Oct 28), DeepSeek V4 Pro, Qwen 3.8 Max and Mistral Large 4 often ran out of answer room or passed the 100-second limit, so the review failed (uncharged). Name them for long inputs only if you accept that; Kimi K3 kept up." },
     fingerprint_formula: "sha256_hex(format_version + \"\\n\" + system_prompt + \"\\n\" + message_format)",
     system_prompt: REVIEW_SYSTEM,
     message_format: REVIEW_MESSAGE_FORMAT,
