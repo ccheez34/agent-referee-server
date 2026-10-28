@@ -739,6 +739,7 @@ async function handleFreeReview(c: any, tier: ReviewTier, ext?: { caller: string
   try {
     commitment = await reviewCommitment(tier, c.env, v.value.panel, undefined, v.value.task.length + v.value.output.length);
   } catch (e: any) {
+    stat(c, `${p}bad_input`);
     return err(400, `${String(e?.message ?? e)} Your free review wasn't used.`);
   }
   if (missingReviewKey(c.env, commitment.models)) return err(503, "Sealed review is temporarily unavailable. Your free review wasn't used.");
@@ -868,7 +869,7 @@ async function internalOk(env: Env, header: string | undefined): Promise<boolean
  * without an id share one allowance. */
 async function extCallerHash(c: any): Promise<string> {
   const raw = String(c.req.header("x-caller-id") ?? "").trim();
-  const id = /^[\x21-\x7e]{1,200}$/.test(raw) ? raw : "anonymous";
+  const id = /^[\x20-\x7e]{1,200}$/.test(raw) ? raw : "anonymous";
   const day = new Date().toISOString().slice(0, 10);
   return `ext:${(await sha256Hex(`${c.env.SIGNING_KEY || "demo"}|${day}|ext|${id}`)).slice(0, 20)}`;
 }
