@@ -32,6 +32,7 @@ export interface Env {
   STAGING?: string; // "true" only on the staging Worker: allows FAKE_AI and the x-test-caller header (never with NETWORK=base)
   FAKE_AI?: string; // staging only: "true" answers every AI call with a fake (see fakeai.ts)
   FAKE_AI_DELAY_MS?: string; // staging only: e.g. "2000-30000"
+  LEDGER_TIMEOUT_MS?: string; // tests only: how long a ledger counter call may take (default 10000, at most 10000)
   FAKE_AI_MIX?: string; // staging only: e.g. "429:0.1,500:0.05,cap:0.01,hang:0.05,cut:0.02"
   JUDGE_MODEL?: string;
   PRICE_RPS?: string; // price PER SEAT, e.g. "$0.01"

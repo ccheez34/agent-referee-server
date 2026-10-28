@@ -108,22 +108,76 @@ t("review limits fail closed: a ledger outage refuses reviews and demos instead 
   assert.equal(d.status, 503);
 });
 
-t("a single failed ledger call is retried once, so the review goes through and health stays ok; two failures still refuse", async () => {
-  const e = env();
+/** A ledger whose review-fails calls can be made to fail: "before" throws without reaching the ledger, "after" lets
+ * the ledger process the call and then loses its answer, "hang" never answers. Counts every review-fails call. */
+function flakyLedger(e: any) {
   const get = e.LEDGER.get;
-  let failures = 1;
+  const f = { plan: [] as ("before" | "after" | "hang")[], calls: 0, caller: "" };
   e.LEDGER.get = (id: string) => {
     const stub = get(id);
-    return { fetch: async (u: string, i?: RequestInit) => { if (u.endsWith("/review-fails") && failures > 0) { failures--; throw new Error("object unavailable"); } return stub.fetch(u, i); } };
+    return {
+      fetch: async (u: string, i?: RequestInit) => {
+        if (!u.endsWith("/review-fails")) return stub.fetch(u, i);
+        f.calls++;
+        const body = JSON.parse(String(i?.body ?? "{}"));
+        if (body.reserve) f.caller = body.caller;
+        const mode = body.reserve ? f.plan.shift() : undefined;
+        if (mode === "before") throw new Error("object unavailable");
+        if (mode === "hang") return new Promise<Response>(() => {});
+        const res = await stub.fetch(u, i);
+        if (mode === "after") throw new Error("object unavailable");
+        return res;
+      },
+    };
   };
+  return f;
+}
+const inflightFor = async (e: any, caller: string) => {
+  for (const o of e.LEDGER.objs.values()) {
+    const r: any = await (await o.fetch(new Request("https://ledger/review-fails", { method: "POST", body: JSON.stringify({ caller, limit: 10 }) }))).json();
+    if (r.inflight) return { n: r.inflight, ledger: o };
+  }
+  return { n: 0, ledger: undefined as any };
+};
+
+t("a single failed ledger call is retried once, so the review goes through and health stays ok; two failures still refuse", async () => {
+  const e = env();
+  const f = flakyLedger(e);
+  f.plan = ["before"];
   const r = await call(e, "/review", review);
   assert.equal(r.status, 200, JSON.stringify(r.body));
-  assert.equal(failures, 0, "the first call failed");
+  assert.equal(f.plan.length, 0, "the first call failed");
   assert.equal((await call(e, "/health")).body.status, "ok", "a retried blip isn't a health event");
-  failures = 2;
+  f.plan = ["before", "before"];
+  const reserveCalls = () => f.calls;
+  const before = reserveCalls();
   const r2 = await call(e, "/review", review);
   assert.equal(r2.status, 503);
   assert.match(r2.body.error, /can't be checked/);
+  assert.equal(reserveCalls() - before, 2, "exactly one retry, then a refusal");
+});
+
+t("a ledger timeout isn't retried: one call, then the same refusal as before", async () => {
+  const e = env({ LEDGER_TIMEOUT_MS: "50" });
+  const f = flakyLedger(e);
+  f.plan = ["hang"];
+  const r = await call(e, "/review", review);
+  assert.equal(r.status, 503);
+  assert.match(r.body.error, /can't be checked/);
+  assert.equal(f.calls, 1, "no second call after a timeout");
+});
+
+t("a lost ledger answer: the retry still lets the review through, and the extra reservation expires after 5 minutes", async () => {
+  const e = env();
+  const f = flakyLedger(e);
+  f.plan = ["after"]; // the first call reserves a slot, then its answer is lost
+  const r = await call(e, "/review", review);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const left = await inflightFor(e, f.caller);
+  assert.equal(left.n, 1, "the lost call's reservation is still held (the retry's was released when the review was recorded)");
+  const t0 = Date.now();
+  left.ledger.now = () => t0 + 300_001;
+  assert.equal((await inflightFor(e, f.caller)).n, 0, "and it expires on its own after 5 minutes");
 });
 
 t("pause switches: the wrangler secret, and the phone switch with the admin token", async () => {

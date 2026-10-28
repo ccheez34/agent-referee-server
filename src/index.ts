@@ -411,7 +411,7 @@ async function failLimitCheck(c: any, caller: string | undefined, failLimit: num
     // customer. If the first call did reach the ledger and only its answer was lost, the retry takes a second in-flight
     // reservation; that one is never released by this request, but expires on its own after 5 minutes.
     // Still fails closed if the retry fails too. A timeout isn't retried: it has already waited 10 seconds.
-    const timedOut = /timed out/.test(String(first?.message ?? first));
+    const timedOut = first?.ledgerTimeout === true;
     if (!timedOut) await new Promise((r) => setTimeout(r, LEDGER_RETRY_MS));
     try {
       if (timedOut) throw first;
@@ -1368,13 +1368,15 @@ function ledgerShard(env: Env, caller?: string) {
   return env.LEDGER!.get(env.LEDGER!.idFromName(ledgerShardName(caller)));
 }
 
-/** A ledger counter call that fails closed: throws on any error, 5xx or unreadable answer (allow429: a 429 is an answer). */
+/** A ledger counter call that fails closed: throws on any error, 5xx or unreadable answer (allow429: a 429 is an answer).
+ * Its own timeout throws an error with `ledgerTimeout: true`, so callers can tell it apart without reading the message. */
 async function ledgerJson(env: Env, caller: string | undefined, action: string, body: unknown, allow429 = false): Promise<any> {
   let timer: ReturnType<typeof setTimeout> | undefined;
+  const limitMs = Math.min(10_000, Number(env.LEDGER_TIMEOUT_MS) > 0 ? Number(env.LEDGER_TIMEOUT_MS) : 10_000);
   try {
     const res = await Promise.race([
       ledgerShard(env, caller).fetch(`https://ledger/${action}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }),
-      new Promise<never>((_, rej) => (timer = setTimeout(() => rej(new Error("ledger timed out")), 10_000))),
+      new Promise<never>((_, rej) => (timer = setTimeout(() => rej(Object.assign(new Error("ledger timed out"), { ledgerTimeout: true })), limitMs))),
     ]);
     if (!res.ok && !(allow429 && res.status === 429)) throw new Error(`ledger answered ${res.status}`);
     const data: any = await res.json();
