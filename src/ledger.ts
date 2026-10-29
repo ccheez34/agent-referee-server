@@ -151,7 +151,7 @@ export class Ledger {
     if (!st.list || !st.delete) return;
     const today = (await st.get<string>("counters_day")) ?? new Date(this.now()).toISOString().slice(0, 10);
     let deleted = 0;
-    for (const prefix of ["rf:", "ro:", "rft:", "rfi:", "dm:", "dmc:", "fr:", "frb:", "frt:", "reviewfail:", "reviewok:", "reviewfailtotal:", "demo:", "demoip:"]) {
+    for (const prefix of ["rf:", "ro:", "rft:", "rfi:", "dm:", "dmc:", "fr:", "frb:", "frt:", "tm:", "tt:", "tmt:", "reviewfail:", "reviewok:", "reviewfailtotal:", "demo:", "demoip:"]) {
       while (deleted < 5_000) {
         const found = await st.list({ prefix, limit: 128 });
         const old = [...found.keys()].filter((k) => !k.slice(prefix.length).startsWith(today) || prefix.startsWith("review") || prefix.startsWith("demo")).slice(0, 5_000 - deleted);
@@ -331,6 +331,45 @@ export class Ledger {
       await st.put(spentKey, (spent += cost));
       await st.put(`frt:${day}:${token}`, { who, tier, cost, ...(pool ? { pool } : {}) });
       return json(200, { ok: true, token, used: used + 1, limit, spent_micro: spent, budget_micro: budget });
+    }
+
+    if (action === "team") {
+      // The team allowance (one owner's own AI sessions): dollar budgets per member and for the whole team, per UTC day,
+      // counted at list price. body: { member, cost_micro, member_budget_micro, team_budget_micro } reserves one review;
+      // { release_token } gives one back (the review didn't happen or failed, so it isn't counted); { member, status: true }
+      // reads today's spending. Always on the single "global" shard, so each budget is one counter.
+      const day = nowIso.slice(0, 10);
+      await this.newDay(day);
+      const st = this.state.storage;
+      const teamKey = `tt:${day}`;
+      if (typeof body?.release_token === "string") {
+        const tday = /^\d{4}-\d{2}-\d{2}\|/.test(body.release_token) ? body.release_token.slice(0, 10) : day;
+        const tk = `tmt:${tday}:${body.release_token}`;
+        const r = await st.get<{ member: string; cost: number }>(tk);
+        if (!r) return json(200, { released: false });
+        const mk = `tm:${tday}:${r.member}`;
+        await st.put(mk, Math.max(0, ((await st.get<number>(mk)) ?? 0) - r.cost));
+        await st.put(`tt:${tday}`, Math.max(0, ((await st.get<number>(`tt:${tday}`)) ?? 0) - r.cost));
+        await st.put(tk, null); // the old day's cleanup deletes it
+        return json(200, { released: true });
+      }
+      const member = typeof body?.member === "string" && /^[A-Za-z0-9._-]{1,32}$/.test(body.member) ? body.member : "";
+      if (!member) return json(400, { error: "No team member." });
+      const memberKey = `tm:${day}:${member}`;
+      const memberSpent = (await st.get<number>(memberKey)) ?? 0;
+      const teamSpent = (await st.get<number>(teamKey)) ?? 0;
+      if (body?.status === true) return json(200, { ok: true, member_spent_micro: memberSpent, team_spent_micro: teamSpent });
+      const cost = Number.isFinite(body?.cost_micro) ? Math.max(0, body.cost_micro) : 0;
+      const memberBudget = Number.isFinite(body?.member_budget_micro) ? Math.max(0, body.member_budget_micro) : 0;
+      const teamBudget = Number.isFinite(body?.team_budget_micro) ? Math.max(0, body.team_budget_micro) : 0;
+      if (cost <= 0) return json(400, { error: "No cost." });
+      if (memberSpent + cost > memberBudget) return json(429, { reason: "member", member_spent_micro: memberSpent, team_spent_micro: teamSpent });
+      if (teamSpent + cost > teamBudget) return json(429, { reason: "team", member_spent_micro: memberSpent, team_spent_micro: teamSpent });
+      const token = `${day}|${crypto.randomUUID()}`;
+      await st.put(memberKey, memberSpent + cost);
+      await st.put(teamKey, teamSpent + cost);
+      await st.put(`tmt:${day}:${token}`, { member, cost });
+      return json(200, { ok: true, token, member_spent_micro: memberSpent + cost, team_spent_micro: teamSpent + cost });
     }
 
     if (action === "stat") {

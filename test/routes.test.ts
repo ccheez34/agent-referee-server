@@ -974,3 +974,80 @@ t("multi-part judge: GET /matches/:id shows the judge calls (tokens, time) only 
   assert.equal(op.body.operator.judge_calls.length, 3);
   assert.ok(op.body.operator.judge_calls.every((c: any) => c.outcome === "answered" && typeof c.input_tokens === "number"));
 });
+
+// ---------- team allowance (the owner's own AI sessions) ----------
+
+const TEAM_TOKEN = "t".repeat(40);
+const TEAM = { TEAM_TOKEN, TEAM_MEMBERS: "1.0,2.0,3.0,4.0,5.0", TEAM_MEMBER_DAILY_USD: "0.50", TEAM_DAILY_USD: "0.80" };
+const as2 = (member = "2.0", extra: Record<string, string> = {}) => ({ "x-team-token": TEAM_TOKEN, "x-team-member": member, ...extra });
+
+t("team allowance: off without TEAM_TOKEN; a wrong token or an unknown member is refused before anything runs", async () => {
+  assert.equal((await call(env(), "/team/review", review, as2())).status, 404);
+  const e = env(TEAM);
+  assert.equal((await call(e, "/team/review", review, { "x-team-token": "x".repeat(40), "x-team-member": "2.0" })).status, 401);
+  assert.equal((await call(e, "/team/review", review, as2("6.0"))).status, 403);
+  assert.equal((await call(e, "/team/allowance", undefined, { "x-team-token": "nope" })).status, 401);
+  const short = env({ ...TEAM, TEAM_TOKEN: "short" });
+  assert.equal((await call(short, "/team/review", review, { "x-team-token": "short", "x-team-member": "2.0" })).status, 401, "a token under 32 characters never works");
+});
+
+t("team allowance: no paywall even with payments on; the receipt says funding team, no payer; what's left comes back", async () => {
+  const { verifyReceipt } = await import("../src/receipt.ts");
+  const f = fakeFacilitator("ok");
+  try {
+    const e = env({ ...TEAM, PAYMENTS_ENABLED: "true" });
+    const before = await call(e, "/team/allowance", undefined, as2());
+    assert.equal(before.status, 200, JSON.stringify(before.body));
+    assert.equal(before.body.team.member_left_today, "$0.50");
+    assert.equal(before.body.team.usable_now, "$0.50");
+    const r = await call(e, "/team/review-3", review, as2());
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.equal(r.body.receipt.payload.funding, "team");
+    assert.equal(r.body.receipt.payload.payer, null);
+    assert.equal(await verifyReceipt(r.body.receipt, keys.PUBLIC_KEY), true);
+    assert.equal(r.body.team.member_spent_today, "$0.20");
+    assert.equal(r.body.team.member_left_today, "$0.30");
+    assert.equal(r.body.team.team_left_today, "$0.60");
+    assert.deepEqual(f.calls, { verify: 0, settle: 0 }, "the facilitator is never called");
+    // The paid route still asks for payment.
+    assert.equal((await call(e, "/review-3", review)).status, 402);
+  } finally {
+    f.restore();
+  }
+});
+
+t("team allowance: each member's budget and the team's are enforced; refusals and failures use nothing", async () => {
+  const e = env(TEAM);
+  assert.equal((await call(e, "/team/review-3", review, as2("2.0"))).status, 200); // 2.0: $0.20
+  assert.equal((await call(e, "/team/review-3", review, as2("2.0"))).status, 200); // 2.0: $0.40
+  const over = await call(e, "/team/review-3", review, as2("2.0"));
+  assert.equal(over.status, 429, JSON.stringify(over.body));
+  assert.match(over.body.error, /doesn't fit your allowance today \(\$0\.10 left\).*Nothing was used/);
+  assert.equal((await call(e, "/team/review", review, as2("2.0"))).status, 200, "a $0.05 review still fits");
+  // A failed review gives its reservation back.
+  const fail = await call(e, "/team/review-3", review, as2("3.0", { "x-test-fake-mix": "500:1", "x-test-fake-delay": "1-2" }));
+  assert.equal(fail.status, 502);
+  const left3 = await call(e, "/team/allowance", undefined, as2("3.0"));
+  assert.equal(left3.body.team.member_spent_today, "$0.00", "the failed review isn't counted");
+  assert.equal(left3.body.team.team_spent_today, "$0.45");
+  // Bad input is refused before anything is reserved.
+  assert.equal((await call(e, "/team/review", { task: "short", output: "" }, as2("3.0"))).status, 400);
+  // The team budget ($0.80): 3.0 can spend $0.20 more, then 4.0 is refused by the team limit.
+  assert.equal((await call(e, "/team/review-3", review, as2("3.0"))).status, 200); // team $0.65
+  const team = await call(e, "/team/review-3", review, as2("4.0"));
+  assert.equal(team.status, 429);
+  assert.match(team.body.error, /the team's allowance today \(\$0\.15 left\)/);
+});
+
+t("team allowance: multi-part reviews work through it at their own price, with a team receipt", async () => {
+  const e = env({ ...TEAM, ...MP, TEAM_MEMBER_DAILY_USD: "8", TEAM_DAILY_USD: "40" });
+  const r = await call(e, "/team/review-3x3", multi(3), as2("5.0"));
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.receipt.payload.receipt_format, "review-multi-v1");
+  assert.equal(r.body.receipt.payload.funding, "team");
+  assert.equal(r.body.receipt.payload.payer, null);
+  assert.equal(r.body.team.member_spent_today, "$0.70");
+  assert.equal(r.body.team.usable_now, "$7.30");
+  // Closed tiers stay closed.
+  assert.equal((await call(env({ ...TEAM }), "/team/review-3x2", multi(2), as2())).status, 503);
+});
