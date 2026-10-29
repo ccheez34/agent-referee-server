@@ -15,7 +15,7 @@ import { pathToFileURL } from "node:url";
 import { createHash, createPublicKey, verify } from "node:crypto";
 
 const PINNED = "vM2GY6ZEYc/omRlIFrzu0TaMGtjHXQtchg9d7lPKkTY="; // live signing key, key ID 375ba8b346776e2f
-const PRICES = { "review-3x2": 0.35, "review-3x3": 0.5 };
+const PRICES = { "review-3x2": 0.6, "review-3x3": 0.7 }; // the live prices since option B (Oct 28); also the most one payment may be
 const args = process.argv.slice(2);
 const opt = (k, d) => (args.indexOf(k) >= 0 ? args[args.indexOf(k) + 1] : d);
 if (!opt("--wallet-file") || !opt("--plan")) {
