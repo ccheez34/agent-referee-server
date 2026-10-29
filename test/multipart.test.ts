@@ -389,17 +389,20 @@ test("the receipt: review-multi-v1, task_sha256 kept, output_sha256 replaced by 
   assert.deepEqual(p2.votes.map((v: any) => v.issues_dropped), [0, 0, 0]);
 });
 
-test("today's JS client refuses the new review receipts clearly, and never passes one", async () => {
-  // 0.8.0 refuses through its vote-count check ("Expected ? reviewer votes"); 0.8.1 and later refuse the unknown
-  // receipt_format and say to update the client. Either is a clear refusal; what matters is that none passes.
+test("the installed JS client either refuses the new review receipts clearly (0.8.x) or checks them (0.9.0+), and never passes a wrong one", async () => {
+  // 0.8.0 refuses through its vote-count check; 0.8.1 refuses the unknown receipt_format ("update the client"); 0.9.0
+  // and later check review-multi-v1. Whichever is installed, a receipt checked against the wrong pieces, or with an
+  // output instead of pieces, must never pass.
   for (const tier of ["review-3x2", "review-3x3"] as const) {
-    const { receipt } = await sampleReceipt(tier);
+    const { receipt, input } = await sampleReceipt(tier);
     assert.equal(await verifySignature(receipt as any, [PUBLIC_KEY]), true, "the signature itself is fine");
-    const r = await verifyReviewOutcome(receipt as any, { task });
-    assert.equal(r.ok, false, `${tier} must not pass`);
-    assert.ok(r.problems.some((x: string) => /Expected \? reviewer votes|review-multi-v1|[Uu]pdate the client/.test(x)), r.problems.join("; "));
+    const right = await verifyReviewOutcome(receipt as any, { task, pieces: input.pieces } as any);
+    const refusesFormat = right.problems.some((x: string) => /Expected \? reviewer votes|[Uu]pdate the client/.test(x));
+    assert.ok(right.ok || refusesFormat, `${tier}: neither checked nor clearly refused: ${right.problems.join("; ")}`);
+    const wrong = await verifyReviewOutcome(receipt as any, { task, pieces: input.pieces.map((p, i) => (i === 0 ? { ...p, text: p.text + "!" } : p)) } as any);
+    assert.equal(wrong.ok, false, `${tier}: a changed piece must not pass`);
     const withOutput = await verifyReviewOutcome(receipt as any, { task, output: "piece one" });
-    assert.equal(withOutput.ok, false);
+    assert.equal(withOutput.ok, false, `${tier}: checking with an output must not pass`);
   }
 });
 
