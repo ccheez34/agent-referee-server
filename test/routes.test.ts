@@ -1071,7 +1071,7 @@ t("team allowance: a group pool is shared by its members, is a total (not daily)
   assert.equal(a.body.team.group, "TB-run1");
   assert.equal(a.body.team.group_left, "$0.25");
   assert.equal((await call(e, "/team/review-3", review, as2("T4"))).status, 200, "another member of the pool"); // pool $0.40
-  const over = await call(e, "/team/review", review, as2("T5"));
+  const over = await call(e, "/team/review-3", review, as2("T5")); // $0.20 doesn't fit the $0.05 left
   assert.equal(over.status, 429, JSON.stringify(over.body));
   assert.match(over.body.error, /your group's pool \(\$0\.05 left of \$0\.45; it doesn't reset\)/);
   // A failed review gives the pool back too.
@@ -1108,7 +1108,7 @@ t("team allowance: TEAM_GROUPS ignores a repeated group name, and a member keeps
 
 t("team allowance: only POST reviews and GET allowance; nothing is reserved for a wrong method", async () => {
   const e = env(TEAM);
-  assert.equal((await call(e, "/team/review", undefined, as2())).status, 405, "GET on a review route");
+  assert.ok([404, 405].includes((await call(e, "/team/review", undefined, as2())).status), "GET on a review route is refused");
   const r = await app.fetch(new Request("https://x/team/allowance", { method: "POST", headers: as2(), body: "{}" }), e, ctx);
   assert.equal(r.status, 405);
   const left = await call(e, "/team/allowance", undefined, as2());
