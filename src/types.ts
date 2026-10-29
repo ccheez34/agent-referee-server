@@ -14,6 +14,11 @@ export interface Env {
   FREE_REVIEW_DAILY_BUDGET_USD?: string;
   FREE_REVIEWS_PER_DAY?: string; // free single-reviewer reviews per address per UTC day (default 3)
   FREE_REVIEW3_PER_DAY?: string; // free review-3 reviews per address per UTC day (default 1)
+  TEAM_TOKEN?: string; // secret: the owner's team allowance token (sent as x-team-token); enables /team/*
+  TEAM_MEMBERS?: string; // comma-separated members allowed on /team/* (x-team-member): "name" or "name:usd" for its own daily budget, e.g. "S1,T3,T4,T5,2.0:0"
+  TEAM_GROUPS?: string; // shared pools, a total each (not daily): "name=member,member:usd;..." e.g. "TB-run1=T3,T4,T5:8.00"
+  TEAM_MEMBER_DAILY_USD?: string; // each member's daily review budget at list price (default 8.00)
+  TEAM_DAILY_USD?: string; // the whole team's daily review budget at list price (default 40.00)
   INTERNAL_TOKEN?: string; // secret shared with the hosted MCP server (ChatGPT); enables /internal/free/*
   EXT_FREE_DAILY_BUDGET_USD?: string; // daily budget for free reviews sent by the hosted MCP server (off when unset)
   EXT_FREE_REVIEWS_PER_DAY?: string; // per hosted-server user per UTC day (default 3)
@@ -47,8 +52,8 @@ export interface Env {
   PRICE_REVIEW_3X2?: string; // multi-part review, 2 pieces (per review, default $0.60)
   PRICE_REVIEW_3X3?: string; // multi-part review, 3 pieces (per review, default $0.70)
   MULTI_PART_ENABLED?: string; // "true" opens /review-3x2 and /review-3x3 to everyone; otherwise only x-operator-token: <ADMIN_TOKEN>
-  PRICE_JUDGE_3X2?: string; // multi-part judge seat, 2 pieces per side (default $0.45, provisional)
-  PRICE_JUDGE_3X3?: string; // multi-part judge seat, 3 pieces per side (default $0.60, provisional)
+  PRICE_JUDGE_3X2?: string; // multi-part judge seat, 2 pieces per side (default $0.45)
+  PRICE_JUDGE_3X3?: string; // multi-part judge seat, 3 pieces per side (default $0.60)
   MULTI_JUDGE_ENABLED?: string; // "true" opens judge-3x2 and judge-3x3 to everyone; otherwise only x-operator-token: <ADMIN_TOKEN>
   MULTI_PART_OPT_IN?: string; // opt-in models made eligible for the multi-part tiers after passing the live test (named only, never drawn)
   MULTI_PART_EXCLUDE?: string; // default-pool models left out of the multi-part tiers (default "claude-opus-5-5"; "" leaves none out)

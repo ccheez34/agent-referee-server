@@ -419,8 +419,9 @@ export async function reviewPayload(opts: {
   network?: string;
   now?: Date;
   id?: string;
-  /** "free": the operator paid for this review (the free daily allowance), so there is no payer. */
-  funding?: "free";
+  /** "free": the operator paid for this review (the free daily allowance), so there is no payer. "team": the
+   * operator's own team allowance paid for it (no payer either). */
+  funding?: "free" | "team";
 }) {
   const decision = decideReview(opts.commitment.decision_rule, opts.votes.map((v) => v.verdict));
   return {

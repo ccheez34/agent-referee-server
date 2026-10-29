@@ -974,3 +974,143 @@ t("multi-part judge: GET /matches/:id shows the judge calls (tokens, time) only 
   assert.equal(op.body.operator.judge_calls.length, 3);
   assert.ok(op.body.operator.judge_calls.every((c: any) => c.outcome === "answered" && typeof c.input_tokens === "number"));
 });
+
+// ---------- team allowance (the owner's own AI sessions) ----------
+
+const TEAM_TOKEN = "t".repeat(40);
+const TEAM = { TEAM_TOKEN, TEAM_MEMBERS: "1.0,2.0,3.0,4.0,5.0", TEAM_MEMBER_DAILY_USD: "0.50", TEAM_DAILY_USD: "0.80" };
+const as2 = (member = "2.0", extra: Record<string, string> = {}) => ({ "x-team-token": TEAM_TOKEN, "x-team-member": member, ...extra });
+
+t("team allowance: off without TEAM_TOKEN; a wrong token or an unknown member is refused before anything runs", async () => {
+  assert.equal((await call(env(), "/team/review", review, as2())).status, 404);
+  const e = env(TEAM);
+  assert.equal((await call(e, "/team/review", review, { "x-team-token": "x".repeat(40), "x-team-member": "2.0" })).status, 401);
+  assert.equal((await call(e, "/team/review", review, as2("6.0"))).status, 403);
+  assert.equal((await call(e, "/team/allowance", undefined, { "x-team-token": "nope" })).status, 401);
+  const short = env({ ...TEAM, TEAM_TOKEN: "short" });
+  assert.equal((await call(short, "/team/review", review, { "x-team-token": "short", "x-team-member": "2.0" })).status, 401, "a token under 32 characters never works");
+});
+
+t("team allowance: no paywall even with payments on; the receipt says funding team, no payer; what's left comes back", async () => {
+  const { verifyReceipt } = await import("../src/receipt.ts");
+  const f = fakeFacilitator("ok");
+  try {
+    const e = env({ ...TEAM, PAYMENTS_ENABLED: "true" });
+    const before = await call(e, "/team/allowance", undefined, as2());
+    assert.equal(before.status, 200, JSON.stringify(before.body));
+    assert.equal(before.body.team.member_left_today, "$0.50");
+    assert.equal(before.body.team.usable_now, "$0.50");
+    const r = await call(e, "/team/review-3", review, as2());
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.equal(r.body.receipt.payload.funding, "team");
+    assert.equal(r.body.receipt.payload.payer, null);
+    assert.equal(await verifyReceipt(r.body.receipt, keys.PUBLIC_KEY), true);
+    assert.equal(r.body.team.member_spent_today, "$0.20");
+    assert.equal(r.body.team.member_left_today, "$0.30");
+    assert.equal(r.body.team.team_left_today, "$0.60");
+    assert.deepEqual(f.calls, { verify: 0, settle: 0 }, "the facilitator is never called");
+    // The paid route still asks for payment.
+    assert.equal((await call(e, "/review-3", review)).status, 402);
+  } finally {
+    f.restore();
+  }
+});
+
+t("team allowance: each member's budget and the team's are enforced; refusals and failures use nothing", async () => {
+  const e = env(TEAM);
+  assert.equal((await call(e, "/team/review-3", review, as2("2.0"))).status, 200); // 2.0: $0.20
+  assert.equal((await call(e, "/team/review-3", review, as2("2.0"))).status, 200); // 2.0: $0.40
+  const over = await call(e, "/team/review-3", review, as2("2.0"));
+  assert.equal(over.status, 429, JSON.stringify(over.body));
+  assert.match(over.body.error, /doesn't fit your allowance today \(\$0\.10 left;.*Nothing was used/);
+  assert.equal((await call(e, "/team/review", review, as2("2.0"))).status, 200, "a $0.05 review still fits");
+  // A failed review gives its reservation back.
+  const fail = await call(e, "/team/review-3", review, as2("3.0", { "x-test-fake-mix": "500:1", "x-test-fake-delay": "1-2" }));
+  assert.equal(fail.status, 502);
+  const left3 = await call(e, "/team/allowance", undefined, as2("3.0"));
+  assert.equal(left3.body.team.member_spent_today, "$0.00", "the failed review isn't counted");
+  assert.equal(left3.body.team.team_spent_today, "$0.45");
+  // Bad input is refused before anything is reserved.
+  assert.equal((await call(e, "/team/review", { task: "short", output: "" }, as2("3.0"))).status, 400);
+  // The team budget ($0.80): 3.0 can spend $0.20 more, then 4.0 is refused by the team limit.
+  assert.equal((await call(e, "/team/review-3", review, as2("3.0"))).status, 200); // team $0.65
+  const team = await call(e, "/team/review-3", review, as2("4.0"));
+  assert.equal(team.status, 429);
+  assert.match(team.body.error, /the team's allowance today \(\$0\.15 left;/);
+});
+
+t("team allowance: a member can have its own daily budget, including $0 until it's switched on", async () => {
+  const e = env({ ...TEAM, TEAM_MEMBERS: "S1,T3:0.20,2.0:0", TEAM_MEMBER_DAILY_USD: "8", TEAM_DAILY_USD: "40" });
+  const zero = await call(e, "/team/review", review, as2("2.0"));
+  assert.equal(zero.status, 429, JSON.stringify(zero.body));
+  assert.equal(zero.body.team.member_daily, "$0.00");
+  assert.equal((await call(e, "/team/review-3", review, as2("T3"))).status, 200);
+  assert.equal((await call(e, "/team/review", review, as2("T3"))).status, 429, "T3's own $0.20 is used up");
+  const s1 = await call(e, "/team/allowance", undefined, as2("S1"));
+  assert.equal(s1.body.team.member_daily, "$8.00", "no amount: the default");
+  assert.equal((await call(e, "/team/review", review, as2("1.0"))).status, 403, "not listed");
+});
+
+t("team allowance: multi-part reviews work through it at their own price, with a team receipt", async () => {
+  const e = env({ ...TEAM, ...MP, TEAM_MEMBER_DAILY_USD: "8", TEAM_DAILY_USD: "40" });
+  const r = await call(e, "/team/review-3x3", multi(3), as2("5.0"));
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.receipt.payload.receipt_format, "review-multi-v1");
+  assert.equal(r.body.receipt.payload.funding, "team");
+  assert.equal(r.body.receipt.payload.payer, null);
+  assert.equal(r.body.team.member_spent_today, "$0.70");
+  assert.equal(r.body.team.usable_now, "$7.30");
+  // Closed tiers stay closed.
+  assert.equal((await call(env({ ...TEAM }), "/team/review-3x2", multi(2), as2())).status, 503);
+});
+
+t("team allowance: a group pool is shared by its members, is a total (not daily), and is shown with what's left", async () => {
+  const e = env({ ...TEAM, TEAM_MEMBERS: "S1,T3,T4,T5", TEAM_MEMBER_DAILY_USD: "8", TEAM_DAILY_USD: "40", TEAM_GROUPS: "TB-run1=T3,T4,T5:0.45;S1-run1=S1:0.20" });
+  const a = await call(e, "/team/review-3", review, as2("T3"));
+  assert.equal(a.status, 200, JSON.stringify(a.body));
+  assert.equal(a.body.team.group, "TB-run1");
+  assert.equal(a.body.team.group_left, "$0.25");
+  assert.equal((await call(e, "/team/review-3", review, as2("T4"))).status, 200, "another member of the pool"); // pool $0.40
+  const over = await call(e, "/team/review", review, as2("T5"));
+  assert.equal(over.status, 429, JSON.stringify(over.body));
+  assert.match(over.body.error, /your group's pool \(\$0\.05 left of \$0\.45; it doesn't reset\)/);
+  // A failed review gives the pool back too.
+  const s1fail = await call(e, "/team/review-3", review, as2("S1", { "x-test-fake-mix": "500:1", "x-test-fake-delay": "1-2" }));
+  assert.equal(s1fail.status, 502);
+  const s1 = await call(e, "/team/allowance", undefined, as2("S1"));
+  assert.equal(s1.body.team.group_left, "$0.20");
+  assert.equal(s1.body.team.usable_now, "$0.20");
+  assert.equal((await call(e, "/team/review-3", review, as2("S1"))).status, 200);
+  assert.equal((await call(e, "/team/review", review, as2("S1"))).status, 429, "S1's own pool is used up");
+});
+
+t("team allowance: team reviews are counted as team_<member>_*, never as paid ones", async () => {
+  const e = env(TEAM);
+  assert.equal((await call(e, "/team/review", review, as2("2.0"))).status, 200);
+  await call(e, "/team/review", review, as2("2.0", { "x-test-fake-mix": "500:1", "x-test-fake-delay": "1-2" }));
+  await tick();
+  const r = await call(e, "/admin/stats", undefined, { authorization: `Bearer ${ADMIN}` });
+  const today = r.body.today.counts;
+  assert.equal(today["team_2-0_ok"], 1, JSON.stringify(today));
+  assert.equal(today["team_2-0_failed"], 1);
+  assert.equal(today.paid_ok_review, undefined, "not a paid review");
+  assert.equal(today.paid_failed, undefined);
+});
+
+t("team allowance: TEAM_GROUPS ignores a repeated group name, and a member keeps its first group", async () => {
+  const e = env({ ...TEAM, TEAM_MEMBERS: "T3,T4", TEAM_MEMBER_DAILY_USD: "8", TEAM_DAILY_USD: "40", TEAM_GROUPS: "A=T3:0.20;A=T4:5.00;B=T3,T4:5.00" });
+  const t3 = await call(e, "/team/allowance", undefined, as2("T3"));
+  assert.equal(t3.body.team.group, "A");
+  assert.equal(t3.body.team.group_total, "$0.20");
+  const t4 = await call(e, "/team/allowance", undefined, as2("T4"));
+  assert.equal(t4.body.team.group, "B", "the repeated A is ignored, so T4 is in B");
+});
+
+t("team allowance: only POST reviews and GET allowance; nothing is reserved for a wrong method", async () => {
+  const e = env(TEAM);
+  assert.equal((await call(e, "/team/review", undefined, as2())).status, 405, "GET on a review route");
+  const r = await app.fetch(new Request("https://x/team/allowance", { method: "POST", headers: as2(), body: "{}" }), e, ctx);
+  assert.equal(r.status, 405);
+  const left = await call(e, "/team/allowance", undefined, as2());
+  assert.equal(left.body.team.member_spent_today, "$0.00");
+});
