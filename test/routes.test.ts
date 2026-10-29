@@ -1105,3 +1105,12 @@ t("team allowance: TEAM_GROUPS ignores a repeated group name, and a member keeps
   const t4 = await call(e, "/team/allowance", undefined, as2("T4"));
   assert.equal(t4.body.team.group, "B", "the repeated A is ignored, so T4 is in B");
 });
+
+t("team allowance: only POST reviews and GET allowance; nothing is reserved for a wrong method", async () => {
+  const e = env(TEAM);
+  assert.equal((await call(e, "/team/review", undefined, as2())).status, 405, "GET on a review route");
+  const r = await app.fetch(new Request("https://x/team/allowance", { method: "POST", headers: as2(), body: "{}" }), e, ctx);
+  assert.equal(r.status, 405);
+  const left = await call(e, "/team/allowance", undefined, as2());
+  assert.equal(left.body.team.member_spent_today, "$0.00");
+});

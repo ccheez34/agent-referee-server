@@ -150,11 +150,15 @@ export class Ledger {
     const st = this.state.storage;
     if (!st.list || !st.delete) return;
     const today = (await st.get<string>("counters_day")) ?? new Date(this.now()).toISOString().slice(0, 10);
+    const yesterday = new Date(Date.parse(`${today}T00:00:00Z`) - 86_400_000).toISOString().slice(0, 10);
     let deleted = 0;
     for (const prefix of ["rf:", "ro:", "rft:", "rfi:", "dm:", "dmc:", "fr:", "frb:", "frt:", "tm:", "tt:", "tmt:", "reviewfail:", "reviewok:", "reviewfailtotal:", "demo:", "demoip:"]) {
       while (deleted < 5_000) {
         const found = await st.list({ prefix, limit: 128 });
-        const old = [...found.keys()].filter((k) => !k.slice(prefix.length).startsWith(today) || prefix.startsWith("review") || prefix.startsWith("demo")).slice(0, 5_000 - deleted);
+        // Team reservation tokens (tmt:) are kept one extra day, so a review that runs across midnight can still give
+        // back its (never-resetting) group pool.
+        const keep = (k: string) => k.slice(prefix.length).startsWith(today) || (prefix === "tmt:" && k.slice(prefix.length).startsWith(yesterday));
+        const old = [...found.keys()].filter((k) => !keep(k) || prefix.startsWith("review") || prefix.startsWith("demo")).slice(0, 5_000 - deleted);
         if (!old.length) break;
         await st.delete(old);
         deleted += old.length;
@@ -348,9 +352,12 @@ export class Ledger {
         const r = await st.get<{ member: string; cost: number; group?: string }>(tk);
         if (!r) return json(200, { released: false });
         if (r.group) await st.put(`tgp:${r.group}`, Math.max(0, ((await st.get<number>(`tgp:${r.group}`)) ?? 0) - r.cost));
+        // Only the counters that still exist: a day already cleaned up isn't written back.
         const mk = `tm:${tday}:${r.member}`;
-        await st.put(mk, Math.max(0, ((await st.get<number>(mk)) ?? 0) - r.cost));
-        await st.put(`tt:${tday}`, Math.max(0, ((await st.get<number>(`tt:${tday}`)) ?? 0) - r.cost));
+        const mv = await st.get<number>(mk);
+        if (mv !== undefined) await st.put(mk, Math.max(0, mv - r.cost));
+        const tv = await st.get<number>(`tt:${tday}`);
+        if (tv !== undefined) await st.put(`tt:${tday}`, Math.max(0, tv - r.cost));
         await st.put(tk, null); // the old day's cleanup deletes it
         return json(200, { released: true });
       }

@@ -1352,6 +1352,9 @@ const routePath = (c: any): string => String(c.req.path).replace(/^\/team(?=\/)/
 
 async function teamAuth(c: any, next: any) {
   if (!c.env.TEAM_TOKEN) return err(404, "Not found. GET / for how to use this service.");
+  // Reviews are POST only and the allowance is GET only, so nothing is reserved for a request that can't be served.
+  const want = routePath(c) === "/team/allowance" || c.req.path === "/team/allowance" ? "GET" : "POST";
+  if (c.req.method !== want) return err(405, `Use ${want}.`);
   if (!(await sameToken(c.env.TEAM_TOKEN, c.req.header("x-team-token")))) return err(401, "Wrong or missing team token.");
   const member = String(c.req.header("x-team-member") ?? "").trim();
   if (!teamConfig(c.env).members.includes(member)) return err(403, "x-team-member must be one of the team's members (TEAM_MEMBERS).");
@@ -1388,26 +1391,42 @@ async function teamBudget(c: any, next: any) {
         : `${q.reason === "member" ? "your" : "the team's"} allowance today (${q.reason === "member" ? view.member_left_today : view.team_left_today} left; it resets at 00:00 UTC)`;
     return c.json({ error: `This ${g.tier} (${usdText(cost)}) doesn't fit ${why}. Nothing was used.`, team: view }, 429);
   }
-  await next();
-  const status = c.res?.status ?? 500;
-  if (status >= 400) {
-    // The review didn't happen or failed: it isn't counted.
+  // Fail closed: no reservation token means nothing was reserved, so the review doesn't run.
+  if (typeof q?.token !== "string") return err(503, "The team allowance can't be checked right now. Nothing was used; try again in a minute.");
+  const release = async () => {
     for (let attempt = 1; attempt <= 2; attempt++) {
       try {
         await ledgerJson(c.env, undefined, "team", { release_token: q.token });
-        break;
+        return;
       } catch (e: any) {
         if (attempt === 2) await recordEvent(c.env, "ledger_error", `team release: ${String(e?.message ?? e)}`);
       }
     }
+  };
+  try {
+    await next();
+  } catch (e) {
+    // Anything thrown past Hono's error handling: the review didn't finish, so it isn't counted.
+    await release();
+    stat(c, `${statName}_failed`);
+    throw e;
+  }
+  const status = c.res?.status ?? 500;
+  if (status >= 400) {
+    // The review didn't happen or failed: it isn't counted.
+    await release();
     stat(c, `${statName}_failed`);
     return;
   }
   stat(c, `${statName}_ok`);
   const body: any = await c.res.clone().json().catch(() => null);
   if (body && typeof body === "object") {
-    c.res = undefined; // so Hono doesn't copy the old response's headers (a stale content-length) onto the new one
-    c.res = new Response(JSON.stringify({ ...body, team: teamView(cfg, team.member, q.member_spent_micro, q.team_spent_micro, q.group_spent_micro) }), { status, headers: { "content-type": "application/json" } });
+    // Keep the handler's headers, except the length, which changes.
+    const headers = new Headers(c.res.headers);
+    headers.delete("content-length");
+    headers.set("content-type", "application/json");
+    c.res = undefined; // so Hono doesn't merge the old response's headers in again
+    c.res = new Response(JSON.stringify({ ...body, team: teamView(cfg, team.member, q.member_spent_micro, q.team_spent_micro, q.group_spent_micro) }), { status, headers });
   }
 }
 
