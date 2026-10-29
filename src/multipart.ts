@@ -51,12 +51,13 @@ export const MULTI_MAX_TOKENS = 12_000;
  * lower than MULTI_MAX_TOKENS is capped at its limit. null = NOT YET CHECKED: launch is blocked until every eligible
  * model has a number here (see the test "every eligible model has a checked output limit").
  */
+// Checked Oct 28, 2026. All are well above MULTI_MAX_TOKENS, so none lowers it today; recheck if a model changes.
 export const MODEL_OUTPUT_LIMITS: Record<string, number | null> = {
-  "claude-opus-5-5": null,
-  "claude-sonnet-5-5": null,
-  "openai/gpt-6-luna": null,
-  "google/gemini-4-argon": null,
-  "google/gemini-3.7-flash": null,
+  "claude-opus-5-5": 128_000, // platform.claude.com model overview: "Max output: 128K tokens" (300K only on the Batch API, beta)
+  "claude-sonnet-5-5": 128_000, // same page's comparison table: 128K
+  "openai/gpt-6-luna": 128_000, // 128,000 max completion tokens (pi.dev OpenRouter listing; llmreference.com citing OpenAI)
+  "google/gemini-4-argon": 65_536, // 65,536 per synchronous request (llmreference.com); another listing says more, so the lower figure
+  "google/gemini-3.7-flash": 65_536, // 65,536 output tokens on OpenRouter (llmreference.com)
   // Opt-in models, checked only if one is ever made eligible through MULTI_PART_OPT_IN (it isn't eligible without a number).
   "moonshotai/kimi-k3": null,
 };

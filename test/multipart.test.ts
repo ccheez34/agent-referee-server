@@ -258,7 +258,7 @@ test("max_tokens is 12,000 for every reviewer, capped by the model's published l
   MODEL_OUTPUT_LIMITS[ARGON] = saved;
 });
 
-test("before launch: every eligible model has a checked output limit (spec section 1, Answer room)", { todo: "fill MODEL_OUTPUT_LIMITS from each provider's published limits" }, () => {
+test("before launch: every eligible model has a checked output limit (spec section 1, Answer room)", () => {
   for (const m of multiModels({}).eligible) assert.equal(typeof MODEL_OUTPUT_LIMITS[m], "number", `${m}: published output limit not recorded`);
 });
 
