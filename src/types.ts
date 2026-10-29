@@ -15,7 +15,7 @@ export interface Env {
   FREE_REVIEWS_PER_DAY?: string; // free single-reviewer reviews per address per UTC day (default 3)
   FREE_REVIEW3_PER_DAY?: string; // free review-3 reviews per address per UTC day (default 1)
   TEAM_TOKEN?: string; // secret: the owner's team allowance token (sent as x-team-token); enables /team/*
-  TEAM_MEMBERS?: string; // comma-separated member names allowed on /team/* (x-team-member), e.g. "1.0,2.0,3.0,4.0,5.0"
+  TEAM_MEMBERS?: string; // comma-separated members allowed on /team/* (x-team-member): "name" or "name:usd" for its own daily budget, e.g. "S1,T3,T4,T5,2.0:0"
   TEAM_MEMBER_DAILY_USD?: string; // each member's daily review budget at list price (default 8.00)
   TEAM_DAILY_USD?: string; // the whole team's daily review budget at list price (default 40.00)
   INTERNAL_TOKEN?: string; // secret shared with the hosted MCP server (ChatGPT); enables /internal/free/*

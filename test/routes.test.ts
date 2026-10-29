@@ -1039,6 +1039,18 @@ t("team allowance: each member's budget and the team's are enforced; refusals an
   assert.match(team.body.error, /the team's allowance today \(\$0\.15 left\)/);
 });
 
+t("team allowance: a member can have its own daily budget, including $0 until it's switched on", async () => {
+  const e = env({ ...TEAM, TEAM_MEMBERS: "S1,T3:0.20,2.0:0", TEAM_MEMBER_DAILY_USD: "8", TEAM_DAILY_USD: "40" });
+  const zero = await call(e, "/team/review", review, as2("2.0"));
+  assert.equal(zero.status, 429, JSON.stringify(zero.body));
+  assert.equal(zero.body.team.member_daily, "$0.00");
+  assert.equal((await call(e, "/team/review-3", review, as2("T3"))).status, 200);
+  assert.equal((await call(e, "/team/review", review, as2("T3"))).status, 429, "T3's own $0.20 is used up");
+  const s1 = await call(e, "/team/allowance", undefined, as2("S1"));
+  assert.equal(s1.body.team.member_daily, "$8.00", "no amount: the default");
+  assert.equal((await call(e, "/team/review", review, as2("1.0"))).status, 403, "not listed");
+});
+
 t("team allowance: multi-part reviews work through it at their own price, with a team receipt", async () => {
   const e = env({ ...TEAM, ...MP, TEAM_MEMBER_DAILY_USD: "8", TEAM_DAILY_USD: "40" });
   const r = await call(e, "/team/review-3x3", multi(3), as2("5.0"));

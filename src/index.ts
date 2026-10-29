@@ -1280,23 +1280,33 @@ function teamConfig(env: Env) {
     const n = Number(String(v ?? "").trim());
     return String(v ?? "").trim() !== "" && Number.isFinite(n) && n >= 0 ? n : d;
   };
+  const memberMicro = Math.round(usd(env.TEAM_MEMBER_DAILY_USD, 8) * 1_000_000);
+  // TEAM_MEMBERS entries are "name" (the default daily budget) or "name:usd" (its own, e.g. "2.0:0" until it's switched on).
+  const budgets = new Map<string, number>();
+  for (const raw of String(env.TEAM_MEMBERS ?? "").split(",")) {
+    const m = raw.trim().match(/^([A-Za-z0-9._-]{1,32})(?::(\d+(?:\.\d+)?))?$/);
+    if (m) budgets.set(m[1], m[2] !== undefined ? Math.round(Number(m[2]) * 1_000_000) : memberMicro);
+  }
   return {
-    members: String(env.TEAM_MEMBERS ?? "").split(",").map((x) => x.trim()).filter((x) => /^[A-Za-z0-9._-]{1,32}$/.test(x)),
-    memberMicro: Math.round(usd(env.TEAM_MEMBER_DAILY_USD, 8) * 1_000_000),
+    members: [...budgets.keys()],
+    budgets,
+    memberMicro,
     teamMicro: Math.round(usd(env.TEAM_DAILY_USD, 40) * 1_000_000),
   };
 }
+
+const memberBudget = (cfg: ReturnType<typeof teamConfig>, member: string) => cfg.budgets.get(member) ?? 0;
 
 const usdText = (micro: number) => `$${(Math.max(0, micro) / 1_000_000).toFixed(2)}`;
 
 /** What a member sees about its allowance (before and after every review, and at GET /team/allowance). */
 function teamView(cfg: ReturnType<typeof teamConfig>, member: string, memberSpent = 0, teamSpent = 0) {
-  const memberLeft = Math.max(0, cfg.memberMicro - memberSpent);
+  const memberLeft = Math.max(0, memberBudget(cfg, member) - memberSpent);
   const teamLeft = Math.max(0, cfg.teamMicro - teamSpent);
   return {
     funding: "team",
     member,
-    member_daily: usdText(cfg.memberMicro),
+    member_daily: usdText(memberBudget(cfg, member)),
     member_spent_today: usdText(memberSpent),
     member_left_today: usdText(memberLeft),
     team_daily: usdText(cfg.teamMicro),
@@ -1344,7 +1354,7 @@ async function teamBudget(c: any, next: any) {
   const statName = `team_${team.member.toLowerCase().replace(/[^a-z0-9]/g, "-")}`;
   let q: any;
   try {
-    q = await ledgerJson(c.env, undefined, "team", { member: team.member, cost_micro: cost, member_budget_micro: cfg.memberMicro, team_budget_micro: cfg.teamMicro }, true);
+    q = await ledgerJson(c.env, undefined, "team", { member: team.member, cost_micro: cost, member_budget_micro: memberBudget(cfg, team.member), team_budget_micro: cfg.teamMicro }, true);
   } catch (e: any) {
     await recordEvent(c.env, "ledger_error", `team: ${String(e?.message ?? e)}`);
     return err(503, "The team allowance can't be checked right now. Nothing was used; try again in a minute.");

@@ -52,8 +52,9 @@
     // (10 Opus + 20 OpenRouter calls). The Phase 2b ramp checks Sonnet above that; lower a pool if it shows "throttled".
     "GATE_SLOTS_ANTHROPIC_CLAUDE_SONNET_5_5": "20",
     "GATE_SLOTS_ANTHROPIC_CLAUDE_OPUS_5_5": "10",
-    // Team allowance for the owner's own AI sessions (/team/*). Off until the TEAM_TOKEN secret is set.
-    "TEAM_MEMBERS": "1.0,2.0,3.0,4.0,5.0",
+    // Team allowance for the owner's own AI sessions (/team/*). Off until the TEAM_TOKEN secret is set. The experiment
+    // sessions S1, T3, T4, T5 have the default budget; 1.0-5.0 are members with $0 until after the experiment.
+    "TEAM_MEMBERS": "S1,T3,T4,T5,1.0:0,2.0:0,3.0:0,4.0:0,5.0:0",
     "TEAM_MEMBER_DAILY_USD": "8.00",
     "TEAM_DAILY_USD": "40.00",
     // Free sealed reviews (the operator pays): 3 single + 1 review-3 per address per UTC day, all inside one
@@ -106,7 +107,7 @@
         "PANEL_3_MODELS": "claude-opus-5-5,openai/gpt-6-luna,google/gemini-3.7-flash",
         "GATE_SLOTS_ANTHROPIC_CLAUDE_SONNET_5_5": "20",
         "GATE_SLOTS_ANTHROPIC_CLAUDE_OPUS_5_5": "10",
-        "TEAM_MEMBERS": "1.0,2.0,3.0,4.0,5.0",
+        "TEAM_MEMBERS": "S1,T3,T4,T5,1.0:0,2.0:0,3.0:0,4.0:0,5.0:0",
         "TEAM_MEMBER_DAILY_USD": "8.00",
         "TEAM_DAILY_USD": "40.00",
         "DEMO_PER_IP_LIMIT": "20",
