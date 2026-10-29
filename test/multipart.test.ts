@@ -135,6 +135,11 @@ test("eligible models: the default pool without Haiku; opt-in models only once l
   assert.deepEqual(m.eligible.sort(), m.drawable.sort());
   assert.deepEqual(m.missing, []);
   assert.ok(!multiModels({ MULTI_PART_OPT_IN: KIMI }).eligible.includes(KIMI), "not without a recorded output limit");
+  for (const bad of [0, -1, 1.5, NaN]) {
+    MODEL_OUTPUT_LIMITS[KIMI] = bad;
+    assert.ok(!multiModels({ MULTI_PART_OPT_IN: KIMI }).eligible.includes(KIMI), `not with a recorded limit of ${bad}`);
+  }
+  MODEL_OUTPUT_LIMITS[KIMI] = null;
   const withKimi = withKimiChecked(() => multiModels({ MULTI_PART_OPT_IN: `${KIMI},not-a-model,${HAIKU}` }));
   assert.ok(withKimi.eligible.includes(KIMI), "listed opt-in model becomes eligible");
   assert.ok(!withKimi.drawable.includes(KIMI), "but is never drawn");
@@ -164,7 +169,7 @@ test("refused before payment: Haiku, opt-in models, two models from one company,
 test("a company with no eligible model closes the tiers (503), never fewer than three companies", async () => {
   await assert.rejects(multiCommitment("review-3x3", { MULTI_PART_EXCLUDE: `${ARGON},${FLASH}` }), (e: any) => e instanceof MultiClosedError && /google/.test(e.message));
   await assert.rejects(multiCommitment("review-3x3", { MULTI_PART_EXCLUDE: LUNA }, [OPUS, LUNA, ARGON]), MultiClosedError, "GPT-6 Luna is the only OpenAI model");
-  await assert.rejects(multiCommitment("review-3x3", { MODEL_POOL: `${OPUS},${LUNA}` }), MultiClosedError, "a pool of two companies");
+  await assert.rejects(multiCommitment("review-3x3", { MODEL_POOL: `${OPUS},${LUNA}` }), (e: any) => e instanceof MultiClosedError && /the model pool has only 2\.$/.test(e.message), "a pool of two companies, said plainly");
   await assert.rejects(multiCommitment("review-3x3", { MODEL_POOL: `${HAIKU},${LUNA},${ARGON}` }), MultiClosedError, "Anthropic's only model is light");
   // Even with an opt-in model from a fourth company eligible, a missing default company still closes the tier.
   await withKimiChecked(() => assert.rejects(multiCommitment("review-3x3", { MULTI_PART_EXCLUDE: LUNA, MULTI_PART_OPT_IN: KIMI }, [OPUS, KIMI, ARGON]), MultiClosedError));

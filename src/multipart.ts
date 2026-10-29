@@ -95,34 +95,36 @@ const list = (s?: string) => String(s ?? "").split(",").map((x) => x.trim()).fil
 /**
  * drawable: what random draws use (the default pool, without light models such as Haiku and without excluded models).
  * eligible: what a request may name (drawable, plus opt-in models listed in MULTI_PART_OPT_IN).
- * missing: companies of the default pool with no drawable model; while any is missing the tiers are closed (503).
+ * missing: companies of the default pool with no drawable model; tooFewCompanies: the pool itself has fewer than 3.
+ * While either holds, the tiers are closed (503).
  */
-export function multiModels(env: MultiEnv): { drawable: string[]; eligible: string[]; missing: string[] } {
+export function multiModels(env: MultiEnv): { drawable: string[]; eligible: string[]; missing: string[]; poolCompanies: number } {
   const light = longReviewRule(env).light_models;
   const exclude = list(env.MULTI_PART_EXCLUDE);
   const ok = (m: string) => !light.includes(m) && !exclude.includes(m);
   const pool = modelPool(env);
   const drawable = pool.filter(ok);
-  const checked = (m: string) => typeof MODEL_OUTPUT_LIMITS[m] === "number";
+  const checked = (m: string) => Number.isInteger(MODEL_OUTPUT_LIMITS[m]) && (MODEL_OUTPUT_LIMITS[m] as number) > 0;
   const optIn = list(env.MULTI_PART_OPT_IN).filter((m) => optInModels(env).includes(m) && allowedModels(env).includes(m) && ok(m) && checked(m));
   const eligible = [...new Set([...drawable, ...optIn])];
   const have = new Set(drawable.map(companyOf));
   const companies = [...new Set(pool.map(companyOf))];
   const missing = companies.filter((c) => !have.has(c));
-  if (companies.length < MULTI_SIZE) missing.push(`(only ${companies.length} companies in the pool)`);
-  return { drawable, eligible, missing };
+  return { drawable, eligible, missing, poolCompanies: companies.length };
 }
 
 /** Thrown when the tiers can't seat three companies right now (answered 503 before payment). */
 export class MultiClosedError extends Error {}
 
 export async function multiCommitment(tier: MultiTier, env: MultiEnv, panel?: PanelRequest, rand?: () => number): Promise<ReviewCommitment> {
-  const { drawable, eligible, missing } = multiModels(env);
-  if (missing.length) throw new MultiClosedError(`${tier} is closed for now: it needs an eligible reviewer from each of three AI companies, and ${missing.length > 1 ? `these have none: ${missing.join(", ")}` : `${missing[0]} has none`}.`);
+  const { drawable, eligible, missing, poolCompanies } = multiModels(env);
+  const need = `${tier} is closed for now: it needs an eligible reviewer from each of three AI companies`;
+  if (poolCompanies < MULTI_SIZE) throw new MultiClosedError(`${need}, and the model pool has only ${poolCompanies}.`);
+  if (missing.length) throw new MultiClosedError(`${need}, and ${missing.length > 1 ? `these have none: ${missing.join(", ")}` : `${missing[0]} has none`}.`);
   const notEligible = (ms: string[]) => [...new Set(ms.filter((m) => !eligible.includes(m)))];
   const threeCompanies = (ms: string[]) => ms.length === MULTI_SIZE && new Set(ms.map(companyOf)).size === MULTI_SIZE;
   const notEligibleMsg = (bad: string[]) =>
-    `Not eligible for multi-part reviews: ${bad.join(", ")}. These tiers use only ${eligible.join(", ")}: light models are refused, and opt-in models only work once the operator has made them eligible. GET /reviewers lists them.`;
+    `Not eligible for multi-part reviews: ${bad.join(", ")}. These tiers use only ${eligible.join(", ")}: light models and models the operator has taken off these tiers are refused, and opt-in models only work once the operator has made them eligible. GET /reviewers lists them.`;
   const companyMsg = "A multi-part review needs three models from three different AI companies (for example one Anthropic, one OpenAI, one Google).";
   let picked: { models: string[]; selection: PanelSelection };
   if (panel === undefined || panel === "rotate") {

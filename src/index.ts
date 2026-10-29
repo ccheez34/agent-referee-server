@@ -1390,7 +1390,7 @@ async function multiPartInfo(env: Env) {
   const m = multiModels(env);
   const prompt = { format_version: MULTI_FORMAT_VERSION, system_prompt: MULTI_SYSTEM, message_format: MULTI_MESSAGE_FORMAT };
   return {
-    status: !multiOnForAll(env) ? "not open yet" : m.missing.length ? "closed (a company has no eligible model)" : "on",
+    status: !multiOnForAll(env) ? "not open yet" : m.missing.length || m.poolCompanies < 3 ? "closed (fewer than three companies have an eligible model)" : "on",
     tiers: { "review-3x2": { price: mp["review-3x2"], pieces: 2, max_issues: MULTI_MAX_ISSUES[2] }, "review-3x3": { price: mp["review-3x3"], pieces: 3, max_issues: MULTI_MAX_ISSUES[3] } },
     how: "POST /review-3x2 or /review-3x3 (x402 paid only; no free allowance) with {task, pieces: [{name?, text}], title?, criteria?, panel?}. Three reviewers from three companies each read every piece in one call. If a reviewer fails, nothing is charged, and the failure uses up as many of the address's allowed failures as the review has pieces.",
     limits: { task: `10 to ${REVIEW_LIMITS.maxTask}`, piece_text: `1 to ${MULTI_LIMITS.maxPiece}`, all_pieces: MULTI_LIMITS.maxTotal, piece_name: `optional, 1 to ${MULTI_LIMITS.maxName} printable characters, no line breaks`, body_bytes: MULTI_LIMITS.maxBodyBytes, counting: "characters are UTF-16 code units (JavaScript .length)" },
