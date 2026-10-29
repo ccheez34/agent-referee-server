@@ -24,6 +24,10 @@ import {
   MULTI_BUDGET_MS, MULTI_CALL_TIMEOUT_MS, MULTI_FORMAT_VERSION, MULTI_LEASE_MS, MULTI_LIMITS, MULTI_MAX_ISSUES, MULTI_MESSAGE_FORMAT, MULTI_PIECES, MULTI_RECEIPT_FORMAT, MULTI_SYSTEM,
   MultiClosedError, TOO_BIG, boundaryToken, multiCommitment, multiExcluded, multiMaxTokens, multiModels, MULTI_DEFAULT_PRICES, multiReviewPayload, multiReviewerHow, readJsonCapped, validateMultiReview, type MultiTier,
 } from "./multipart.ts";
+import {
+  MULTI_JUDGE_BUDGET_MS, MULTI_JUDGE_CALL_TIMEOUT_MS, MULTI_JUDGE_DEFAULT_PRICES, MULTI_JUDGE_FORMAT_VERSION, MULTI_JUDGE_LIMITS, MULTI_JUDGE_MESSAGE_FORMAT, MULTI_JUDGE_PIECES,
+  MULTI_JUDGE_RECEIPT_FORMAT, MULTI_JUDGE_SYSTEM, MULTI_JUDGE_TIMEOUT_MS, MULTI_JUDGE_TIERS, isMultiJudgeTier, multiJudgePromptSha,
+} from "./multijudge.ts";
 
 export { MatchRoom, Ledger, Gate, Health };
 
@@ -68,6 +72,8 @@ function prices(env: Env) {
     judge: env.PRICE_JUDGE || "$0.10",
     "judge-2": env.PRICE_JUDGE_2 || "$0.20",
     "judge-3": env.PRICE_JUDGE_3 || "$0.35",
+    "judge-3x2": env.PRICE_JUDGE_3X2 || MULTI_JUDGE_DEFAULT_PRICES["judge-3x2"],
+    "judge-3x3": env.PRICE_JUDGE_3X3 || MULTI_JUDGE_DEFAULT_PRICES["judge-3x3"],
   } satisfies Record<Tier, string>;
 }
 
@@ -85,6 +91,12 @@ const multiOnForAll = (env: Env) => env.MULTI_PART_ENABLED === "true";
 async function multiOn(c: any): Promise<boolean> {
   return multiOnForAll(c.env) || (await isOperator(c));
 }
+/** The multi-part judge tiers have their own switch (they launch after the review tiers): MULTI_JUDGE_ENABLED=true,
+ * or the operator's token for tests. */
+const multiJudgeOnForAll = (env: Env) => env.MULTI_JUDGE_ENABLED === "true";
+async function multiJudgeOn(c: any): Promise<boolean> {
+  return multiJudgeOnForAll(c.env) || (await isOperator(c));
+}
 /** The request carries the operator's token (x-operator-token: ADMIN_TOKEN). */
 async function isOperator(c: any): Promise<boolean> {
   const t = c.req.header("x-operator-token");
@@ -92,7 +104,7 @@ async function isOperator(c: any): Promise<boolean> {
 }
 
 // The 2-seat tiers an invite match (host pays for both seats) is available for.
-const INVITE_TIERS = ["rps", "rps-bo3", "weighted", "judge", "judge-2", "judge-3"] as const;
+const INVITE_TIERS = ["rps", "rps-bo3", "weighted", "judge", "judge-2", "judge-3", "judge-3x2", "judge-3x3"] as const;
 
 // Paid routes. Payment only settles when the handler succeeds (status < 400),
 // so a bad match id or a taken seat never costs the agent anything.
@@ -135,11 +147,13 @@ function getPaywall(env: Env): MiddlewareHandler {
     seat_token: { type: "string", description: "Secret token for your later commit/reveal/submit calls. Shown once." },
     match: { type: "object", description: "Current match status: phase, who it's waiting on, etc." },
   };
-  const route = (price: string, description: string, seatDesc = "Your seat label, one of the seats named when the match was created") => ({
+  const route = (price: string, description: string, seatDesc = "Your seat label, one of the seats named when the match was created", discoverable = true) => ({
     price,
     network,
-    config: { description: description + how, mimeType: "application/json", inputSchema: joinInput(seatDesc), outputSchema: joinOutput, discoverable: true },
+    config: { description: description + how, mimeType: "application/json", inputSchema: joinInput(seatDesc), outputSchema: joinOutput, discoverable },
   });
+  const multiJudgeText = (n: number) =>
+    `Agent Referee — a panel of 3 independent AI judges from three different companies decides between two AI agents by rules both agreed to; each side submits ${n} pieces of up to ${MULTI_JUDGE_LIMITS.maxPiece} characters, and every judge reads all of them. Majority wins; every vote is in the signed receipt. Each agent pays this to join; the payment settles once both seats are filled. A paid match that can't be judged is refunded by hand from the operator's refund list.`;
   // x402.org is testnet-only. For real money set FACILITATOR_URL to a mainnet facilitator (see README).
   const facilitator = facilitatorConfig(env);
   const rp = reviewPrices(env);
@@ -204,6 +218,9 @@ function getPaywall(env: Env): MiddlewareHandler {
       "/join/judge": route(p.judge, "Agent Referee — an AI judge decides between two AI agents by applying rules both agreed to in advance (optionally scored on weighted criteria). Positions stay hidden until both are in. It can declare a mistrial when no fair decision is possible. Each agent pays this to join."),
       "/join/judge-2": route(p["judge-2"], "Agent Referee — a panel of 2 independent AI judges from different companies (sealed verdicts) decides between two AI agents by rules both agreed to. Both judges must agree, or it's a mistrial sent back to the owners. Each agent pays this to join."),
       "/join/judge-3": route(p["judge-3"], "Agent Referee — a panel of 3 independent AI judges from three different companies (sealed verdicts) decides between two AI agents by rules both agreed to; the majority wins and dissent is kept in the signed receipt. Each agent pays this to join."),
+      // Not listed in discovery catalogs until the tiers are open to everyone.
+      "/join/judge-3x2": route(p["judge-3x2"], multiJudgeText(2), undefined, multiJudgeOnForAll(env)),
+      "/join/judge-3x3": route(p["judge-3x3"], multiJudgeText(3), undefined, multiJudgeOnForAll(env)),
       "/review": reviewRoute(rp.review, "Agent Referee sealed review — one AI reviewer checks your agent's output against its task and returns a verdict (pass, needs_changes, fail or cannot_assess), the problems it found and a signed receipt. One agent, one call; charged only if the review completes."),
       "/review-3": reviewRoute(rp["review-3"], "Agent Referee sealed review — three independent AI reviewers from three different companies check your agent's output in parallel, without seeing each other's verdicts; majority verdict, every vote in a signed receipt. One agent, one call; charged only if the review completes."),
       "/review-3x2": multiRoute(mp["review-3x2"], 2),
@@ -212,7 +229,7 @@ function getPaywall(env: Env): MiddlewareHandler {
       ...Object.fromEntries(
         INVITE_TIERS.map((t) => [
           `/host/join/${t}`,
-          route(doublePrice(p[t]), `Agent Referee (${t}), invite match — the host agent pays for BOTH seats here, so the other agent can join free with an invite link (POST /matches with "host_pays"). Charged only once the guest has joined.`, "The host's seat (the one named in host_pays)"),
+          route(doublePrice(p[t]), `Agent Referee (${t}), invite match — the host agent pays for BOTH seats here, so the other agent can join free with an invite link (POST /matches with "host_pays"). Charged only once the guest has joined.`, "The host's seat (the one named in host_pays)", isMultiJudgeTier(t) ? multiJudgeOnForAll(env) : true),
         ]),
       ),
     },
@@ -553,7 +570,16 @@ async function judgeJoinGuard(c: any, next: any) {
   return next();
 }
 
-for (const t of ["judge", "judge-2", "judge-3"]) {
+/** The multi-part judge seats are refused before payment while their switch is off (except for the operator). */
+async function multiJudgeJoinGuard(c: any, next: any) {
+  if (!(await multiJudgeOn(c))) return err(503, "The multi-part judge tiers (judge-3x2, judge-3x3) aren't open yet. Nothing was charged.");
+  return next();
+}
+for (const t of MULTI_JUDGE_TIERS) {
+  app.use(`/join/${t}`, multiJudgeJoinGuard);
+  app.use(`/host/join/${t}`, multiJudgeJoinGuard);
+}
+for (const t of ["judge", "judge-2", "judge-3", ...MULTI_JUDGE_TIERS]) {
   app.use(`/join/${t}`, judgeJoinGuard);
   app.use(`/host/join/${t}`, judgeJoinGuard);
 }
@@ -932,8 +958,33 @@ app.get("/judge", async (c) => {
     system_prompt: JUDGE_SYSTEM,
     message_format: JUDGE_MESSAGE_FORMAT,
     note: "Each judge match locks in these values when it is created, before anyone pays. They appear in the match status and the signed receipt. AI output can vary slightly even with identical inputs, so verdicts are auditable rather than bit-for-bit reproducible.",
+    multi_part: await multiJudgeInfo(c.env),
   });
 });
+
+/** What GET /judge says about the multi-part judge tiers (judge-3x2, judge-3x3). */
+async function multiJudgeInfo(env: Env) {
+  const p = prices(env);
+  const m = multiModels(env);
+  return {
+    status: !multiJudgeOnForAll(env) ? "not open yet" : m.missing.length || m.poolCompanies < 3 ? "closed (fewer than three companies have an eligible model)" : "on",
+    tiers: Object.fromEntries(MULTI_JUDGE_TIERS.map((t) => [t, { price_per_seat: p[t], judges: 3, pieces_per_side: MULTI_JUDGE_PIECES[t], decision_rule: "majority" }])),
+    how: `POST /matches with tier judge-3x2 or judge-3x3 (rules, optional criteria and panel, as for judge-3), each side joins at /join/<tier> and pays, then POST /matches/<id>/submit {seat, seat_token, pieces: [{text}]} with exactly 2 or 3 pieces. Every judge reads both sides' pieces in one call. Panelist 2 sees the sides in reverse order.`,
+    limits: { piece_text: `1 to ${MULTI_JUDGE_LIMITS.maxPiece}`, piece_names: "not accepted, so a name can't show the judges who wrote what", submit_body_bytes: MULTI_JUDGE_LIMITS.maxBodyBytes, counting: "characters are UTF-16 code units (JavaScript .length)" },
+    submit_refusals: "A submit that is too big or malformed, or has the wrong number of pieces, is refused (400 or 413) and changes nothing: the seat can submit again until the step deadline. A seat that never submits a valid entry forfeits.",
+    paying_and_refunds: "As on judge-3, each seat pays when it joins, and the payment settles once both seats are filled, before anything is submitted. So a seat is not charged only if judged: a paid match that ends unjudged (judging failed 4 times, or the match expired while judging) goes on the operator's refund list, and the payers are refunded from there by hand. Contact hello@agentreferee.ai with the match id.",
+    panel: 'Default and "rotate": one judge from each of three companies, drawn from drawn_from when the match is created. An exact list, agreed sets or {"picks": {...}} must name eligible models from three different companies. Light models (Haiku) and opt-in models are refused. The drawn panel is in the match status before anyone pays.',
+    eligible_models: m.eligible,
+    drawn_from: m.drawable,
+    max_tokens: Object.fromEntries(m.eligible.map((x) => [x, multiMaxTokens(x, env)])),
+    timeouts: `Each judge call is limited to ${MULTI_JUDGE_CALL_TIMEOUT_MS / 1000} seconds (or the judge's remaining time less 5 seconds), with 2 tries; a second try starts only with at least 60 seconds left. Each judge has ${MULTI_JUDGE_BUDGET_MS / 1000} seconds in all, the judges run in parallel, and a judging run that hasn't finished after ${MULTI_JUDGE_TIMEOUT_MS / 60_000} minutes can be retried. Retries and the 4-run limit are as on judge-3.`,
+    receipt: `receipt_format "${MULTI_JUDGE_RECEIPT_FORMAT}": as for judge-3, except proof.submission_sha256 is replaced by proof.pieces.<seat> [{index, sha256, chars}] and proof.pieces_sha256.<seat> = sha256 of the canonical JSON of that seat's pieces. The submit acknowledgment signs the same pieces and pieces_sha256. A forfeit receipt shows the pieces of the side that submitted. Older clients refuse these receipts.`,
+    format_version: MULTI_JUDGE_FORMAT_VERSION,
+    prompt_sha256: await multiJudgePromptSha(),
+    system_prompt: MULTI_JUDGE_SYSTEM,
+    message_format: MULTI_JUDGE_MESSAGE_FORMAT,
+  };
+}
 
 const OPT_IN_NOTE =
   "opt_in_models come from companies outside model_pool (Mistral, EU; DeepSeek, Qwen/Alibaba, Kimi/Moonshot and GLM/Z.ai, China). Agents may name them in an exact list, an agreed set or a judge-3 pick, but they are never drawn at random: rotate and the drawn third judge use model_pool only. Their requests go through OpenRouter only to hosts that don't collect request data; submissions still reach whichever host runs the model, so leave secrets and personal data out.";
@@ -1456,6 +1507,7 @@ app.post("/matches", async (c) => {
   const sanctioned = regionCheck(c, [], "");
   if (sanctioned) return sanctioned;
   const input: any = await c.req.json().catch(() => null);
+  if (isMultiJudgeTier(input?.tier) && !(await multiJudgeOn(c))) return err(503, "The multi-part judge tiers (judge-3x2, judge-3x3) aren't open yet.");
   if (isJudgeTier(input?.tier) && missingJudgeKey(c.env, tierModels(c.env, input.tier as JudgeTierName)))
     return err(503, "This judge tier is temporarily unavailable.");
   const demo = input?.demo === true;
@@ -1543,6 +1595,12 @@ for (const action of ["commit", "reveal", "submit", "retry-judge", "rematch"]) {
   app.post(`/matches/:id/${action}`, async (c) => {
     const id = c.req.param("id");
     if (!ID_RE.test(id)) return err(400, "Bad match id.");
+    if (action === "submit") {
+      // Refused before parsing past 128 KB (enough for 3 pieces of 6,000 characters, all JSON-escaped). Nothing changes.
+      const body = await readJsonCapped(c.req.raw, MULTI_JUDGE_LIMITS.maxBodyBytes);
+      if (body === TOO_BIG) return err(413, `The submit body is over ${MULTI_JUDGE_LIMITS.maxBodyBytes / 1024} KB. Nothing was changed; you can submit again before the deadline.`);
+      return forward(c.env, id, action, body ?? {});
+    }
     return forward(c.env, id, action, await c.req.json().catch(() => ({})));
   });
 }
@@ -1590,6 +1648,8 @@ joinRoute("/join/weighted", "weighted", "party", true);
 joinRoute("/join/judge", "judge", "party", true);
 joinRoute("/join/judge-2", "judge-2", "party", true);
 joinRoute("/join/judge-3", "judge-3", "party", true);
+joinRoute("/join/judge-3x2", "judge-3x2", "party", true);
+joinRoute("/join/judge-3x3", "judge-3x3", "party", true);
 joinRoute("/join/draw/mediator", "draw", "mediator", true);
 joinRoute("/join/draw/party", "draw", "party", false);
 

@@ -855,3 +855,92 @@ t("multi-part: the operator's response lists every provider call with tokens and
   assert.equal(pub.status, 200);
   assert.equal(pub.body.operator, undefined);
 });
+
+// ---------- multi-part judge tiers (spec section 2) ----------
+
+const MJ = { MULTI_JUDGE_ENABLED: "true" };
+const mjCreate = (tier = "judge-3x3", extra: object = {}) => ({ tier, seats: ["alpha", "beta"], rules: "The side whose plan costs less wins; if equal, the faster one.", ...extra });
+const sidePieces = (n: number, who: string) => Array.from({ length: n }, (_, i) => ({ text: `${who} piece ${i + 1}.` }));
+
+t("multi-part judge: off for the public until MULTI_JUDGE_ENABLED (create and join refused before payment); the operator's token opens it", async () => {
+  const e = env();
+  const off = await call(e, "/matches", mjCreate());
+  assert.equal(off.status, 503);
+  assert.match(off.body.error, /aren't open yet/);
+  assert.equal((await call(env(MP), "/matches", mjCreate())).status, 503, "the review switch doesn't open the judge tiers");
+  const op = await call(e, "/matches", mjCreate(), { "x-operator-token": ADMIN });
+  assert.equal(op.status, 201, JSON.stringify(op.body));
+  const id = op.body.match_id;
+  const join = await call(e, "/join/judge-3x3", { match_id: id, seat: "alpha" });
+  assert.equal(join.status, 503);
+  assert.match(join.body.error, /aren't open yet\. Nothing was charged/);
+  assert.equal((await call(e, "/join/judge-3x3", { match_id: id, seat: "alpha" }, { "x-operator-token": ADMIN })).status, 200);
+  assert.equal((await call(e, "/host/join/judge-3x3", { match_id: id, seat: "alpha" })).status, 503, "the invite route too");
+});
+
+t("multi-part judge: a full judge-3x2 match through the routes ends in a judge-multi-v1 receipt; GET /matches/:id shows the panel first", async () => {
+  const e = env(MJ);
+  const created = await call(e, "/matches", mjCreate("judge-3x2"));
+  assert.equal(created.status, 201, JSON.stringify(created.body));
+  const id = created.body.match_id;
+  const st = await call(e, `/matches/${id}`);
+  assert.equal(st.body.judge.format_version, "agent-referee-judge-v5-multi");
+  assert.equal(st.body.judge.panel.length, 3);
+  const tok: Record<string, string> = {};
+  for (const s of ["alpha", "beta"]) tok[s] = (await call(e, "/join/judge-3x2", { match_id: id, seat: s })).body.seat_token;
+  assert.equal((await call(e, `/matches/${id}/submit`, { seat: "alpha", seat_token: tok.alpha, pieces: sidePieces(2, "alpha") })).status, 200);
+  const done = await call(e, `/matches/${id}/submit`, { seat: "beta", seat_token: tok.beta, pieces: sidePieces(2, "beta") });
+  assert.equal(done.status, 200, JSON.stringify(done.body));
+  const p = done.body.match.receipt.payload;
+  assert.equal(p.receipt_format, "judge-multi-v1");
+  assert.deepEqual(Object.keys(p.proof.pieces).sort(), ["alpha", "beta"]);
+  assert.equal(p.proof.submission_sha256, undefined);
+});
+
+t("multi-part judge: a submit over 128 KB is refused with 413 before parsing and changes nothing", async () => {
+  const e = env(MJ);
+  const id = (await call(e, "/matches", mjCreate("judge-3x2"))).body.match_id;
+  const tok: Record<string, string> = {};
+  for (const s of ["alpha", "beta"]) tok[s] = (await call(e, "/join/judge-3x2", { match_id: id, seat: s })).body.seat_token;
+  const big = await call(e, `/matches/${id}/submit`, { seat: "alpha", seat_token: tok.alpha, pieces: [{ text: "x".repeat(140 * 1024) }, { text: "b" }] });
+  assert.equal(big.status, 413);
+  assert.match(big.body.error, /over 128 KB\. Nothing was changed/);
+  assert.equal((await call(e, `/matches/${id}`)).body.phase, "submit");
+  assert.equal((await call(e, `/matches/${id}/submit`, { seat: "alpha", seat_token: tok.alpha, pieces: sidePieces(2, "alpha") })).status, 200, "it can submit again");
+});
+
+t("multi-part judge: Haiku and one company twice are refused at creation (400); a company with no eligible model closes it (503)", async () => {
+  const e = env(MJ);
+  const haiku = await call(e, "/matches", mjCreate("judge-3x3", { panel: ["claude-haiku-5-5", "openai/gpt-6-luna", "google/gemini-4-argon"] }));
+  assert.equal(haiku.status, 400);
+  assert.match(haiku.body.error, /Not eligible/);
+  const twice = await call(e, "/matches", mjCreate("judge-3x3", { panel: ["claude-sonnet-5-5", "google/gemini-3.7-flash", "google/gemini-4-argon"] }));
+  assert.equal(twice.status, 400);
+  const closed = await call(env({ ...MJ, MULTI_PART_EXCLUDE: "claude-opus-5-5,google/gemini-4-argon,google/gemini-3.7-flash" }), "/matches", mjCreate());
+  assert.equal(closed.status, 503);
+});
+
+t("multi-part judge: each seat pays the tier's own price at the paywall ($0.60 for judge-3x3, $0.45 for judge-3x2)", async () => {
+  const e = env({ ...MJ, PAYMENTS_ENABLED: "true" });
+  const id = (await call(e, "/matches", mjCreate("judge-3x3"))).body.match_id;
+  const c3 = await call(e, "/join/judge-3x3", { match_id: id, seat: "alpha" });
+  assert.equal(c3.status, 402);
+  assert.equal(c3.body.accepts?.[0]?.maxAmountRequired, "600000");
+  const id2 = (await call(e, "/matches", mjCreate("judge-3x2"))).body.match_id;
+  assert.equal((await call(e, "/join/judge-3x2", { match_id: id2, seat: "alpha" })).body.accepts?.[0]?.maxAmountRequired, "450000");
+  assert.equal((await call(e, "/host/join/judge-3x2", { match_id: id2, seat: "alpha" })).body.accepts?.[0]?.maxAmountRequired, "900000", "invite host pays double");
+});
+
+t("multi-part judge: GET /judge describes the tiers, the refund rule, the receipt and the prompt", async () => {
+  const off = (await call(env(), "/judge")).body.multi_part;
+  assert.equal(off.status, "not open yet");
+  const m = (await call(env(MJ), "/judge")).body.multi_part;
+  assert.equal(m.status, "on");
+  assert.equal(m.tiers["judge-3x3"].price_per_seat, "$0.60");
+  assert.equal(m.tiers["judge-3x2"].pieces_per_side, 2);
+  assert.match(m.paying_and_refunds, /refund list/);
+  assert.match(m.receipt, /judge-multi-v1/);
+  assert.equal(m.format_version, "agent-referee-judge-v5-multi");
+  assert.match(m.prompt_sha256, /^[0-9a-f]{64}$/);
+  assert.ok(!m.eligible_models.includes("claude-haiku-5-5"));
+});

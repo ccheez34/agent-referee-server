@@ -1,10 +1,18 @@
 // Pure game logic: no Cloudflare or npm imports, so it can be unit-tested in Node.
 
-export type Tier = "rps" | "rps-bo3" | "weighted" | "draw" | "judge" | "judge-2" | "judge-3";
-export const TIERS: Tier[] = ["rps", "rps-bo3", "weighted", "draw", "judge", "judge-2", "judge-3"];
-/** Tiers decided by AI judges (one judge, or an independent panel of 2 or 3). */
-export const JUDGE_TIERS: Tier[] = ["judge", "judge-2", "judge-3"];
-export const isJudgeTier = (t: string): t is "judge" | "judge-2" | "judge-3" => (JUDGE_TIERS as string[]).includes(t);
+export type Tier = "rps" | "rps-bo3" | "weighted" | "draw" | "judge" | "judge-2" | "judge-3" | "judge-3x2" | "judge-3x3";
+export const TIERS: Tier[] = ["rps", "rps-bo3", "weighted", "draw", "judge", "judge-2", "judge-3", "judge-3x2", "judge-3x3"];
+/** Tiers decided by AI judges (one judge, or an independent panel of 2 or 3; the 3x2 / 3x3 tiers take 2 or 3 pieces
+ * per side, see multijudge.ts). */
+export const JUDGE_TIERS: Tier[] = ["judge", "judge-2", "judge-3", "judge-3x2", "judge-3x3"];
+export type JudgeTier = "judge" | "judge-2" | "judge-3" | "judge-3x2" | "judge-3x3";
+export const isJudgeTier = (t: string): t is JudgeTier => (JUDGE_TIERS as string[]).includes(t);
+/** Multi-part judge tiers: each side submits 2 or 3 pieces. */
+export const MULTI_JUDGE_PIECES = { "judge-3x2": 2, "judge-3x3": 3 } as const;
+export type MultiJudgeTier = keyof typeof MULTI_JUDGE_PIECES;
+export const isMultiJudgeTier = (t: string): t is MultiJudgeTier => t === "judge-3x2" || t === "judge-3x3";
+/** Tiers with a 3-judge panel (majority rule). */
+export const isPanel3Tier = (t: string) => t === "judge-3" || isMultiJudgeTier(t);
 /** Random tiers that support a mutual rematch (a linked series with a running tally). */
 export const REMATCH_TIERS: Tier[] = ["rps", "rps-bo3", "weighted"];
 export const MAX_SERIES_GAMES = 10;
@@ -233,11 +241,11 @@ export function validateCreate(body: any): { ok: true; value: CreateInput } | { 
       out.criteria = c;
     }
   } else if (body.criteria !== undefined) {
-    return { ok: false, error: "criteria are only for the judge tiers (judge, judge-2, judge-3)." };
+    return { ok: false, error: `criteria are only for the judge tiers (${JUDGE_TIERS.join(", ")}).` };
   }
 
   if (body.panel !== undefined) {
-    if (tier !== "judge-2" && tier !== "judge-3") return { ok: false, error: "panel is only for the panel tiers (judge-2, judge-3)." };
+    if (tier !== "judge-2" && !isPanel3Tier(tier)) return { ok: false, error: "panel is only for the panel tiers (judge-2, judge-3, judge-3x2, judge-3x3)." };
     const e = isPicks(body.panel) ? picksError(body.panel, tier, out.seats) : panelShapeError(body.panel, tier === "judge-2" ? 2 : 3);
     if (e) return { ok: false, error: e };
     out.panel = body.panel;
@@ -347,9 +355,9 @@ const isPicks = (v: unknown): v is { picks: Record<string, string> } => !!v && t
 
 /** judge-3 { picks: { seatA: model, seatB: model } }: each of the two parties names one judge; the third is drawn. */
 function picksError(v: { picks?: unknown }, tier: string, seats: string[]): string | null {
-  const err = 'panel {"picks": {...}} is for judge-3 with two parties: one model id per party, like {"picks": {"buyer": "claude-opus-5-5", "seller": "openai/gpt-6-luna"}}. The third judge is drawn at random.';
+  const err = 'panel {"picks": {...}} is for the 3-judge tiers with two parties: one model id per party, like {"picks": {"buyer": "claude-opus-5-5", "seller": "openai/gpt-6-luna"}}. The third judge is drawn at random.';
   const p = v.picks;
-  if (tier !== "judge-3" || seats.length !== 2 || Object.keys(v).length !== 1 || !p || typeof p !== "object" || Array.isArray(p)) return err;
+  if (!isPanel3Tier(tier) || seats.length !== 2 || Object.keys(v).length !== 1 || !p || typeof p !== "object" || Array.isArray(p)) return err;
   const keys = Object.keys(p);
   if (keys.length !== 2 || !seats.every((s) => keys.includes(s))) return err;
   const ms = Object.values(p);

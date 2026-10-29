@@ -14,10 +14,10 @@ import { fakeModelResponse, type FakeAi } from "./fakeai.ts";
 import { ProviderCapError, classifyStatus, rateInfo, type CallObservation } from "./providers.ts";
 export { panelShapeError } from "./logic.ts";
 
-export type JudgeTierName = "judge" | "judge-2" | "judge-3";
-export const PANEL_SIZE: Record<JudgeTierName, number> = { judge: 1, "judge-2": 2, "judge-3": 3 };
+export type JudgeTierName = "judge" | "judge-2" | "judge-3" | "judge-3x2" | "judge-3x3";
+export const PANEL_SIZE: Record<JudgeTierName, number> = { judge: 1, "judge-2": 2, "judge-3": 3, "judge-3x2": 3, "judge-3x3": 3 };
 export type DecisionRule = "single" | "unanimous" | "majority";
-export const DECISION_RULE: Record<JudgeTierName, DecisionRule> = { judge: "single", "judge-2": "unanimous", "judge-3": "majority" };
+export const DECISION_RULE: Record<JudgeTierName, DecisionRule> = { judge: "single", "judge-2": "unanimous", "judge-3": "majority", "judge-3x2": "majority", "judge-3x3": "majority" };
 
 export type Criterion = { name: string; weight: number };
 export type Confidence = "high" | "medium" | "low" | "not given";
@@ -187,6 +187,7 @@ export type JudgeCommitment = {
   panel?: PanelSeat[]; // judge-2 / judge-3: every panelist's model and party order
   decision_rule?: DecisionRule; // how votes combine: unanimous (else mistrial) or majority (else mistrial)
   panel_selection?: PanelSelection; // how the panel's models were chosen (only when the agents asked for something other than the default)
+  max_tokens?: Record<string, number>; // multi-part judge tiers: each judge's answer room, fixed at creation
 };
 
 // ---------- choosing a panel's models ----------
@@ -333,9 +334,11 @@ export function panelModels(env: PanelEnv, tier: "judge-2" | "judge-3" = "judge-
   return shared.length ? shared : [env.JUDGE_MODEL || "claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"];
 }
 
-/** The models a judge tier will call. */
+/** The models a judge tier will call. The multi-part tiers draw their panel at creation (multijudge.ts); for them this
+ * is the judge-3 panel, used only to check that the provider keys are set. */
 export function tierModels(env: PanelEnv, tier: JudgeTierName): string[] {
-  return tier === "judge" ? [env.JUDGE_MODEL || "claude-haiku-5-5"] : panelModels(env, tier).slice(0, PANEL_SIZE[tier]);
+  if (tier === "judge") return [env.JUDGE_MODEL || "claude-haiku-5-5"];
+  return panelModels(env, tier === "judge-2" ? "judge-2" : "judge-3").slice(0, PANEL_SIZE[tier]);
 }
 
 export const viaOpenRouter = (model: string) => model.includes("/");
@@ -395,7 +398,7 @@ export function decide(rule: DecisionRule, picks: (string | null)[], parties: st
 
 // ---------- calling a model ----------
 
-function parseVote(text: string, seats: string[], criteria: Criterion[] | undefined, v3: boolean) {
+export function parseVote(text: string, seats: string[], criteria: Criterion[] | undefined, v3: boolean) {
   const json = text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1);
   let parsed: any;
   try {
@@ -521,22 +524,33 @@ export async function runOneJudge(opts: {
   observe?: (o: CallObservation) => void;
   /** Told when an answer was cut off at the token limit (so the limit can be raised). */
   onCutOff?: (c: { where: "judge"; model: string; max_tokens: number; prompt_chars: number; try_number?: number }) => void;
+  /** The multi-part judge tiers: their own message, answer room and time budget (see multijudge.ts). */
+  how?: JudgeHow;
+  now?: () => number;
 }): Promise<JudgeVote> {
+  const how = opts.how;
   const v3 = opts.formatVersion !== JUDGE_FORMAT_VERSION_V2;
   const seats = Object.keys(opts.submissions).sort();
-  const system = judgeSystemFor(opts.formatVersion);
-  const user = v3 ? buildJudgeMessage(opts.rules, opts.submissions, opts.title, opts.criteria, opts.order) : buildJudgeMessageV2(opts.rules, opts.submissions, opts.title);
+  const system = how ? how.system : judgeSystemFor(opts.formatVersion);
+  const user = how ? how.user : v3 ? buildJudgeMessage(opts.rules, opts.submissions, opts.title, opts.criteria, opts.order) : buildJudgeMessageV2(opts.rules, opts.submissions, opts.title);
+  const maxTokens = how ? how.maxTokens : answerTokens(opts.model);
+  const now = opts.now ?? Date.now;
+  const deadline = how ? now() + how.budgetMs : Infinity;
 
   const keys: JudgeKeys = { ANTHROPIC_API_KEY: opts.apiKey, ...opts.keys };
   const observe = opts.observe ?? (() => {});
   const sleep = opts.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
-  const callTimeoutMs = opts.callTimeoutMs ?? JUDGE_CALL_TIMEOUT_MS;
+  const fullCallMs = opts.callTimeoutMs ?? how?.callTimeoutMs ?? JUDGE_CALL_TIMEOUT_MS;
   let lastErr = "unknown error";
   for (let attempt = 0; attempt < 2; attempt++) {
     let res: Response;
+    // Multi-part tiers: each call is capped at the time left less a margin, and a second try needs enough time left.
+    const left = deadline - now();
+    if (how && attempt > 0 && left < how.minTryMs) break;
+    const callTimeoutMs = how ? Math.min(fullCallMs, Math.max(left - how.callMarginMs, 1)) : fullCallMs;
     try {
-      // Each call has its own time limit, so two tries plus a short wait end inside the match's 2-minute judging limit.
-      res = await callModel(keys, opts.model, system, user, AbortSignal.timeout(callTimeoutMs));
+      // Each call has its own time limit, so two tries plus a short wait end inside the match's judging limit.
+      res = await callModel(keys, opts.model, system, user, AbortSignal.timeout(callTimeoutMs), how ? maxTokens : JUDGE_MAX_TOKENS, how ? maxTokens : OPENROUTER_MAX_TOKENS);
     } catch (e: any) {
       const timedOut = e?.name === "TimeoutError" || e?.name === "AbortError";
       observe({ kind: timedOut ? "timeout" : "network" });
@@ -572,7 +586,7 @@ export async function runOneJudge(opts: {
         v = parseVote(answerText(opts.model, data), seats, opts.criteria, v3);
       } catch (pe: any) {
         // An answer cut off at the token limit can't be parsed: say so plainly instead of "unparseable", and note it.
-        if (cutOff) opts.onCutOff?.({ where: "judge", model: opts.model, max_tokens: answerTokens(opts.model), prompt_chars: system.length + user.length, try_number: attempt + 1 });
+        if (cutOff) opts.onCutOff?.({ where: "judge", model: opts.model, max_tokens: maxTokens, prompt_chars: system.length + user.length, try_number: attempt + 1 });
         throw cutOff && !/ran out of tokens/.test(String(pe?.message)) ? new Error("judge ran out of tokens before finishing its answer") : pe;
       }
       const vote: JudgeVote = { panelist: opts.panelist, model: opts.model, order: opts.order, ...v };
@@ -586,6 +600,17 @@ export async function runOneJudge(opts: {
   // Name the judge, so whoever reads the match error knows which AI company's model failed.
   throw new Error(`${opts.model}: ${lastErr}`);
 }
+
+/** How a multi-part judge is called: the v5-multi message, its answer room, and a time budget for both tries. */
+export type JudgeHow = {
+  system: string;
+  user: string;
+  maxTokens: number;
+  callTimeoutMs: number;
+  budgetMs: number;
+  minTryMs: number;
+  callMarginMs: number;
+};
 
 /** Per-call limit for a judge: two tries (50 s each) plus a wait of at most 5 s fit the match's 2-minute judging limit. */
 export const JUDGE_CALL_TIMEOUT_MS = 50_000;

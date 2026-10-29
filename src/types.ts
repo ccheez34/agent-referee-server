@@ -47,6 +47,9 @@ export interface Env {
   PRICE_REVIEW_3X2?: string; // multi-part review, 2 pieces (per review, default $0.60)
   PRICE_REVIEW_3X3?: string; // multi-part review, 3 pieces (per review, default $0.70)
   MULTI_PART_ENABLED?: string; // "true" opens /review-3x2 and /review-3x3 to everyone; otherwise only x-operator-token: <ADMIN_TOKEN>
+  PRICE_JUDGE_3X2?: string; // multi-part judge seat, 2 pieces per side (default $0.45, provisional)
+  PRICE_JUDGE_3X3?: string; // multi-part judge seat, 3 pieces per side (default $0.60, provisional)
+  MULTI_JUDGE_ENABLED?: string; // "true" opens judge-3x2 and judge-3x3 to everyone; otherwise only x-operator-token: <ADMIN_TOKEN>
   MULTI_PART_OPT_IN?: string; // opt-in models made eligible for the multi-part tiers after passing the live test (named only, never drawn)
   MULTI_PART_EXCLUDE?: string; // default-pool models left out of the multi-part tiers (default "claude-opus-5-5"; "" leaves none out)
   MULTI_PART_MAX_TOKENS?: string; // "model=n,model=n": lower a model's max_tokens on the multi-part tiers (cost test, spec 4.3)

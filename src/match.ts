@@ -20,7 +20,20 @@ import {
   REMATCH_TIERS,
   MAX_SERIES_GAMES,
   type Criterion,
+  isMultiJudgeTier,
 } from "./logic.ts";
+import {
+  MULTI_JUDGE_LEASE_MS,
+  MULTI_JUDGE_RECEIPT_FORMAT,
+  MULTI_JUDGE_TIMEOUT_MS,
+  multiJudgeCommitment,
+  multiJudgeHow,
+  piecesProof,
+  sidePieceRecords,
+  sidePiecesSha256,
+  validateMultiSubmit,
+} from "./multijudge.ts";
+import { MultiClosedError } from "./multipart.ts";
 import {
   judgeCommitment,
   tierCommitment,
@@ -85,7 +98,8 @@ export type MatchState = {
   step_seconds?: number; // per-match deadline for each step (default 600)
   excluded?: string[]; // draw seats that never committed; the draw continues without them
   judging_since?: number; // if the judge call never comes back (e.g. a restart), the match becomes retryable
-  submissions?: Record<string, string>;
+  submissions?: Record<string, string>; // multi-part judge tiers: each side's pieces_sha256, as the "submitted" marker
+  pieces?: Record<string, string[]>; // multi-part judge tiers: each side's pieces (hidden until judging, never shown)
   criteria?: Criterion[]; // judge tiers: agreed weighted criteria; the winner is computed from the scores
   panel?: "rotate" | string[] | string[][] | { picks: Record<string, string> }; // judge-2 / judge-3: the panel request both agents agreed to (see choosePanel)
   panel_votes?: (JudgeVote | null)[]; // judge tiers: each panelist's verdict (kept across a retry, so only missing ones rerun)
@@ -115,6 +129,8 @@ type JudgeTask = {
   title?: string;
   criteria?: Criterion[];
   submissions: Record<string, string>;
+  pieces?: Record<string, string[]>; // multi-part judge tiers
+  maxTokens?: Record<string, number>; // multi-part judge tiers: each judge's answer room (from the commitment)
   ack?: Receipt;
 };
 const MAX_RPS_ROUNDS = 25;
@@ -228,7 +244,7 @@ export class MatchRoom {
   private async runJudgeTask(result: JudgeTask): Promise<Response> {
     if (!result.jobs.length) return this.locked(() => this.finishJudging([]));
     const models = result.jobs.map((j) => j.model);
-    const slots = await acquireSlots(this.env, models, { leaseMs: JUDGE_LEASE_MS, waitMs: GATE_MAX_WAIT_MS });
+    const slots = await acquireSlots(this.env, models, { leaseMs: result.pieces ? MULTI_JUDGE_LEASE_MS : JUDGE_LEASE_MS, waitMs: GATE_MAX_WAIT_MS });
     if (!slots.ok) {
       const retryAfter = slots.retryAfter;
       return this.locked(() => this.judgesBusy(retryAfter, slots.reason));
@@ -249,6 +265,9 @@ export class MatchRoom {
             title: result.title,
             criteria: result.criteria,
             submissions: result.submissions,
+            how: result.pieces
+              ? multiJudgeHow({ model: j.model, maxTokens: result.maxTokens![j.model], rules: result.rules, pieces: result.pieces, order: j.order, title: result.title, criteria: result.criteria })
+              : undefined,
             observe: (o) => slots.lease.observe(i, o),
             onCutOff: (cut) => notes.push(recordCutOff(this.env, cut)),
           }),
@@ -342,7 +361,15 @@ export class MatchRoom {
     const now = this.now();
     // Panel tiers: the agreed models (fixed, rotating, or one of several sets) are drawn now, before anyone pays.
     let judge: JudgeCommitment | undefined;
-    if (isJudgeTier(input.tier)) {
+    if (isMultiJudgeTier(input.tier)) {
+      // Multi-part judge tiers: the review tiers' panel rules (eligible models, three companies), drawn now.
+      try {
+        judge = await multiJudgeCommitment(input.tier, this.env, input.panel);
+      } catch (e: any) {
+        return bad(e instanceof MultiClosedError ? 503 : 400, String(e?.message ?? e));
+      }
+      if (missingJudgeKey(this.env, judge.panel!.map((p) => p.model))) return bad(503, "This judge tier is temporarily unavailable.");
+    } else if (isJudgeTier(input.tier)) {
       const tier = input.tier as JudgeTierName;
       if (input.panel) {
         let picked;
@@ -608,12 +635,32 @@ export class MatchRoom {
     const seat = await this.auth(body);
     if (seat instanceof Response) return seat;
     if (m.phase !== "submit") return bad(409, `Not accepting submissions (phase "${m.phase}").`);
+    if (isMultiJudgeTier(m.tier)) {
+      // Checked before anything changes: a refused submit leaves the seat free to submit again before the deadline.
+      if (m.submissions![seat] !== undefined) return bad(409, "Already submitted.");
+      const v = validateMultiSubmit(body, m.tier);
+      if (!v.ok) return bad(400, v.error);
+      const records = await sidePieceRecords(v.texts);
+      const hash = await sidePiecesSha256(records);
+      m.pieces ??= {};
+      m.pieces[seat] = v.texts;
+      m.submissions![seat] = hash;
+      const ack = await this.stepAck(seat, "submit", { receipt_format: MULTI_JUDGE_RECEIPT_FORMAT, pieces: records, pieces_sha256: hash });
+      return this.afterSubmit(ack);
+    }
+    if ("pieces" in (body ?? {})) return bad(400, `${m.tier} takes one "position" per side; pieces are for judge-3x2 and judge-3x3.`);
     const p = body.position;
     if (typeof p !== "string" || p.trim().length === 0 || p.length > LIMITS.maxPosition)
       return bad(400, `position must be 1 to ${LIMITS.maxPosition} characters.`);
     if (m.submissions![seat] !== undefined) return bad(409, "Already submitted.");
     m.submissions![seat] = p;
     const ack = await this.stepAck(seat, "submit", { position_sha256: await sha256Hex(p) });
+    return this.afterSubmit(ack);
+  }
+
+  /** After an accepted submit: start judging once every side is in. */
+  private async afterSubmit(ack: Receipt): Promise<Response | JudgeTask> {
+    const m = this.m!;
     if (m.parties.every((s) => m.submissions![s] !== undefined)) {
       m.action_deadline = undefined;
       const started = await this.startJudging();
@@ -722,6 +769,7 @@ export class MatchRoom {
       title: m.title,
       criteria: m.judge.format_version === JUDGE_FORMAT_VERSION_V2 ? undefined : m.criteria,
       submissions: { ...m.submissions! },
+      ...(isMultiJudgeTier(m.tier) ? { pieces: structuredClone(m.pieces!), maxTokens: m.judge.max_tokens } : {}),
     };
   }
 
@@ -756,8 +804,9 @@ export class MatchRoom {
     const criteria = m.judge?.format_version === JUDGE_FORMAT_VERSION_V2 ? undefined : m.criteria;
     const rule = m.judge?.decision_rule ?? "single";
     const decision = decide(rule, votes.map((v) => votePick(v, criteria)), [...m.parties].sort());
+    const multi = isMultiJudgeTier(m.tier);
     const subHashes: Record<string, string> = {};
-    for (const s of m.parties) subHashes[s] = await sha256Hex(m.submissions![s]);
+    if (!multi) for (const s of m.parties) subHashes[s] = await sha256Hex(m.submissions![s]);
     const mistrial = decision.winner === null
       ? rule === "single"
         ? {
@@ -787,7 +836,8 @@ export class MatchRoom {
     await this.finish(outcome, {
       rules_sha256: await sha256Hex(m.rules!),
       ...(criteria ? { criteria_sha256: await sha256Hex(canonicalJson(criteria)) } : {}),
-      submission_sha256: subHashes,
+      // judge-multi-v1: each side's pieces and pieces_sha256 replace submission_sha256.
+      ...(multi ? await piecesProof(m.pieces!, m.parties) : { submission_sha256: subHashes }),
       judge: m.judge, // model(s), prompt fingerprint and decision rule; full prompt at GET /judge
     });
     await this.save();
@@ -883,6 +933,7 @@ export class MatchRoom {
     }
     const payload = {
       service: "agent-referee",
+      ...(isMultiJudgeTier(m.tier) ? { receipt_format: MULTI_JUDGE_RECEIPT_FORMAT } : {}),
       match_id: m.id,
       tier: m.tier,
       title: m.title ?? null,
@@ -960,7 +1011,7 @@ export class MatchRoom {
   private async tick() {
     const m = this.m!;
     const now = this.now();
-    if (m.phase === "judging" && m.judging_since && now - m.judging_since > JUDGE_TIMEOUT_MS) {
+    if (m.phase === "judging" && m.judging_since && now - m.judging_since > (isMultiJudgeTier(m.tier) ? MULTI_JUDGE_TIMEOUT_MS : JUDGE_TIMEOUT_MS)) {
       m.phase = "error";
       m.error = `The judge didn't return a verdict in time. Any seated party can POST /matches/${m.id}/retry-judge.`;
       await this.save();
@@ -1007,7 +1058,10 @@ export class MatchRoom {
         return;
       }
       // One side showed up and the other walked away: the side that submitted wins by forfeit.
-      return this.finish({ winner: present[0], by_forfeit: true, forfeited: missing }, { rules_sha256: await sha256Hex(m.rules!) });
+      // Multi-part tiers: the receipt also shows the present side's pieces, so its ack can be checked against it.
+      // Multi-part tiers: and the agreed judges, so the receipt says which format and panel the match was under.
+      const shown = isMultiJudgeTier(m.tier) ? { ...(await piecesProof(m.pieces!, present)), judge: m.judge } : {};
+      return this.finish({ winner: present[0], by_forfeit: true, forfeited: missing }, { rules_sha256: await sha256Hex(m.rules!), ...shown });
     }
     const r = m.rounds[m.rounds.length - 1];
     const missing = this.committers().filter((s) => !r.commits[s]);

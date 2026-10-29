@@ -150,34 +150,49 @@ export function multiModels(env: MultiEnv): { drawable: string[]; eligible: stri
 /** Thrown when the tiers can't seat three companies right now (answered 503 before payment). */
 export class MultiClosedError extends Error {}
 
-export async function multiCommitment(tier: MultiTier, env: MultiEnv, panel?: PanelRequest, rand?: () => number): Promise<ReviewCommitment> {
+/**
+ * The three models for a multi-part review or judge panel, by §1's rules: random draws use only drawable models, and an
+ * exact list, agreed sets or (judges only) each party's pick must name eligible models from three companies. Throws
+ * MultiClosedError (503) when three companies can't be seated, or an Error with a readable message (400).
+ */
+export function pickMultiPanel(env: MultiEnv, panel: PanelRequest | undefined, rand: (() => number) | undefined, who: "review" | "judge", tier: string): { models: string[]; selection: PanelSelection } {
   const { drawable, eligible, missing, poolCompanies } = multiModels(env);
-  const need = `${tier} is closed for now: it needs an eligible reviewer from each of three AI companies`;
+  const what = who === "review" ? "reviewer" : "judge";
+  const tiers = who === "review" ? "multi-part reviews" : "multi-part judge matches";
+  const need = `${tier} is closed for now: it needs an eligible ${what} from each of three AI companies`;
   if (poolCompanies < MULTI_SIZE) throw new MultiClosedError(`${need}, and the model pool has only ${poolCompanies}.`);
   if (missing.length) throw new MultiClosedError(`${need}, and ${missing.length > 1 ? `these have none: ${missing.join(", ")}` : `${missing[0]} has none`}.`);
   const notEligible = (ms: string[]) => [...new Set(ms.filter((m) => !eligible.includes(m)))];
   const threeCompanies = (ms: string[]) => ms.length === MULTI_SIZE && new Set(ms.map(companyOf)).size === MULTI_SIZE;
   const notEligibleMsg = (bad: string[]) =>
-    `Not eligible for multi-part reviews: ${bad.join(", ")}. These tiers use only ${eligible.join(", ")}: light models and models the operator has taken off these tiers are refused, and opt-in models only work once the operator has made them eligible. GET /reviewers lists them.`;
-  const companyMsg = "A multi-part review needs three models from three different AI companies (for example one Anthropic, one OpenAI, one Google).";
-  let picked: { models: string[]; selection: PanelSelection };
-  if (panel === undefined || panel === "rotate") {
-    picked = choosePanel("rotate", MULTI_SIZE, drawable, rand);
-  } else if (Array.isArray(panel) && (panel as unknown[]).every((x) => typeof x === "string")) {
+    `Not eligible for ${tiers}: ${bad.join(", ")}. These tiers use only ${eligible.join(", ")}: light models and models the operator has taken off these tiers are refused, and opt-in models only work once the operator has made them eligible. ${who === "review" ? "GET /reviewers" : "GET /judge"} lists them.`;
+  const companyMsg = `A multi-part ${who === "review" ? "review" : "judge panel"} needs three models from three different AI companies (for example one Anthropic, one OpenAI, one Google).`;
+  if (panel === undefined || panel === "rotate") return choosePanel("rotate", MULTI_SIZE, drawable, rand);
+  if (Array.isArray(panel) && (panel as unknown[]).every((x) => typeof x === "string")) {
     const ms = panel as string[];
     const bad = notEligible(ms);
     if (bad.length) throw new Error(notEligibleMsg(bad));
     if (!threeCompanies(ms)) throw new Error(companyMsg);
-    picked = { models: ms, selection: { mode: "custom" } };
-  } else if (Array.isArray(panel)) {
+    return { models: ms, selection: { mode: "custom" } };
+  }
+  if (Array.isArray(panel)) {
     const sets = panel as string[][];
     const bad = notEligible(sets.flat());
     if (bad.length) throw new Error(notEligibleMsg(bad));
     if (!sets.every(threeCompanies)) throw new Error(companyMsg);
-    picked = choosePanel(sets, MULTI_SIZE, eligible, rand, eligible);
-  } else {
-    throw new Error('panel (the reviewers) must be "rotate", an array of 3 model ids, or an array of up to 5 such arrays.');
+    return choosePanel(sets, MULTI_SIZE, eligible, rand, eligible);
   }
+  if (who === "judge" && panel && typeof panel === "object" && "picks" in panel) {
+    // Each party names one eligible judge; the third is drawn from the drawable models of a company neither picked.
+    const bad = notEligible(Object.values(panel.picks));
+    if (bad.length) throw new Error(notEligibleMsg(bad));
+    return choosePanel(panel, MULTI_SIZE, drawable, rand, eligible);
+  }
+  throw new Error(`panel (the ${what}s) must be "rotate", an array of 3 model ids, or an array of up to 5 such arrays.`);
+}
+
+export async function multiCommitment(tier: MultiTier, env: MultiEnv, panel?: PanelRequest, rand?: () => number): Promise<ReviewCommitment> {
+  const picked = pickMultiPanel(env, panel, rand, "review", tier);
   return {
     panel_selection: picked.selection,
     models: picked.models,
