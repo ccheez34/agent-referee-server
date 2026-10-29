@@ -54,7 +54,7 @@ export async function fakeModelResponse(cfg: FakeAi, model: string, user: string
   if (kind === "500") return err(529, "overloaded_error", "Overloaded");
   if (kind === "cap") return openrouter ? err(402, "payment_required", "Insufficient credits") : err(429, "rate_limit_error", "enforced_spend_limit_reached: your organization reached its monthly spend limit");
   // A good answer: a review verdict, or a judge verdict naming the first party in the message.
-  const isReview = user.includes("<task>") && user.includes("<output>");
+  const isReview = user.includes("<task>") && (user.includes("<output>") || user.includes("=====PIECE 1 of "));
   const party = /party="([^"]+)"/.exec(user)?.[1] ?? "alpha";
   const text = isReview
     ? JSON.stringify({ verdict: "pass", confidence: "high", issues: [], reasoning: "Fake staging answer." })
