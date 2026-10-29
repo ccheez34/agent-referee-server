@@ -944,3 +944,18 @@ t("multi-part judge: GET /judge describes the tiers, the refund rule, the receip
   assert.match(m.prompt_sha256, /^[0-9a-f]{64}$/);
   assert.ok(!m.eligible_models.includes("claude-haiku-5-5"));
 });
+
+t("docs: GET /, the landing page and llms.txt show each multi-part family only once its switch is on", async () => {
+  const get = async (e: any, path: string, accept = "application/json") => {
+    const res = await app.fetch(new Request(`https://x${path}`, { headers: { accept } }), e, ctx);
+    return res.headers.get("content-type")?.includes("json") ? JSON.stringify(await res.json()) : await res.text();
+  };
+  const views = async (e: any) => (await get(e, "/")) + (await get(e, "/", "text/html")) + (await get(e, "/llms.txt"));
+  const off = await views(env());
+  for (const s of ["review-3x2", "judge-3x2"]) assert.ok(!off.includes(s), `${s} shown while off`);
+  const reviews = await views(env(MP));
+  assert.ok(reviews.includes("review-3x3") && reviews.includes("$0.70"), "review tiers listed when on");
+  assert.ok(!reviews.includes("judge-3x2"), "judge tiers still hidden");
+  const both = await views(env({ ...MP, ...MJ }));
+  assert.ok(both.includes("judge-3x3") && both.includes("judge-multi-v1"));
+});

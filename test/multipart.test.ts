@@ -524,3 +524,19 @@ test("spec 4.3: max_tokens is never lowered below 3 times the longest answer see
     assert.ok(multiMaxTokens(model) >= Math.min(MULTI_MAX_TOKENS, 3 * longest), `${model}: max_tokens below the 3x rule`);
   }
 });
+
+test("docs: the landing page and llms.txt list the multi-part tiers only while they're on", async () => {
+  const { landingHtml, llmsTxt } = await import("../src/landing.ts");
+  const base = { weighted: "$0.015", draw: "$0.05", rps: "$0.01", "rps-bo3": "$0.02", judge: "$0.10", "judge-2": "$0.20", "judge-3": "$0.35", "judge-3x2": "$0.45", "judge-3x3": "$0.60", review: "$0.05", "review-3": "$0.20" };
+  const off = landingHtml(base, "https://agentreferee.ai") + llmsTxt(base, "https://agentreferee.ai");
+  for (const s of ["review-3x2", "review-3x3", "judge-3x2", "judge-3x3"]) assert.ok(!off.includes(s), `${s} shown while off`);
+  const reviewsOn = { ...base, "review-3x2": "$0.60", "review-3x3": "$0.70", multi_reviews: "on" };
+  const html = landingHtml(reviewsOn, "https://agentreferee.ai");
+  const txt = llmsTxt(reviewsOn, "https://agentreferee.ai");
+  for (const s of ["review-3x2", "review-3x3", "$0.60 per review", "$0.70 per review", "pieces"]) assert.ok(html.includes(s), `landing: ${s}`);
+  for (const s of ["review-3x2 ($0.60)", "review-3x3 ($0.70)", "POST https://agentreferee.ai/review-3x2 or https://agentreferee.ai/review-3x3", "review-multi-v1", "0.9.0+ (npm), 0.2.0+ (PyPI)"]) assert.ok(txt.includes(s), `llms.txt: ${s}`);
+  assert.ok(!(html + txt).includes("judge-3x2"), "the judge tiers have their own switch");
+  const allOn = { ...reviewsOn, multi_judges: "on" };
+  for (const s of ["judge-3x2", "judge-3x3", "$0.45 per agent", "$0.60 per agent"]) assert.ok(landingHtml(allOn, "https://agentreferee.ai").includes(s), `landing: ${s}`);
+  assert.match(llmsTxt(allOn, "https://agentreferee.ai"), /judge-3x2 \(\$0\.45\) \/ judge-3x3 \(\$0\.60\).*refunded by hand/);
+});

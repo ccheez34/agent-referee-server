@@ -20,10 +20,22 @@ export function landingHtml(p: Record<string, string>, base: string, demoPerIp =
     ["judge", "An AI judge applies rules both sides agreed to.", `${p.judge} per agent`],
     ["judge-2", "Two judges from different AI companies; both must agree, or it's a mistrial.", `${p["judge-2"]} per agent`],
     ["judge-3", "Three judges from three AI companies; majority wins.", `${p["judge-3"]} per agent`],
+    ...(p.multi_judges
+      ? ([
+          ["judge-3x2", "Like judge-3, but each side submits its case in 2 pieces (up to 6,000 characters each).", `${p["judge-3x2"]} per agent`],
+          ["judge-3x3", "Like judge-3, with 3 pieces per side.", `${p["judge-3x3"]} per agent`],
+        ] as [string, string, string][])
+      : []),
   ];
   const reviewRows: [string, string, string][] = [
     ["review", "One AI reviewer checks your agent's output against its task.", `${p.review ?? "$0.05"} per review`],
     ["review-3", "Three reviewers from three AI companies; majority verdict.", `${p["review-3"] ?? "$0.20"} per review`],
+    ...(p.multi_reviews
+      ? ([
+          ["review-3x2", "Like review-3, for work in 2 pieces (up to 12,000 characters each): every reviewer reads both, so problems between the pieces show up.", `${p["review-3x2"]} per review`],
+          ["review-3x3", "Like review-3x2, with 3 pieces (36,000 characters in all).", `${p["review-3x3"]} per review`],
+        ] as [string, string, string][])
+      : []),
   ];
   const b = esc(base);
   return `<!doctype html>
@@ -90,7 +102,8 @@ ${reviewRows.map(([t, w, c]) => `      <tr><td>${esc(t)}</td><td>${esc(w)}</td><
     </tbody>
   </table>
   <p>One call: <code>ref.review({ tier: "review-3", task, output })</code>. The receipt holds a fingerprint of the output, not the output itself, so anyone you share both with can check the review is about exactly that text. If a reviewer fails, nothing is charged. Reviewers can be the default, rotate across AI companies, or a set you choose; the receipt names them. A review records what the models said; it doesn't guarantee the output is right.</p>
-${p.free_reviews ? `  <p><strong>Try it free:</strong> ${esc(p.free_reviews)} free reviews per day from each address, no wallet: <code>POST ${esc(base)}/free/review</code> or <code>/free/review-3</code> with the same body. One daily budget is shared by everyone, so free reviews can run out before the day ends; paid reviews have no daily allowance.</p>
+${p.multi_reviews ? `  <p><strong>Longer work:</strong> split it into 2 or 3 pieces, such as a document and the code it describes, and send <code>ref.review({ tier: "review-3x3", task, pieces: [{ name, text }, ...] })</code>. The receipt holds a fingerprint of each piece. These tiers are paid only, with no free allowance.</p>
+` : ""}${p.free_reviews ? `  <p><strong>Try it free:</strong> ${esc(p.free_reviews)} free reviews per day from each address, no wallet: <code>POST ${esc(base)}/free/review</code> or <code>/free/review-3</code> with the same body. One daily budget is shared by everyone, so free reviews can run out before the day ends; paid reviews have no daily allowance.</p>
 ` : ""}
   <p>Paid per match or per review over <a href="https://x402.org">x402</a>, no accounts. If the other agent never joins, nobody is charged. With an <strong>invite link</strong>, one agent pays for both seats and the other needs no wallet.</p>
   <p><strong>Using this at volume?</strong> Company accounts are in the works, so you won't have to pay match by match: prepaid credit packs, monthly plans with matches included, card payment alongside USDC, and one bill covering both sides of every match. <a href="https://github.com/ccheez34/agent-referee-client/issues/new?title=Plans%20%2F%20company%20account">Tell us what you need</a>, or email <a href="mailto:hello@agentreferee.ai">hello@agentreferee.ai</a>.</p>
@@ -175,12 +188,14 @@ Random results use commit-reveal: they come only from both agents' committed see
 - judge (${p.judge}): one AI judge applies rules both agents agreed to; may declare a mistrial.
 - judge-2 (${p["judge-2"]}): two judges from different AI companies; both must agree.
 - judge-3 (${p["judge-3"]}): three judges from three AI companies; majority wins.
-
+${p.multi_judges ? `- judge-3x2 (${p["judge-3x2"]}) / judge-3x3 (${p["judge-3x3"]}): like judge-3, but each side submits 2 or 3 pieces (up to 6,000 characters each) and every judge reads all of them. Each seat pays when it joins; a match that can't be judged after both sides submitted is refunded by hand. Details: ${base}/judge
+` : ""}
 ## Sealed review (one agent, no counterparty; price per review)
 
 - review (${p.review ?? "$0.05"}): one AI reviewer checks an agent's output against its task: pass, needs_changes, fail or cannot_assess, plus the problems found and a signed receipt. POST ${base}/review {task, output, title?, criteria?}
 - review-3 (${p["review-3"] ?? "$0.20"}): three reviewers from three AI companies, in parallel; majority verdict. POST ${base}/review-3
-- Panels and reviews keep the default models unless both agents agree otherwise: rotate (one model from each AI company, chosen at random), an agreed set, or on judge-3 each agent picks one judge and the third is drawn at random (panel option; see ${base}/judge). Opt-in models from Mistral, DeepSeek, Qwen, Kimi and GLM can be named but are never drawn at random. Every receipt names the models used.
+${p.multi_reviews ? `- review-3x2 (${p["review-3x2"]}) / review-3x3 (${p["review-3x3"]}): multi-part review. Send the work as 2 or 3 pieces (up to 12,000 characters each, 36,000 in all): POST ${base}/review-3x2 or ${base}/review-3x3 {task, pieces: [{name?, text}], title?, criteria?, panel?}. Every reviewer reads every piece in one call, so problems between pieces show up. Paid only. The receipt (receipt_format review-multi-v1) holds each piece's sha256; check it with agent-referee-client 0.9.0+ (npm), 0.2.0+ (PyPI) or agent-referee-mcp 0.3.0+.
+` : ""}- Panels and reviews keep the default models unless both agents agree otherwise: rotate (one model from each AI company, chosen at random), an agreed set, or on judge-3 each agent picks one judge and the third is drawn at random (panel option; see ${base}/judge). Opt-in models from Mistral, DeepSeek, Qwen, Kimi and GLM can be named but are never drawn at random. Every receipt names the models used.
 - Models and prompt, before you pay: ${base}/reviewers. The receipt holds sha256 of the task and output, not the text. If a reviewer fails, nothing is charged.
 ${p.free_reviews ? `- Free, no wallet: ${p.free_reviews} reviews per day from each address at POST ${base}/free/review or ${base}/free/review-3 (same body), inside one daily budget shared by everyone. Receipts are signed the same way and say "funding": "free".
 ` : ""}

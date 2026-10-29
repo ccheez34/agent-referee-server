@@ -638,13 +638,24 @@ app.get("/try", (c) =>
   }),
 );
 
+/** Prices and switches for the landing page and llms.txt: the multi-part tiers appear only while they're on. */
+function docPrices(env: Env): Record<string, string> {
+  return {
+    ...prices(env),
+    ...reviewPrices(env),
+    free_reviews: freeReviewsLabel(env),
+    ...(multiOnForAll(env) ? { ...multiPrices(env), multi_reviews: "on" } : {}),
+    ...(multiJudgeOnForAll(env) ? { multi_judges: "on" } : {}),
+  };
+}
+
 app.get("/", (c) => {
   const p = prices(c.env);
   const base = new URL(c.req.url).origin;
   // The same address answers with HTML or JSON depending on Accept, so caches must keep them apart.
   c.header("Vary", "Accept");
   // A person in a browser gets a readable page; agents and tools get the JSON instructions below.
-  if (wantsHtml(c.req.header("accept"), c.req.query("format"))) return c.html(landingHtml({ ...p, ...reviewPrices(c.env), free_reviews: freeReviewsLabel(c.env) }, base, c.env.DEMO_PER_IP_LIMIT || "20"));
+  if (wantsHtml(c.req.header("accept"), c.req.query("format"))) return c.html(landingHtml(docPrices(c.env), base, c.env.DEMO_PER_IP_LIMIT || "20"));
   return c.json({
     service: "Agent Referee",
     docs: "https://github.com/ccheez34/agent-referee-client",
@@ -675,6 +686,18 @@ app.get("/", (c) => {
       "7 judge-3": { tier: "judge-3", seats: 2, price_per_seat: p["judge-3"], what: "Three independent AI judges from three different companies decide in parallel; majority wins. Every vote, including dissent, is in the signed receipt, and anyone can recompute the decision from the votes." },
       "8 review": { tier: "review", seats: 1, price: `${reviewPrices(c.env).review} per review`, what: "Sealed review, no second agent needed: one AI reviewer checks your agent's output against its task and returns pass, needs_changes, fail or cannot_assess, the problems found, and a signed receipt. POST /review." },
       "9 review-3": { tier: "review-3", seats: 1, price: `${reviewPrices(c.env)["review-3"]} per review`, what: "Sealed review by three independent AI reviewers from three different companies; majority verdict, every vote in the signed receipt. POST /review-3." },
+      ...(multiOnForAll(c.env)
+        ? {
+            "10 review-3x2": { tier: "review-3x2", seats: 1, price: `${multiPrices(c.env)["review-3x2"]} per review`, what: `Multi-part review: work in 2 pieces (up to ${MULTI_LIMITS.maxPiece} characters each), three reviewers from three companies each read both pieces in one call. Paid only. POST /review-3x2.` },
+            "11 review-3x3": { tier: "review-3x3", seats: 1, price: `${multiPrices(c.env)["review-3x3"]} per review`, what: `Multi-part review with 3 pieces (${MULTI_LIMITS.maxTotal} characters in all). Paid only. POST /review-3x3.` },
+          }
+        : {}),
+      ...(multiJudgeOnForAll(c.env)
+        ? {
+            "12 judge-3x2": { tier: "judge-3x2", seats: 2, price_per_seat: p["judge-3x2"], what: `Like judge-3, but each side submits 2 pieces (up to ${MULTI_JUDGE_LIMITS.maxPiece} characters each). Seats pay at join; a match that can't be judged after both sides submitted is refunded by hand. See GET /judge.` },
+            "13 judge-3x3": { tier: "judge-3x3", seats: 2, price_per_seat: p["judge-3x3"], what: "Like judge-3x2, with 3 pieces per side. See GET /judge." },
+          }
+        : {}),
     },
     flow: [
       `POST ${base}/matches  {tier, seats:[...], weights?|options?|rules?, title?, key?, seat_wallets?, step_seconds?}  (free) -> match_id`,
@@ -693,6 +716,12 @@ app.get("/", (c) => {
       `Rematch (rps, rps-bo3, weighted): after a result, each party calls POST ${base}/matches/<id>/rematch {seat, seat_token}. Once both have, the response (and the match status) gives next_match_id: join it like any match (paid per seat). Seats are locked to the wallets that paid this game. Each receipt carries the series tally and the previous receipt's hash. Up to ${MAX_SERIES_GAMES} games per series.`,
       `Lost your seat_token after paying? POST ${base}/matches/<id>/recover {payment: "<the exact X-PAYMENT header you paid with>"} re-issues your seat with a new token, free.`,
       `Sealed review (one agent, no match): POST ${base}/review or ${base}/review-3 (x402 paid) {task, output, title?, criteria?} -> {result:{verdict, tally}, votes, receipt}. Usually seconds, but up to 4 minutes if a provider is slow: keep your HTTP timeout at least 300 seconds. Failed reviews aren't charged (up to 10 per IP address per day, plus one per successful review). Verdicts: pass, needs_changes, fail, cannot_assess (review-3 can be split). The receipt holds sha256 of the task and output; anyone holding the output can check it. If a reviewer fails, nothing is charged. GET ${base}/reviewers shows the models and prompt before you pay.`,
+      ...(multiOnForAll(c.env)
+        ? [`Multi-part review: POST ${base}/review-3x2 or ${base}/review-3x3 (x402 paid only) {task, pieces: [{name?, text}], title?, criteria?, panel?} with exactly 2 or 3 pieces, each 1 to ${MULTI_LIMITS.maxPiece} characters, ${MULTI_LIMITS.maxTotal} in all (characters are UTF-16 code units). Each issue starts with [piece N] or [all]. The receipt (receipt_format review-multi-v1) holds each piece's sha256 instead of output_sha256; verify it, passing the pieces, with agent-referee-client 0.9.0+ (npm), 0.2.0+ (PyPI) or agent-referee-mcp 0.3.0+. A failed review isn't charged and uses up as many allowed failures as it has pieces. GET ${base}/reviewers (multi_part) shows the models, limits and prompt.`]
+        : []),
+      ...(multiJudgeOnForAll(c.env)
+        ? [`Multi-part judge tiers (judge-3x2, judge-3x3): create and join as for judge-3, then POST ${base}/matches/<id>/submit {seat, seat_token, pieces: [{text}]} with exactly 2 or 3 pieces of 1 to ${MULTI_JUDGE_LIMITS.maxPiece} characters (no names). A refused submit changes nothing; you can submit again before the deadline. Receipts are receipt_format judge-multi-v1. GET ${base}/judge (multi_part) has the details and the refund rule.`]
+        : []),
       ...(freeReviewConfig(c.env).budgetMicro ? [`Free sealed review (no wallet): POST ${base}/free/review or ${base}/free/review-3 with the same body. ${freeReviewConfig(c.env).perCaller.review} single-reviewer and ${freeReviewConfig(c.env).perCaller["review-3"]} review-3 per IP address per UTC day, inside one shared daily budget; receipts are signed the same way and say "funding": "free". A busy service or a failed reviewer doesn't use up a free review.`] : []),
       `GET ${base}/matches/<id> for status, result and signed receipt; GET ${base}/pubkey to verify receipts`,
       `Records: GET ${base}/agents/<wallet> shows a paying wallet's judge record, luck record, completed vs forfeited matches and badges, so an agent can check a counterparty before trusting it. Records only cover matches the wallet actually joined, so an empty record means unknown, not reliable. Add "private_record": true (or false) to any paid join to hide (or show) your own record; the setting sticks to your wallet until you change it. The same wallet in two seats never counts.`,
@@ -710,7 +739,7 @@ app.get("/", (c) => {
 // Plain-text summary for AI agents and LLM crawlers.
 app.get("/llms.txt", (c) => {
   const base = new URL(c.req.url).origin;
-  return c.text(llmsTxt({ ...prices(c.env), ...reviewPrices(c.env), free_reviews: freeReviewsLabel(c.env) }, base, c.env.DEMO_PER_IP_LIMIT || "20"));
+  return c.text(llmsTxt(docPrices(c.env), base, c.env.DEMO_PER_IP_LIMIT || "20"));
 });
 
 // Health check for uptime monitors (free, no AI calls, no payments). 200 + "status":"ok" = all good; "degraded" names
