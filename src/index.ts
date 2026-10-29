@@ -11,7 +11,7 @@ import type { Env } from "./types.ts";
 import { payaiToken } from "./payai.ts";
 import { signReceipt } from "./receipt.ts";
 import {
-  REVIEW_LIMITS, REVIEW_MESSAGE_FORMAT, longReviewRule, REVIEW_SYSTEM, REVIEW_VERDICTS, REVIEWER_BUDGET_MS, missingReviewKey, reviewCommitment, reviewModels, reviewPayload, runOneReviewer, validateReview, type ReviewTier,
+  REVIEW_LIMITS, REVIEW_MESSAGE_FORMAT, longReviewRule, REVIEW_SYSTEM, REVIEW_VERDICTS, REVIEWER_BUDGET_MS, missingReviewKey, reviewCommitment, type ReviewerCall, reviewModels, reviewPayload, runOneReviewer, validateReview, type ReviewTier,
 } from "./review.ts";
 import { Gate, GATE_MAX_WAIT_MS } from "./gate.ts";
 import { Health, adminOk, evaluateHealth, healthEvents, listUnjudged, markRefunded, pauseState, recordEvent, recordSettleFailure, setPause, listBlocked, settledUp, unblockWallet, walletBlocked, walletStanding } from "./health.ts";
@@ -83,7 +83,10 @@ function multiPrices(env: Env): Record<MultiTier, string> {
  * x-operator-token: <ADMIN_TOKEN>. */
 const multiOnForAll = (env: Env) => env.MULTI_PART_ENABLED === "true";
 async function multiOn(c: any): Promise<boolean> {
-  if (multiOnForAll(c.env)) return true;
+  return multiOnForAll(c.env) || (await isOperator(c));
+}
+/** The request carries the operator's token (x-operator-token: ADMIN_TOKEN). */
+async function isOperator(c: any): Promise<boolean> {
   const t = c.req.header("x-operator-token");
   return !!t && (await adminOk(c.env, `Bearer ${t}`));
 }
@@ -1072,6 +1075,11 @@ async function handleMultiReview(c: any, tier: MultiTier) {
     g.lease = late.lease;
   }
   const st = g; // narrowed: defined from here on (also inside runMulti)
+  // Every provider call's model, time, outcome and token counts: logged for the operator's cost and speed checks
+  // (spec 4.3), and returned in the response only to the operator (x-operator-token). Never in the signed receipt.
+  const calls: ReviewerCall[] = [];
+  const operator = await isOperator(c);
+  const forOperator = () => (operator ? { operator: { calls } } : {});
   const { input, commitment, caller } = g;
   const lease = g.lease;
   const started = Date.now();
@@ -1101,6 +1109,10 @@ async function handleMultiReview(c: any, tier: MultiTier) {
             how: multiReviewerHow(m, input, token, c.env),
             observe: (o) => lease.observe(i, o),
             onCutOff: (cut) => void inBackground(c, recordCutOff(c.env, cut)),
+            onCall: (call) => {
+              calls.push(call);
+              console.log(JSON.stringify({ multi_call: { tier, ...call } }));
+            },
           }),
         ),
       );
@@ -1124,7 +1136,10 @@ async function handleMultiReview(c: any, tier: MultiTier) {
       await record("record");
       stat(c, "paid_failed");
       stat(c, `paid_failed_${tier.replace("-", "")}`);
-      return err(502, `A reviewer didn't return a usable verdict (${msg.slice(0, 200)}). Nothing was charged; this failed review counts as ${weight} of today's allowed failures. Try again.`);
+      return new Response(
+        JSON.stringify({ error: `A reviewer didn't return a usable verdict (${msg.slice(0, 200)}). Nothing was charged; this failed review counts as ${weight} of today's allowed failures. Try again.`, ...forOperator() }),
+        { status: 502, headers: { "content-type": "application/json" } },
+      );
     }
     const votes = settled.map((r) => (r as PromiseFulfilledResult<any>).value);
     console.log(`review ${tier} ok in ${Date.now() - started}ms: ${votes.map((v) => `${v.model}=${v.verdict}${v.issues_dropped ? ` (dropped ${v.issues_dropped})` : ""}`).join(" ")}`);
@@ -1138,6 +1153,7 @@ async function handleMultiReview(c: any, tier: MultiTier) {
       result: payload.result,
       votes: payload.votes,
       receipt,
+      ...forOperator(),
       note: "Save the receipt with the task and every piece (with its name, if you gave one): anyone holding them can check the signature, task_sha256, each piece's sha256 and chars, and pieces_sha256. The service keeps no copy of the review; the receipt you hold is the only record. It is not a guarantee the work is correct.",
     });
   }

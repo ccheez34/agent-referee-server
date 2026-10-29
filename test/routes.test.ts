@@ -833,3 +833,18 @@ t("multi-part: GET /reviewers describes the tiers, the eligible models and the p
   assert.match(m.prompt_sha256, /^[0-9a-f]{64}$/);
   assert.equal((await call(env(MP), "/reviewers")).body.multi_part.status, "on");
 });
+
+t("multi-part: the operator's response lists every provider call with tokens and time; the public one doesn't", async () => {
+  const e = env(MP);
+  const op = await call(e, "/review-3x2", multi(2), { "x-operator-token": ADMIN });
+  assert.equal(op.status, 200, JSON.stringify(op.body));
+  assert.equal(op.body.operator.calls.length, 3);
+  for (const k of op.body.operator.calls) {
+    assert.equal(k.outcome, "answered");
+    assert.ok(k.input_tokens > 0 && k.output_tokens > 0 && k.ms >= 0 && k.try_number === 1);
+  }
+  assert.equal(op.body.receipt.payload.operator, undefined, "never in the signed receipt");
+  const pub = await call(e, "/review-3x2", multi(2));
+  assert.equal(pub.status, 200);
+  assert.equal(pub.body.operator, undefined);
+});

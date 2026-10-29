@@ -246,6 +246,30 @@ export type ReviewerHow = {
   parse: (text: string) => Omit<ReviewVote, "reviewer" | "model">;
 };
 
+/** One provider call, for the operator's live tests (cost and speed per model). Never signed into a receipt. */
+export type ReviewerCall = {
+  model: string;
+  try_number: number;
+  ms: number;
+  outcome: "answered" | "cut_off" | "timeout" | "network" | "error" | "unreadable";
+  status?: number;
+  input_tokens?: number;
+  output_tokens?: number;
+  reasoning_tokens?: number;
+};
+
+/** Token counts from either API's answer (Anthropic: usage.input_tokens/output_tokens; OpenRouter: usage.prompt_tokens/
+ * completion_tokens, with reasoning tokens inside completion_tokens_details when the model reports them). */
+export function callUsage(data: any): Pick<ReviewerCall, "input_tokens" | "output_tokens" | "reasoning_tokens"> {
+  const u = data?.usage;
+  if (!u || typeof u !== "object") return {};
+  const n = (x: unknown) => (typeof x === "number" && Number.isFinite(x) && x >= 0 ? x : undefined);
+  const input = n(u.input_tokens) ?? n(u.prompt_tokens);
+  const output = n(u.output_tokens) ?? n(u.completion_tokens);
+  const reasoning = n(u.completion_tokens_details?.reasoning_tokens);
+  return { ...(input !== undefined ? { input_tokens: input } : {}), ...(output !== undefined ? { output_tokens: output } : {}), ...(reasoning !== undefined ? { reasoning_tokens: reasoning } : {}) };
+}
+
 /** Per-call limit. Each call's limit is also capped at what's left of REVIEWER_BUDGET_MS, so all tries end inside it. */
 export const REVIEWER_CALL_TIMEOUT_MS = 100_000;
 
@@ -278,7 +302,7 @@ export async function runOneReviewer(
   reviewer: number,
   input: ReviewInput,
   timeoutMs = REVIEWER_CALL_TIMEOUT_MS,
-  opts: { budgetMs?: number; sleep?: (ms: number) => Promise<unknown>; now?: () => number; observe?: (o: CallObservation) => void; onCutOff?: (c: CutOff) => void; how?: ReviewerHow } = {},
+  opts: { budgetMs?: number; sleep?: (ms: number) => Promise<unknown>; now?: () => number; observe?: (o: CallObservation) => void; onCutOff?: (c: CutOff) => void; how?: ReviewerHow; onCall?: (c: ReviewerCall) => void } = {},
 ): Promise<ReviewVote> {
   const observe = opts.observe ?? (() => {});
   const how = opts.how;
@@ -299,10 +323,13 @@ export async function runOneReviewer(
     // stay inside the budget.
     const callTimeoutMs = Math.min(timeoutMs, Math.max(left - (how?.callMarginMs ?? 0), 1));
     let res: Response;
+    const callStart = now();
+    const call = (c: Omit<ReviewerCall, "model" | "try_number" | "ms">) => opts.onCall?.({ model, try_number: tryNumber, ms: now() - callStart, ...c });
     try {
       res = await callModel(keys, model, system, user, AbortSignal.timeout(callTimeoutMs), how?.anthropicMaxTokens ?? REVIEWER_MAX_TOKENS, how?.openRouterMaxTokens);
     } catch (e: any) {
       const timedOut = e?.name === "TimeoutError" || e?.name === "AbortError";
+      call({ outcome: timedOut ? "timeout" : "network" });
       observe({ kind: timedOut ? "timeout" : "network" });
       lastErr = timedOut ? `reviewer timed out after ${Math.round(callTimeoutMs / 1000)}s` : `reviewer request failed: ${String(e?.message ?? e).slice(0, 150)}`;
       console.error(`review ${model} reviewer ${reviewer}: ${lastErr}`);
@@ -318,6 +345,7 @@ export async function runOneReviewer(
         detail = String(e?.error?.message ?? e?.error?.type ?? "").replace(/\s+/g, " ").slice(0, 200);
       } catch {}
       const kind = classifyStatus(model, res.status, raw);
+      call({ outcome: "error", status: res.status });
       observe({ kind, status: res.status, rate: rateInfo(res.headers) });
       lastErr = `reviewer API returned ${res.status}${detail ? `: ${detail}` : ""}`;
       console.error(`review ${model} reviewer ${reviewer} (try ${tryNumber}): ${lastErr}`);
@@ -330,7 +358,13 @@ export async function runOneReviewer(
     }
     observe({ kind: "ok", status: res.status, rate: rateInfo(res.headers) });
     try {
-      const data: any = await res.json();
+      const data: any = await res.json().catch((e: any) => {
+        call({ outcome: "unreadable", status: res.status });
+        throw e;
+      });
+      const usage = callUsage(data);
+      const cutOffNow = data?.stop_reason === "max_tokens" || data?.choices?.[0]?.finish_reason === "length";
+      call({ outcome: cutOffNow ? "cut_off" : "answered", status: res.status, ...usage });
       if (data?.error) throw new Error(`reviewer API error: ${String(data.error.message ?? data.error).slice(0, 200)}`);
       // Was the answer cut off at the token limit? Only matters if it then can't be parsed.
       const cutOff = data?.stop_reason === "max_tokens" || data?.choices?.[0]?.finish_reason === "length";

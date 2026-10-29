@@ -62,6 +62,8 @@ export async function fakeModelResponse(cfg: FakeAi, model: string, user: string
   const cut = kind === "cut";
   const answer = cut ? text.slice(0, 20) : text;
   const headers = { "content-type": "application/json" };
-  if (openrouter) return new Response(JSON.stringify({ model, choices: [{ message: { content: answer }, finish_reason: cut ? "length" : "stop" }] }), { headers });
-  return new Response(JSON.stringify({ model, content: [{ type: "text", text: answer }], stop_reason: cut ? "max_tokens" : "end_turn" }), { headers });
+  // Rough token counts (about 4 characters a token), so usage reporting can be tried on staging.
+  const inTok = Math.ceil(user.length / 4), outTok = Math.ceil(answer.length / 4);
+  if (openrouter) return new Response(JSON.stringify({ model, choices: [{ message: { content: answer }, finish_reason: cut ? "length" : "stop" }], usage: { prompt_tokens: inTok, completion_tokens: outTok } }), { headers });
+  return new Response(JSON.stringify({ model, content: [{ type: "text", text: answer }], stop_reason: cut ? "max_tokens" : "end_turn", usage: { input_tokens: inTok, output_tokens: outTok } }), { headers });
 }

@@ -7,7 +7,7 @@ import {
   boundaryToken, buildMultiMessage, multiCommitment, multiMaxTokens, multiModels, multiPromptSha, multiReviewPayload, multiReviewerHow,
   pieceRecords, piecesSha256, readJsonCapped, validateMultiReview, TOO_BIG, type MultiInput,
 } from "../src/multipart.ts";
-import { runOneReviewer, REVIEW_SYSTEM } from "../src/review.ts";
+import { runOneReviewer, callUsage, REVIEW_SYSTEM, type ReviewerCall } from "../src/review.ts";
 import { canonicalJson, sha256Hex } from "../src/logic.ts";
 import { signReceipt, verifyReceipt } from "../src/receipt.ts";
 import { companyOf } from "../src/judge.ts";
@@ -439,4 +439,33 @@ test("a failed multi-part review uses up as many allowed failures as it has piec
   assert.equal((await call({ caller: "cc", limit: 3, parallel: 0, reserve: true, weight: 3 })).blocked, false);
   assert.equal((await call({ caller: "dd", limit: 2, parallel: 0, reserve: true, weight: 3 })).blocked, true);
   assert.equal((await call({ caller: "dd", limit: 2, parallel: 0, reserve: true })).blocked, false, "a single review still fits");
+});
+
+// ---------- calls reported for the operator's live tests ----------
+
+test("each provider call is reported with its model, try, time, outcome and token counts (never in the receipt)", async () => {
+  assert.deepEqual(callUsage({ usage: { input_tokens: 9000, output_tokens: 700 } }), { input_tokens: 9000, output_tokens: 700 });
+  assert.deepEqual(callUsage({ usage: { prompt_tokens: 9100, completion_tokens: 2500, completion_tokens_details: { reasoning_tokens: 1800 } } }), { input_tokens: 9100, output_tokens: 2500, reasoning_tokens: 1800 });
+  assert.deepEqual(callUsage({}), {});
+  assert.deepEqual(callUsage({ usage: { input_tokens: -1, output_tokens: "x" } }), {});
+  const input: MultiInput = { task, pieces: [piece(5), piece(5)] };
+  let clock = 0;
+  const orig = globalThis.fetch;
+  let n = 0;
+  globalThis.fetch = (async () => {
+    n++;
+    clock += 40_000;
+    if (n === 1) return new Response(JSON.stringify({ error: { message: "busy" } }), { status: 529 });
+    return new Response(JSON.stringify({ model: OPUS, content: [{ type: "text", text: answer(["[all] x"]) }], stop_reason: "end_turn", usage: { input_tokens: 9000, output_tokens: 650 } }), { headers: { "content-type": "application/json" } });
+  }) as any;
+  const calls: ReviewerCall[] = [];
+  try {
+    await runOneReviewer({ ANTHROPIC_API_KEY: "a" }, OPUS, 1, {} as any, 120_000, { budgetMs: 240_000, now: () => clock, sleep: async () => {}, how: multiReviewerHow(OPUS, input, "t"), onCall: (c) => calls.push(c) });
+  } finally {
+    globalThis.fetch = orig;
+  }
+  assert.deepEqual(calls, [
+    { model: OPUS, try_number: 1, ms: 40_000, outcome: "error", status: 529 },
+    { model: OPUS, try_number: 2, ms: 40_000, outcome: "answered", status: 200, input_tokens: 9000, output_tokens: 650 },
+  ]);
 });
