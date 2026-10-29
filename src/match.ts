@@ -47,6 +47,7 @@ import {
   decide,
   votePick,
   JUDGE_FORMAT_VERSION_V2,
+  type JudgeCall,
   type JudgeCommitment,
   type JudgeVote,
   type JudgeTierName,
@@ -115,7 +116,11 @@ export type MatchState = {
   retry_at?: number; // the room retries judging on its own at this time (match alarm)
   auto_retries?: number; // how many automatic retries were scheduled (sets the next wait)
   refund_listed?: boolean; // a paid match that ended unjudged was put on the operator's refund list
+  judge_calls?: (JudgeCall & { run: number })[]; // multi-part judge tiers: every provider call, for the operator only (never public, never signed)
 };
+
+/** At most this many judge calls are kept per match (4 runs x 3 judges x 2 tries is 24). */
+const MAX_JUDGE_CALLS = 30;
 
 const HOUR = 3600_000;
 
@@ -251,6 +256,7 @@ export class MatchRoom {
     }
     let settled: PromiseSettledResult<JudgeVote>[];
     const notes: Promise<void>[] = []; // cut-off notes (never throw)
+    const calls: JudgeCall[] = []; // multi-part tiers: each provider call, for the operator's cost checks
     try {
       const keys = { ANTHROPIC_API_KEY: this.env.ANTHROPIC_API_KEY, OPENROUTER_API_KEY: this.env.OPENROUTER_API_KEY, fake: fakeAiConfig(this.env) };
       settled = await Promise.allSettled(
@@ -268,6 +274,7 @@ export class MatchRoom {
             how: result.pieces
               ? multiJudgeHow({ model: j.model, maxTokens: result.maxTokens![j.model], rules: result.rules, pieces: result.pieces, order: j.order, title: result.title, criteria: result.criteria })
               : undefined,
+            onCall: result.pieces ? (c) => calls.push(c) : undefined,
             observe: (o) => slots.lease.observe(i, o),
             onCutOff: (cut) => notes.push(recordCutOff(this.env, cut)),
           }),
@@ -282,7 +289,7 @@ export class MatchRoom {
       vote: s.status === "fulfilled" ? s.value : null,
       error: s.status === "rejected" ? ((s.reason as any)?.message ?? String(s.reason)) : undefined,
     }));
-    return this.locked(() => this.finishJudging(outcomes));
+    return this.locked(() => this.finishJudging(outcomes, calls));
   }
 
   /** Inside the lock: no judge slot was free. No AI was called, so this doesn't count against the retry limit. */
@@ -319,6 +326,9 @@ export class MatchRoom {
     switch (action) {
       case "status":
         return json(200, this.publicView());
+      case "operator-status":
+        // Only reachable through GET /matches/:id with the operator's token (index.ts checks it).
+        return json(200, { ...this.publicView(), operator: { judge_calls: m.judge_calls ?? [] } });
       case "join":
         return this.join(body);
       case "commit":
@@ -774,10 +784,19 @@ export class MatchRoom {
   }
 
   /** Inside the lock again: record each panelist's verdict (or failure), then combine them with the published rule. */
-  private async finishJudging(outcomes: { index: number; vote: JudgeVote | null; error?: string }[]): Promise<Response> {
+  private async finishJudging(outcomes: { index: number; vote: JudgeVote | null; error?: string }[], calls: JudgeCall[] = []): Promise<Response> {
     const m = await this.load();
     if (!m) return bad(404, "No such match. It may have expired.");
-    if (m.phase !== "judging") return json(200, { ok: true, match: this.publicView() });
+    if (calls.length) {
+      // Logged for the operator (wrangler tail) and kept on the match for GET /matches/:id with the operator's token.
+      const run = (m.judge_runs ?? 0) + 1;
+      for (const c of calls) console.log(JSON.stringify({ judge_call: { match_id: m.id, tier: m.tier, run, ...c } }));
+      m.judge_calls = [...(m.judge_calls ?? []), ...calls.map((c) => ({ ...c, run }))].slice(-MAX_JUDGE_CALLS);
+    }
+    if (m.phase !== "judging") {
+      if (calls.length) await this.save();
+      return json(200, { ok: true, match: this.publicView() });
+    }
     for (const o of outcomes) if (o.vote) m.panel_votes![o.index] = o.vote;
     if (outcomes.length) m.judge_runs = (m.judge_runs ?? 0) + 1;
     const failures = outcomes.filter((o) => !o.vote);

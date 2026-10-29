@@ -527,6 +527,8 @@ export async function runOneJudge(opts: {
   /** The multi-part judge tiers: their own message, answer room and time budget (see multijudge.ts). */
   how?: JudgeHow;
   now?: () => number;
+  /** Told about every provider call: model, try, time, outcome and token counts (for the operator's cost checks). */
+  onCall?: (c: JudgeCall) => void;
 }): Promise<JudgeVote> {
   const how = opts.how;
   const v3 = opts.formatVersion !== JUDGE_FORMAT_VERSION_V2;
@@ -548,12 +550,16 @@ export async function runOneJudge(opts: {
     const left = deadline - now();
     if (how && ((attempt > 0 && left < how.minTryMs) || left - how.callMarginMs <= 0)) break;
     const callTimeoutMs = how ? Math.min(fullCallMs, Math.max(left - how.callMarginMs, 1)) : fullCallMs;
+    const callStart = now();
+    const report = (c: Omit<JudgeCall, "model" | "panelist" | "try_number" | "ms">) =>
+      opts.onCall?.({ model: opts.model, panelist: opts.panelist, try_number: attempt + 1, ms: now() - callStart, ...c });
     try {
       // Each call has its own time limit, so two tries plus a short wait end inside the match's judging limit.
       res = await callModel(keys, opts.model, system, user, AbortSignal.timeout(callTimeoutMs), how ? maxTokens : JUDGE_MAX_TOKENS, how ? maxTokens : OPENROUTER_MAX_TOKENS);
     } catch (e: any) {
       const timedOut = e?.name === "TimeoutError" || e?.name === "AbortError";
       observe({ kind: timedOut ? "timeout" : "network" });
+      report({ outcome: timedOut ? "timeout" : "network" });
       lastErr = timedOut ? `judge timed out after ${Math.round(callTimeoutMs / 1000)}s` : `judge request failed: ${String(e?.message ?? e).slice(0, 150)}`;
       console.error(`judge ${opts.model} panelist ${opts.panelist}: ${lastErr}`);
       continue;
@@ -568,6 +574,7 @@ export async function runOneJudge(opts: {
       } catch {}
       const kind = classifyStatus(opts.model, res.status, raw);
       observe({ kind, status: res.status, rate: rateInfo(res.headers) });
+      report({ outcome: "error", status: res.status });
       lastErr = `judge API returned ${res.status}${detail ? `: ${detail}` : ""}`;
       console.error(`judge ${opts.model} panelist ${opts.panelist}: ${lastErr}`);
       if (kind === "cap") throw new ProviderCapError(opts.model, res.status, detail || raw.slice(0, 160)); // account-wide; a retry can't help
@@ -582,8 +589,17 @@ export async function runOneJudge(opts: {
       continue;
     }
     observe({ kind: "ok", status: res.status, rate: rateInfo(res.headers) });
+    let data: any;
     try {
-      const data: any = await res.json();
+      data = await res.json();
+    } catch {
+      report({ outcome: "unreadable", status: res.status });
+      lastErr = "judge returned unusable output";
+      continue;
+    }
+    const cutOffAnswer = data?.stop_reason === "max_tokens" || data?.choices?.[0]?.finish_reason === "length";
+    report({ outcome: data?.error ? "error" : cutOffAnswer ? "cut_off" : "answered", status: res.status, ...callUsage(data) });
+    try {
       if (data?.error) throw new Error(`judge API error: ${String(data.error.message ?? data.error).slice(0, 200)}`);
       const cutOff = data?.stop_reason === "max_tokens" || data?.choices?.[0]?.finish_reason === "length";
       let v;
@@ -604,6 +620,30 @@ export async function runOneJudge(opts: {
   }
   // Name the judge, so whoever reads the match error knows which AI company's model failed.
   throw new Error(`${opts.model}: ${lastErr}`);
+}
+
+/** One provider call by a judge, for the operator's cost and speed checks (spec 4.3). Never in a receipt. */
+export type JudgeCall = {
+  model: string;
+  panelist: number;
+  try_number: number;
+  ms: number;
+  outcome: "answered" | "cut_off" | "timeout" | "network" | "error" | "unreadable";
+  status?: number;
+  input_tokens?: number;
+  output_tokens?: number;
+  reasoning_tokens?: number;
+};
+
+/** Token counts from either API's response (Anthropic: input/output_tokens; OpenRouter: prompt/completion_tokens). */
+export function callUsage(data: any): { input_tokens?: number; output_tokens?: number; reasoning_tokens?: number } {
+  const u = data?.usage;
+  if (!u || typeof u !== "object") return {};
+  const n = (x: unknown) => (typeof x === "number" && Number.isFinite(x) && x >= 0 ? x : undefined);
+  const input = n(u.input_tokens) ?? n(u.prompt_tokens);
+  const output = n(u.output_tokens) ?? n(u.completion_tokens);
+  const reasoning = n(u.completion_tokens_details?.reasoning_tokens);
+  return { ...(input !== undefined ? { input_tokens: input } : {}), ...(output !== undefined ? { output_tokens: output } : {}), ...(reasoning !== undefined ? { reasoning_tokens: reasoning } : {}) };
 }
 
 /** How a multi-part judge is called: the v5-multi message, its answer room, and a time budget for both tries. */

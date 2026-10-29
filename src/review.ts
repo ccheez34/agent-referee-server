@@ -12,7 +12,7 @@
 import { LIMITS, canonicalJson, panelShapeError, sha256Hex, validateCriteria } from "./logic.ts";
 import { ProviderCapError, classifyStatus, rateInfo, type CallObservation } from "./providers.ts";
 import type { CutOff } from "./cutoffs.ts";
-import { allowedModels, answerTokens, answerText, callModel, choosePanel, modelPool, panelModels, viaOpenRouter, JUDGE_TEMPERATURE, type Confidence, type Criterion, type JudgeKeys, type PanelEnv, type PanelRequest, type PanelSelection } from "./judge.ts";
+import { allowedModels, answerTokens, answerText, callModel, callUsage, choosePanel, modelPool, panelModels, viaOpenRouter, JUDGE_TEMPERATURE, type Confidence, type Criterion, type JudgeKeys, type PanelEnv, type PanelRequest, type PanelSelection } from "./judge.ts";
 
 export type ReviewTier = "review" | "review-3";
 export const REVIEW_TIERS: ReviewTier[] = ["review", "review-3"];
@@ -260,15 +260,8 @@ export type ReviewerCall = {
 
 /** Token counts from either API's answer (Anthropic: usage.input_tokens/output_tokens; OpenRouter: usage.prompt_tokens/
  * completion_tokens, with reasoning tokens inside completion_tokens_details when the model reports them). */
-export function callUsage(data: any): Pick<ReviewerCall, "input_tokens" | "output_tokens" | "reasoning_tokens"> {
-  const u = data?.usage;
-  if (!u || typeof u !== "object") return {};
-  const n = (x: unknown) => (typeof x === "number" && Number.isFinite(x) && x >= 0 ? x : undefined);
-  const input = n(u.input_tokens) ?? n(u.prompt_tokens);
-  const output = n(u.output_tokens) ?? n(u.completion_tokens);
-  const reasoning = n(u.completion_tokens_details?.reasoning_tokens);
-  return { ...(input !== undefined ? { input_tokens: input } : {}), ...(output !== undefined ? { output_tokens: output } : {}), ...(reasoning !== undefined ? { reasoning_tokens: reasoning } : {}) };
-}
+/** Token counts from either API's response (shared with the judges, in judge.ts). */
+export { callUsage };
 
 /** Per-call limit. Each call's limit is also capped at what's left of REVIEWER_BUDGET_MS, so all tries end inside it. */
 export const REVIEWER_CALL_TIMEOUT_MS = 100_000;

@@ -959,3 +959,18 @@ t("docs: GET /, the landing page and llms.txt show each multi-part family only o
   const both = await views(env({ ...MP, ...MJ }));
   assert.ok(both.includes("judge-3x3") && both.includes("judge-multi-v1"));
 });
+
+t("multi-part judge: GET /matches/:id shows the judge calls (tokens, time) only with the operator's token", async () => {
+  const e = env(MJ);
+  const id = (await call(e, "/matches", mjCreate("judge-3x2"))).body.match_id;
+  const tok: Record<string, string> = {};
+  for (const s of ["alpha", "beta"]) tok[s] = (await call(e, "/join/judge-3x2", { match_id: id, seat: s })).body.seat_token;
+  await call(e, `/matches/${id}/submit`, { seat: "alpha", seat_token: tok.alpha, pieces: sidePieces(2, "alpha") });
+  await call(e, `/matches/${id}/submit`, { seat: "beta", seat_token: tok.beta, pieces: sidePieces(2, "beta") });
+  const pub = await call(e, `/matches/${id}`);
+  assert.equal(pub.body.operator, undefined);
+  assert.equal((await call(e, `/matches/${id}`, undefined, { "x-operator-token": "wrong".repeat(10) })).body.operator, undefined);
+  const op = await call(e, `/matches/${id}`, undefined, { "x-operator-token": ADMIN });
+  assert.equal(op.body.operator.judge_calls.length, 3);
+  assert.ok(op.body.operator.judge_calls.every((c: any) => c.outcome === "answered" && typeof c.input_tokens === "number"));
+});

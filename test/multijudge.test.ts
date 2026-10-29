@@ -544,3 +544,53 @@ test("the shared judge-multi-v1 vectors: every case comes out as it says (valid 
     assert.equal(b.pieces_sha256, await sha256Hex(b.canonical));
   }
 });
+
+test("each judge call's model, try, time, outcome and tokens are kept for the operator only: never in the status or the receipt", async () => {
+  const w = world();
+  const real = globalThis.fetch;
+  globalThis.fetch = (async (url: any, init: any) => {
+    const b = JSON.parse(init.body);
+    const openrouter = String(url).includes("openrouter");
+    const text = JSON.stringify({ winner: "alpha", confidence: "high", rule_applied: "r", reasoning: "x" });
+    return new Response(JSON.stringify(openrouter
+      ? { model: b.model, choices: [{ message: { content: text }, finish_reason: "stop" }], usage: { prompt_tokens: 9000, completion_tokens: 700, completion_tokens_details: { reasoning_tokens: 300 } } }
+      : { model: b.model, content: [{ type: "text", text }], stop_reason: "end_turn", usage: { input_tokens: 9500, output_tokens: 1200 } }));
+  }) as any;
+  try {
+    const { id, t } = await joined(w, "judge-3x2");
+    await w.call(id, "submit", { seat: "alpha", seat_token: t.alpha, pieces: pieces(PIECES_A.slice(0, 2)) });
+    const done = await w.call(id, "submit", { seat: "beta", seat_token: t.beta, pieces: pieces(PIECES_B.slice(0, 2)) });
+    assert.equal(done.body.match.phase, "done");
+    const op = await w.call(id, "operator-status");
+    const calls = op.body.operator.judge_calls;
+    assert.equal(calls.length, 3);
+    for (const c of calls) {
+      assert.equal(c.outcome, "answered");
+      assert.equal(c.try_number, 1);
+      assert.equal(c.run, 1);
+      assert.ok(typeof c.ms === "number" && c.panelist >= 1);
+      if (c.model.includes("/")) assert.deepEqual([c.input_tokens, c.output_tokens, c.reasoning_tokens], [9000, 700, 300]);
+      else assert.deepEqual([c.input_tokens, c.output_tokens], [9500, 1200]);
+    }
+    const pub = JSON.stringify((await w.call(id, "status")).body);
+    assert.ok(!pub.includes("judge_calls") && !pub.includes("9500"), "not in the public status or the receipt");
+  } finally {
+    globalThis.fetch = real;
+  }
+});
+
+test("judge-3 keeps no call record (only the multi-part tiers do)", async () => {
+  const w = world();
+  const ai = fakeAi();
+  try {
+    const id = randomToken(12);
+    await w.call(id, "create", { id, input: { tier: "judge-3", seats: ["alpha", "beta"], rules: RULES } });
+    const tok: Record<string, string> = {};
+    for (const s of ["alpha", "beta"]) tok[s] = (await w.call(id, "join", { seat: s, tier: "judge-3", role: "party", paid: true })).body.seat_token;
+    await w.call(id, "submit", { seat: "alpha", seat_token: tok.alpha, position: "Plan A" });
+    await w.call(id, "submit", { seat: "beta", seat_token: tok.beta, position: "Plan B" });
+    assert.deepEqual((await w.call(id, "operator-status")).body.operator.judge_calls, []);
+  } finally {
+    ai.restore();
+  }
+});

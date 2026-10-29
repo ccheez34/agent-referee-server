@@ -1604,10 +1604,12 @@ app.post("/invite/join", async (c) => {
   return forward(c.env, body.match_id, "join", { role: "guest", invite_token: body.invite_token, seat: body.seat });
 });
 
-app.get("/matches/:id", (c) => {
+app.get("/matches/:id", async (c) => {
   const id = c.req.param("id");
   if (!ID_RE.test(id)) return err(400, "Bad match id.");
-  return forward(c.env, id, "status");
+  // The operator (x-operator-token) also sees each judge call's model, time, outcome and tokens (multi-part judge
+  // tiers), for the cost and speed checks. Never shown to anyone else, never in a receipt.
+  return forward(c.env, id, (await isOperator(c)) ? "operator-status" : "status");
 });
 
 // Paid but never got the seat_token (connection dropped, crash after payment)? Present the exact
