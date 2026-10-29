@@ -24,7 +24,8 @@ export const MULTI_JUDGE_LIMITS = {
   maxBodyBytes: 128 * 1024,
 };
 
-/** Provisional seat prices (spec §2) until the judge tiers' own live cost test. */
+/** Seat prices, kept after the judge live test (Oct 29, ccheez34): average AI cost about 6% of both seats, worst case
+ * under it (research/checks/multi-part-judge-live-2026-10-29/COST-AND-SPEED.md). */
 export const MULTI_JUDGE_DEFAULT_PRICES: Record<MultiJudgeTier, string> = { "judge-3x2": "$0.45", "judge-3x3": "$0.60" };
 
 // Timing (spec §2): 120 s per call (or the time left less 5 s), 2 tries, the second only with 60 s left. The slot
