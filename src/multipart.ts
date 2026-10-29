@@ -62,10 +62,21 @@ export const MODEL_OUTPUT_LIMITS: Record<string, number | null> = {
   "moonshotai/kimi-k3": null,
 };
 
+/** The longest answer (output tokens, as the provider reported) each model gave in the live cost test (Oct 28, 14
+ * reviews on 20,000-36,000-character input; research/checks/multi-part-live-2026-10-28/INDEX-live.md). Spec 4.3 lets
+ * max_tokens go down only to 3 times this; a test checks it. */
+export const LIVE_TEST_LONGEST_ANSWERS: Record<string, number> = {
+  "claude-opus-5-5": 4_628,
+  "claude-sonnet-5-5": 4_216,
+  "openai/gpt-6-luna": 1_215,
+  "google/gemini-4-argon": 932,
+  "google/gemini-3.7-flash": 1_206,
+};
+
 /**
- * Lower max_tokens chosen after the live cost test (Oct 28, spec 4.3, ccheez34's option B): 3 times the longest answer
- * each model gave on 30,000-36,000-character input (Luna 1,215, Argon 932, Flash 1,206 tokens), rounded up. Claude
- * models keep 12,000: 3 times their longest answers (Opus 4,628, Sonnet 4,216) is above it.
+ * Lower max_tokens chosen after the live cost test (spec 4.3, ccheez34's option B): at least 3 times each model's longest
+ * answer (LIVE_TEST_LONGEST_ANSWERS), rounded up to 4,000. The Claude models keep the spec's starting value, 12,000:
+ * 3 times their longest answers (13,884 and 12,648) is already above it, so the rule doesn't let it go lower.
  */
 export const MULTI_DEFAULT_MAX_TOKENS: Record<string, number> = {
   "openai/gpt-6-luna": 4_000,
@@ -74,8 +85,13 @@ export const MULTI_DEFAULT_MAX_TOKENS: Record<string, number> = {
 };
 
 /** Left out of these tiers by default after the live cost test: Opus's worst case (12,000 output tokens at $20 per
- * million, twice) can't stay under the price. Sonnet is the Anthropic reviewer. MULTI_PART_EXCLUDE replaces this list. */
+ * million, on both tries, with full-size input) is above the price. Sonnet is the Anthropic reviewer.
+ * MULTI_PART_EXCLUDE replaces this list. */
 export const DEFAULT_MULTI_PART_EXCLUDE = "claude-opus-5-5";
+
+/** Prices when PRICE_REVIEW_3X2 / PRICE_REVIEW_3X3 aren't set (option B): above the worst-case AI cost even for
+ * full-size CJK input, with Opus left out. A test checks the worst case against these. */
+export const MULTI_DEFAULT_PRICES: Record<MultiTier, string> = { "review-3x2": "$0.60", "review-3x3": "$0.70" };
 
 /** max_tokens for one model on these routes: 12,000, capped at the model's published limit and at
  * MULTI_DEFAULT_MAX_TOKENS, and lowered further by MULTI_PART_MAX_TOKENS ("model=n,model=n"). Never raised. */
@@ -107,6 +123,8 @@ export type MultiEnv = {
   MULTI_PART_MAX_TOKENS?: string;
 };
 const list = (s?: string) => String(s ?? "").split(",").map((x) => x.trim()).filter(Boolean);
+/** The models the operator has left out of these tiers (MULTI_PART_EXCLUDE, or the default list when it isn't set). */
+export const multiExcluded = (env: MultiEnv): string[] => list(env.MULTI_PART_EXCLUDE ?? DEFAULT_MULTI_PART_EXCLUDE);
 
 /**
  * drawable: what random draws use (the default pool, without light models such as Haiku and without excluded models).
@@ -116,7 +134,7 @@ const list = (s?: string) => String(s ?? "").split(",").map((x) => x.trim()).fil
  */
 export function multiModels(env: MultiEnv): { drawable: string[]; eligible: string[]; missing: string[]; poolCompanies: number } {
   const light = longReviewRule(env).light_models;
-  const exclude = list(env.MULTI_PART_EXCLUDE ?? DEFAULT_MULTI_PART_EXCLUDE);
+  const exclude = multiExcluded(env);
   const ok = (m: string) => !light.includes(m) && !exclude.includes(m);
   const pool = modelPool(env);
   const drawable = pool.filter(ok);

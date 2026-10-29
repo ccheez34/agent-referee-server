@@ -3,11 +3,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  MULTI_LIMITS, MULTI_MAX_TOKENS, MULTI_SYSTEM, MULTI_MESSAGE_FORMAT, MULTI_FORMAT_VERSION, MODEL_OUTPUT_LIMITS, MultiClosedError,
+  MULTI_LIMITS, MULTI_MAX_TOKENS, MULTI_SYSTEM, MULTI_MESSAGE_FORMAT, MULTI_FORMAT_VERSION, MODEL_OUTPUT_LIMITS, MultiClosedError, MULTI_PIECES, MULTI_DEFAULT_PRICES, MULTI_DEFAULT_MAX_TOKENS, LIVE_TEST_LONGEST_ANSWERS,
   boundaryToken, buildMultiMessage, multiCommitment, multiMaxTokens, multiModels, multiPromptSha, multiReviewPayload, multiReviewerHow,
   pieceRecords, piecesSha256, readJsonCapped, validateMultiReview, TOO_BIG, type MultiInput,
 } from "../src/multipart.ts";
-import { runOneReviewer, callUsage, REVIEW_SYSTEM, type ReviewerCall } from "../src/review.ts";
+import { runOneReviewer, callUsage, REVIEW_SYSTEM, REVIEW_LIMITS, type ReviewerCall } from "../src/review.ts";
 import { canonicalJson, sha256Hex } from "../src/logic.ts";
 import { signReceipt, verifyReceipt } from "../src/receipt.ts";
 import { companyOf } from "../src/judge.ts";
@@ -490,16 +490,34 @@ test("by default Opus is left out of these tiers (worst-case cost), Sonnet revie
 const PRICE_PER_M: Record<string, [number, number]> = { [OPUS]: [4, 20], [SONNET]: [2, 10], [LUNA]: [0.1, 0.5], [ARGON]: [2, 10], [FLASH]: [0.75, 3.75] };
 
 test("worst case stays under the price: every reviewer at full max_tokens on both tries, full-size CJK input (1 token per character)", () => {
-  for (const [tier, chars, price] of [["review-3x3", 36_000, 0.7], ["review-3x2", 24_000, 0.6]] as const) {
-    const inputTokens = chars + 4_000 + 2_500; // pieces + task + instructions, at 1 token per character
+  for (const tier of ["review-3x3", "review-3x2"] as const) {
+    const price = Number(MULTI_DEFAULT_PRICES[tier].replace("$", ""));
+    const chars = Math.min(MULTI_LIMITS.maxTotal, MULTI_PIECES[tier] * MULTI_LIMITS.maxPiece);
+    // pieces + task + instructions (system prompt plus the message's own wording, rounded up), at 1 token per character
+    const inputTokens = chars + REVIEW_LIMITS.maxTask + MULTI_SYSTEM.length + 500;
     const { drawable, eligible } = multiModels({});
     const byCompany = new Map<string, string[]>();
     for (const x of eligible) byCompany.set(companyOf(x), [...(byCompany.get(companyOf(x)) ?? []), x]);
     let worst = 0;
     for (const ms of byCompany.values()) {
-      worst += Math.max(...ms.map((x) => 2 * (inputTokens * PRICE_PER_M[x][0] + multiMaxTokens(x) * PRICE_PER_M[x][1]) / 1e6));
+      worst += Math.max(...ms.map((x) => {
+        assert.ok(PRICE_PER_M[x], `no recorded price for ${x}: add it to PRICE_PER_M`);
+        return (2 * (inputTokens * PRICE_PER_M[x][0] + multiMaxTokens(x) * PRICE_PER_M[x][1])) / 1e6;
+      }));
     }
     assert.ok(drawable.length >= 3);
     assert.ok(worst < price, `${tier}: worst case $${worst.toFixed(3)} is not under $${price}`);
+  }
+});
+
+test("spec 4.3: max_tokens is never lowered below 3 times the longest answer seen in the live test", () => {
+  for (const [model, cap] of Object.entries(MULTI_DEFAULT_MAX_TOKENS)) {
+    assert.ok(LIVE_TEST_LONGEST_ANSWERS[model], `no longest answer recorded for ${model}`);
+    assert.ok(cap >= 3 * LIVE_TEST_LONGEST_ANSWERS[model], `${model}: ${cap} < 3 x ${LIVE_TEST_LONGEST_ANSWERS[model]}`);
+  }
+  for (const model of multiModels(ALL).eligible) {
+    const longest = LIVE_TEST_LONGEST_ANSWERS[model];
+    assert.ok(longest, `${model} is eligible but has no live-test answer recorded`);
+    assert.ok(multiMaxTokens(model) >= Math.min(MULTI_MAX_TOKENS, 3 * longest), `${model}: max_tokens below the 3x rule`);
   }
 });

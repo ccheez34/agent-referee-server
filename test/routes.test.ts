@@ -828,7 +828,12 @@ t("multi-part: GET /reviewers describes the tiers, the eligible models and the p
   const m = r.body.multi_part;
   assert.equal(m.status, "not open yet");
   assert.equal(m.tiers["review-3x3"].price, "$0.70");
-  assert.match(m.why_no_opus, /worst case/);
+  assert.match(m.why_no_opus, /worst case.*\$0\.70 price/);
+  const opusBack = (await call(env({ MULTI_PART_EXCLUDE: "" }), "/reviewers")).body.multi_part;
+  assert.ok(opusBack.eligible_models.includes("claude-opus-5-5"));
+  assert.equal(opusBack.why_no_opus, undefined, "no explanation once Opus is back");
+  const heavy = (await call(env({ LIGHT_REVIEW_MODELS: "claude-haiku-5-5,claude-opus-5-5", MULTI_PART_EXCLUDE: "" }), "/reviewers")).body.multi_part;
+  assert.equal(heavy.why_no_opus, undefined, "Opus refused for another reason: not this explanation");
   assert.ok(!m.eligible_models.includes("claude-opus-5-5"));
   assert.ok(!m.eligible_models.includes("claude-haiku-5-5"));
   assert.equal(m.format_version, "agent-referee-review-v4-multi");
