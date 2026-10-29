@@ -1022,7 +1022,7 @@ t("team allowance: each member's budget and the team's are enforced; refusals an
   assert.equal((await call(e, "/team/review-3", review, as2("2.0"))).status, 200); // 2.0: $0.40
   const over = await call(e, "/team/review-3", review, as2("2.0"));
   assert.equal(over.status, 429, JSON.stringify(over.body));
-  assert.match(over.body.error, /doesn't fit your allowance today \(\$0\.10 left\).*Nothing was used/);
+  assert.match(over.body.error, /doesn't fit your allowance today \(\$0\.10 left;.*Nothing was used/);
   assert.equal((await call(e, "/team/review", review, as2("2.0"))).status, 200, "a $0.05 review still fits");
   // A failed review gives its reservation back.
   const fail = await call(e, "/team/review-3", review, as2("3.0", { "x-test-fake-mix": "500:1", "x-test-fake-delay": "1-2" }));
@@ -1036,7 +1036,7 @@ t("team allowance: each member's budget and the team's are enforced; refusals an
   assert.equal((await call(e, "/team/review-3", review, as2("3.0"))).status, 200); // team $0.65
   const team = await call(e, "/team/review-3", review, as2("4.0"));
   assert.equal(team.status, 429);
-  assert.match(team.body.error, /the team's allowance today \(\$0\.15 left\)/);
+  assert.match(team.body.error, /the team's allowance today \(\$0\.15 left;/);
 });
 
 t("team allowance: a member can have its own daily budget, including $0 until it's switched on", async () => {
@@ -1062,4 +1062,24 @@ t("team allowance: multi-part reviews work through it at their own price, with a
   assert.equal(r.body.team.usable_now, "$7.30");
   // Closed tiers stay closed.
   assert.equal((await call(env({ ...TEAM }), "/team/review-3x2", multi(2), as2())).status, 503);
+});
+
+t("team allowance: a group pool is shared by its members, is a total (not daily), and is shown with what's left", async () => {
+  const e = env({ ...TEAM, TEAM_MEMBERS: "S1,T3,T4,T5", TEAM_MEMBER_DAILY_USD: "8", TEAM_DAILY_USD: "40", TEAM_GROUPS: "TB-run1=T3,T4,T5:0.45;S1-run1=S1:0.20" });
+  const a = await call(e, "/team/review-3", review, as2("T3"));
+  assert.equal(a.status, 200, JSON.stringify(a.body));
+  assert.equal(a.body.team.group, "TB-run1");
+  assert.equal(a.body.team.group_left, "$0.25");
+  assert.equal((await call(e, "/team/review-3", review, as2("T4"))).status, 200, "another member of the pool"); // pool $0.40
+  const over = await call(e, "/team/review", review, as2("T5"));
+  assert.equal(over.status, 429, JSON.stringify(over.body));
+  assert.match(over.body.error, /your group's pool \(\$0\.05 left of \$0\.45; it doesn't reset\)/);
+  // A failed review gives the pool back too.
+  const s1fail = await call(e, "/team/review-3", review, as2("S1", { "x-test-fake-mix": "500:1", "x-test-fake-delay": "1-2" }));
+  assert.equal(s1fail.status, 502);
+  const s1 = await call(e, "/team/allowance", undefined, as2("S1"));
+  assert.equal(s1.body.team.group_left, "$0.20");
+  assert.equal(s1.body.team.usable_now, "$0.20");
+  assert.equal((await call(e, "/team/review-3", review, as2("S1"))).status, 200);
+  assert.equal((await call(e, "/team/review", review, as2("S1"))).status, 429, "S1's own pool is used up");
 });

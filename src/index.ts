@@ -1259,11 +1259,11 @@ app.get("/team/allowance", teamAuth, async (c) => {
   const team = c.get("team") as TeamCaller;
   let q: any;
   try {
-    q = await ledgerJson(c.env, undefined, "team", { member: team.member, status: true });
+    q = await ledgerJson(c.env, undefined, "team", { member: team.member, status: true, ...(cfg.groups.get(team.member) ? { group: cfg.groups.get(team.member)!.name } : {}) });
   } catch (e: any) {
     return err(503, "The team allowance can't be read right now; try again in a minute.");
   }
-  return c.json({ team: teamView(cfg, team.member, q.member_spent_micro, q.team_spent_micro), prices: { ...reviewPrices(c.env), ...multiPrices(c.env) } });
+  return c.json({ team: teamView(cfg, team.member, q.member_spent_micro, q.team_spent_micro, q.group_spent_micro), prices: { ...reviewPrices(c.env), ...multiPrices(c.env) } });
 });
 
 // ---------- team allowance (the owner's own AI sessions; the operator pays, within daily budgets) ----------
@@ -1287,9 +1287,18 @@ function teamConfig(env: Env) {
     const m = raw.trim().match(/^([A-Za-z0-9._-]{1,32})(?::(\d+(?:\.\d+)?))?$/);
     if (m) budgets.set(m[1], m[2] !== undefined ? Math.round(Number(m[2]) * 1_000_000) : memberMicro);
   }
+  // TEAM_GROUPS: shared pools, a total each (not daily), e.g. "TB-run1=T3,T4,T5:8.00;S1-run1=S1:8.00". A member in a
+  // group spends from the pool as well as its own daily budget and the team's.
+  const groups = new Map<string, { name: string; micro: number }>();
+  for (const raw of String(env.TEAM_GROUPS ?? "").split(";")) {
+    const m = raw.trim().match(/^([A-Za-z0-9._-]{1,32})=([A-Za-z0-9._,-]+):(\d+(?:\.\d+)?)$/);
+    if (!m) continue;
+    for (const who of m[2].split(",")) if (who && !groups.has(who)) groups.set(who, { name: m[1], micro: Math.round(Number(m[3]) * 1_000_000) });
+  }
   return {
     members: [...budgets.keys()],
     budgets,
+    groups,
     memberMicro,
     teamMicro: Math.round(usd(env.TEAM_DAILY_USD, 40) * 1_000_000),
   };
@@ -1300,9 +1309,11 @@ const memberBudget = (cfg: ReturnType<typeof teamConfig>, member: string) => cfg
 const usdText = (micro: number) => `$${(Math.max(0, micro) / 1_000_000).toFixed(2)}`;
 
 /** What a member sees about its allowance (before and after every review, and at GET /team/allowance). */
-function teamView(cfg: ReturnType<typeof teamConfig>, member: string, memberSpent = 0, teamSpent = 0) {
+function teamView(cfg: ReturnType<typeof teamConfig>, member: string, memberSpent = 0, teamSpent = 0, groupSpent = 0) {
   const memberLeft = Math.max(0, memberBudget(cfg, member) - memberSpent);
   const teamLeft = Math.max(0, cfg.teamMicro - teamSpent);
+  const g = cfg.groups.get(member);
+  const groupLeft = g ? Math.max(0, g.micro - groupSpent) : Infinity;
   return {
     funding: "team",
     member,
@@ -1312,8 +1323,9 @@ function teamView(cfg: ReturnType<typeof teamConfig>, member: string, memberSpen
     team_daily: usdText(cfg.teamMicro),
     team_spent_today: usdText(teamSpent),
     team_left_today: usdText(teamLeft),
-    usable_now: usdText(Math.min(memberLeft, teamLeft)),
-    resets: "00:00 UTC",
+    ...(g ? { group: g.name, group_total: usdText(g.micro), group_spent: usdText(groupSpent), group_left: usdText(groupLeft) } : {}),
+    usable_now: usdText(Math.min(memberLeft, teamLeft, groupLeft)),
+    resets: g ? "member and team budgets at 00:00 UTC; the group pool doesn't reset" : "00:00 UTC",
   };
 }
 
@@ -1354,15 +1366,20 @@ async function teamBudget(c: any, next: any) {
   const statName = `team_${team.member.toLowerCase().replace(/[^a-z0-9]/g, "-")}`;
   let q: any;
   try {
-    q = await ledgerJson(c.env, undefined, "team", { member: team.member, cost_micro: cost, member_budget_micro: memberBudget(cfg, team.member), team_budget_micro: cfg.teamMicro }, true);
+    const pool = cfg.groups.get(team.member);
+    q = await ledgerJson(c.env, undefined, "team", { member: team.member, cost_micro: cost, member_budget_micro: memberBudget(cfg, team.member), team_budget_micro: cfg.teamMicro, ...(pool ? { group: pool.name, group_budget_micro: pool.micro } : {}) }, true);
   } catch (e: any) {
     await recordEvent(c.env, "ledger_error", `team: ${String(e?.message ?? e)}`);
     return err(503, "The team allowance can't be checked right now. Nothing was used; try again in a minute.");
   }
   if (q.__status === 429) {
     stat(c, `${statName}_refused`);
-    const view = teamView(cfg, team.member, q.member_spent_micro, q.team_spent_micro);
-    return c.json({ error: `This ${g.tier} (${usdText(cost)}) doesn't fit ${q.reason === "member" ? "your" : "the team's"} allowance today (${q.reason === "member" ? view.member_left_today : view.team_left_today} left). It resets at 00:00 UTC. Nothing was used.`, team: view }, 429);
+    const view: any = teamView(cfg, team.member, q.member_spent_micro, q.team_spent_micro, q.group_spent_micro);
+    const why =
+      q.reason === "group"
+        ? `your group's pool (${view.group_left} left of ${view.group_total}; it doesn't reset)`
+        : `${q.reason === "member" ? "your" : "the team's"} allowance today (${q.reason === "member" ? view.member_left_today : view.team_left_today} left; it resets at 00:00 UTC)`;
+    return c.json({ error: `This ${g.tier} (${usdText(cost)}) doesn't fit ${why}. Nothing was used.`, team: view }, 429);
   }
   await next();
   const status = c.res?.status ?? 500;
@@ -1382,7 +1399,7 @@ async function teamBudget(c: any, next: any) {
   stat(c, `${statName}_ok`);
   const body: any = await c.res.clone().json().catch(() => null);
   if (body && typeof body === "object") {
-    c.res = new Response(JSON.stringify({ ...body, team: teamView(cfg, team.member, q.member_spent_micro, q.team_spent_micro) }), { status, headers: { "content-type": "application/json" } });
+    c.res = new Response(JSON.stringify({ ...body, team: teamView(cfg, team.member, q.member_spent_micro, q.team_spent_micro, q.group_spent_micro) }), { status, headers: { "content-type": "application/json" } });
   }
 }
 

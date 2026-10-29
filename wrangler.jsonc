@@ -57,6 +57,8 @@
     "TEAM_MEMBERS": "S1,T3,T4,T5,1.0:0,2.0:0,3.0:0,4.0:0,5.0:0",
     "TEAM_MEMBER_DAILY_USD": "8.00",
     "TEAM_DAILY_USD": "40.00",
+    // Shared pools per experiment arm and run (totals, not daily): S1 $8, the T3-T5 team $8 shared (plan v3, pending its review).
+    "TEAM_GROUPS": "S1-run1=S1:8.00;TB-run1=T3,T4,T5:8.00",
     // Free sealed reviews (the operator pays): 3 single + 1 review-3 per address per UTC day, all inside one
     // daily budget counted at list price ($3.00 = at most 60 single or 15 review-3 a day). "0" turns them off.
     "FREE_REVIEW_DAILY_BUDGET_USD": "3.00",
@@ -110,6 +112,7 @@
         "TEAM_MEMBERS": "S1,T3,T4,T5,1.0:0,2.0:0,3.0:0,4.0:0,5.0:0",
         "TEAM_MEMBER_DAILY_USD": "8.00",
         "TEAM_DAILY_USD": "40.00",
+        "TEAM_GROUPS": "S1-run1=S1:8.00;TB-run1=T3,T4,T5:8.00",
         "DEMO_PER_IP_LIMIT": "20",
         "FREE_REVIEW_DAILY_BUDGET_USD": "3.00",
         "FREE_REVIEWS_PER_DAY": "3",
