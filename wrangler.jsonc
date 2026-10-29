@@ -100,6 +100,8 @@
         "REVEAL_WINDOW_SECONDS": "600",
         "PANEL_2_MODELS": "claude-opus-5-5,google/gemini-4-argon",
         "PANEL_3_MODELS": "claude-opus-5-5,openai/gpt-6-luna,google/gemini-3.7-flash",
+        "GATE_SLOTS_ANTHROPIC_CLAUDE_SONNET_5_5": "20",
+        "GATE_SLOTS_ANTHROPIC_CLAUDE_OPUS_5_5": "10",
         "DEMO_PER_IP_LIMIT": "20",
         "FREE_REVIEW_DAILY_BUDGET_USD": "3.00",
         "FREE_REVIEWS_PER_DAY": "3",

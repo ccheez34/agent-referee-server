@@ -162,17 +162,24 @@
   <!-- 3. Check any receipt -->
   <section class="panel" id="tab-check" role="tabpanel" aria-labelledby="t-check" tabindex="0" hidden>
     <h2 class="tool">Check a receipt</h2>
-    <p class="muted">Paste a receipt someone gave you, or open a saved receipt file (the files the MCP server and review scripts save work too). The page checks that Agent Referee signed it and recomputes the result from what's inside, entirely in your browser. A pass means it was signed with Agent Referee's official key and hasn't been changed since. For a review, add the task and output to confirm which work it's about; a pass never means the reviewers were right.</p>
+    <p class="muted">Paste a receipt someone gave you, or open a saved receipt file (the files the MCP server and review scripts save work too). The page checks that Agent Referee signed it and recomputes the result from what's inside, entirely in your browser. A pass means it was signed with Agent Referee's official key and hasn't been changed since. For a review, add the task and output (or, for a multi-part review, every piece) to confirm which work it's about; a pass never means the reviewers were right.</p>
     <label for="c-receipt">Receipt <span class="hint">(JSON)</span></label>
     <textarea id="c-receipt" placeholder='{"payload": {...}, "signature": "..."}'></textarea>
     <label for="c-file">Or open a receipt file <span class="hint">(.json)</span></label>
     <input type="file" id="c-file" accept=".json,application/json">
     <details>
-      <summary>For a review: the task and output it should be about <span class="hint">(optional)</span></summary>
+      <summary>For a review: the task and output (or pieces) it should be about <span class="hint">(optional)</span></summary>
       <label for="c-task">Task</label>
       <textarea id="c-task"></textarea>
       <label for="c-output">Output</label>
       <textarea id="c-output"></textarea>
+      <p class="hint">A multi-part review (review-3x2, review-3x3) is about 2 or 3 pieces instead of one output. Fill them in the same order, with the same names (leave a name empty if the piece had none). Text boxes turn Windows line endings (CRLF) into plain line breaks, so a piece that had CRLF shows as different here; check that one with a client instead (<code>verifyReview</code> in JS, <code>verify_review</code> in Python).</p>
+      <label for="c-n1">Piece 1 name</label><input id="c-n1" maxlength="80" autocomplete="off">
+      <label for="c-p1">Piece 1</label><textarea id="c-p1"></textarea>
+      <label for="c-n2">Piece 2 name</label><input id="c-n2" maxlength="80" autocomplete="off">
+      <label for="c-p2">Piece 2</label><textarea id="c-p2"></textarea>
+      <label for="c-n3">Piece 3 name <span class="hint">(review-3x3 only)</span></label><input id="c-n3" maxlength="80" autocomplete="off">
+      <label for="c-p3">Piece 3 <span class="hint">(review-3x3 only)</span></label><textarea id="c-p3"></textarea>
     </details>
     <button class="go" id="c-go">Check it</button>
     <div class="out" id="c-out" aria-live="polite"></div>
@@ -189,7 +196,7 @@
 
 <script type="module">
 // The JavaScript client, pinned to an exact version. Everything below runs in the visitor's browser.
-import * as AR from "https://cdn.jsdelivr.net/npm/agent-referee-client@0.8.0/src/index.mjs";
+import * as AR from "https://cdn.jsdelivr.net/npm/agent-referee-client@0.9.0/src/index.mjs";
 
 const PINNED_KEY = "vM2GY6ZEYc/omRlIFrzu0TaMGtjHXQtchg9d7lPKkTY=";
 const OFFICIAL = ["https://agentreferee.ai", "https://agent-referee.fairplayclub.workers.dev"];
@@ -494,9 +501,10 @@ async function checkPasted() {
     return errorHtml(new Error("That doesn't look like an Agent Referee receipt: it needs a payload and a signature."));
   }
   const p = receipt.payload;
-  // Receipt formats this page doesn't know (multi-part reviews and judging are coming) are refused, never checked
-  // the old way: an old check could recompute the verdict and miss what the new format changed.
-  if (p.receipt_format !== undefined) {
+  // Receipt formats this page doesn't know (multi-part judging is coming) are refused, never checked the old way: an
+  // old check could recompute the verdict and miss what the new format changed. Multi-part reviews are checked.
+  const multi = p.type === "review" && p.receipt_format === "review-multi-v1";
+  if (p.receipt_format !== undefined && !multi) {
     return errorHtml(new Error(`This receipt uses a newer format ("${String(p.receipt_format).slice(0, 40)}") that this page can't check yet. Nothing was confirmed.`));
   }
   // The official key decides. Only in test mode (?api=) is the test instance's key tried as well, and labelled.
@@ -511,9 +519,19 @@ async function checkPasted() {
   }
   if (p.type === "review") {
     const task = $("c-task").value, output = $("c-output").value;
-    check = await AR.verifyReviewOutcome(receipt, { ...(task ? { task } : {}), ...(output ? { output } : {}) });
+    // Pieces as typed, in order. A gap (piece 3 filled, piece 2 empty) is an error rather than a silent renumbering.
+    const typed = [1, 2, 3].map((i) => ({ name: $(`c-n${i}`).value, text: $(`c-p${i}`).value }));
+    let last = -1;
+    typed.forEach((x, i) => { if (x.text || x.name) last = i; });
+    const given = typed.slice(0, last + 1);
+    if (given.some((x) => !x.text)) return errorHtml(new Error("A piece is empty but a later one is filled in. Fill the pieces in order, from piece 1."));
+    const pieces = given.map((x) => (x.name ? { name: x.name, text: x.text } : { text: x.text }));
+    check = await AR.verifyReviewOutcome(receipt, { ...(task ? { task } : {}), ...(output ? { output } : {}), ...(pieces.length ? { pieces } : {}) });
     headline = `A ${esc(p.tier)} review: <span class="${vclass(p.result?.verdict)}">${esc(words(p.result?.verdict))}</span>`;
-    if (!task || !output) note = "The task or the output wasn't given, so this doesn't confirm which work the review is about.";
+    if (multi ? !task || !pieces.length : !task || !output)
+      note = multi
+        ? "The task or the pieces weren't given, so this doesn't confirm which work the review is about."
+        : "The task or the output wasn't given, so this doesn't confirm which work the review is about.";
   } else {
     check = await AR.verifyOutcome(receipt);
     const o = p?.outcome || {};
