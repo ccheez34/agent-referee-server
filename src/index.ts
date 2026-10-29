@@ -378,7 +378,7 @@ async function reviewGuard(c: any, next: any) {
     await next();
   } finally {
     await slots.lease.release(); // normally already released by the handler; a second call does nothing
-    if (!g.recorded) await releaseReservation(c, caller, failLimit, reservation); // the paywall refused it, or it threw
+    if (!g.recorded) await releaseReservation(c, caller, failLimit, g.reservation); // the paywall refused it, or it threw
   }
 }
 
@@ -884,7 +884,13 @@ async function handleReview(c: any, tier: ReviewTier) {
   try {
     // What's left of the reviewers' budget, never past the payment authorization's own deadline.
     const budgetMs = reviewBudget({ budgetMs: REVIEWER_BUDGET_MS, elapsedMs: started - g.t0, header: c.req.header("x-payment") });
-    if (budgetMs === null) return busy(10, "not enough time was left in this payment's window for a full review.");
+    if (budgetMs === null) {
+      // Give the in-flight reservation back here: on the late-admission path it was taken in this handler, and the
+      // guard (which only wraps the normal path) never sees it. Found by Claude 5.0's code check, Oct 28.
+      await releaseReservation(c, caller, failLimit, g.reservation);
+      g.recorded = true;
+      return busy(10, "not enough time was left in this payment's window for a full review.");
+    }
     settled = await runReviewers(c, commitment, input, lease, budgetMs);
   } finally {
     await lease.release();

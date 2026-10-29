@@ -266,6 +266,25 @@ t("paid review through the real paywall: verified, delivered, settled once, with
   }
 });
 
+t("late admission with too little payment time left: refused uncharged, and the reservation is given back", async () => {
+  const f = fakeFacilitator("ok");
+  try {
+    const e = env({ PAYMENTS_ENABLED: "true" });
+    const led = flakyLedger(e); // no failures planned: it only records which caller reserved
+    // Below the price, so the local check finds it implausible and the guard lets it through to the paywall; the
+    // stand-in facilitator verifies it anyway, so the handler admits it late. Only 40 s left: no time for a review.
+    const header = Buffer.from(JSON.stringify({ x402Version: 1, scheme: "exact", network: "base-sepolia", payload: { signature: "0x" + "ab".repeat(65), authorization: { from: "0x" + "9".repeat(40), to: PAYEE, value: "40000", validAfter: "0", validBefore: String(Math.floor(Date.now() / 1000) + 40), nonce: "0x" + "2".repeat(64) } } })).toString("base64");
+    const r = await call(e, "/review", review, { "x-payment": header });
+    assert.equal(r.status, 503, JSON.stringify(r.body));
+    assert.match(r.body.error, /not enough time/);
+    assert.equal(f.calls.settle, 0, "nothing settled");
+    assert.ok(led.caller, "the handler took a reservation (late admission)");
+    assert.equal((await inflightFor(e, led.caller)).n, 0, "and gave it back");
+  } finally {
+    f.restore();
+  }
+});
+
 t("work delivered but not settled: the wallet is blocked before paying again, and repeats pause paid routes", async () => {
   const f = fakeFacilitator("fail");
   try {
