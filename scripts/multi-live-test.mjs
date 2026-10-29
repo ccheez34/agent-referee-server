@@ -27,6 +27,12 @@ const mcpDir = opt("--mcp-dir", "C:\\Users\\Admin\\Downloads\\claud\\agent-refer
 // ---------- the plan ----------
 const plan = JSON.parse(await readFile(resolve(opt("--plan")), "utf8"));
 const base = String(plan.base || "https://agentreferee.ai").replace(/\/+$/, "");
+// The operator token only ever goes to Agent Referee's own addresses, so a wrong or tampered plan can't leak it.
+const OWN = ["https://agentreferee.ai", "https://agent-referee.fairplayclub.workers.dev", "https://agent-referee-staging.fairplayclub.workers.dev"];
+if (!OWN.includes(base)) {
+  console.log(`The plan's base (${base}) isn't one of Agent Referee's addresses: ${OWN.join(", ")}. Stopped before asking for the token. Nothing was charged.`);
+  process.exit(1);
+}
 const task = await readFile(resolve(plan.task), "utf8");
 const runs = [];
 for (const r of plan.runs) {
@@ -66,7 +72,7 @@ if (probe.status !== 200) {
 }
 console.log("Token accepted.");
 const pub = await (await fetch(`${base}/pubkey`)).json();
-if (base === "https://agentreferee.ai" && pub.public_key !== PINNED) {
+if (!base.includes("staging") && pub.public_key !== PINNED) {
   console.log("The service's signing key isn't the pinned one. Stopped. Nothing was charged.");
   process.exit(1);
 }
