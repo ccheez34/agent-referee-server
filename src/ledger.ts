@@ -369,7 +369,7 @@ export class Ledger {
       const memberBudget = Number.isFinite(body?.member_budget_micro) ? Math.max(0, body.member_budget_micro) : 0;
       const teamBudget = Number.isFinite(body?.team_budget_micro) ? Math.max(0, body.team_budget_micro) : 0;
       if (cost <= 0) return json(400, { error: "No cost." });
-      if (memberSpent + cost > memberBudget) return json(429, { reason: "member", member_spent_micro: memberSpent, team_spent_micro: teamSpent });
+      if (memberSpent + cost > memberBudget) return json(429, { reason: "member", member_spent_micro: memberSpent, team_spent_micro: teamSpent, ...(group ? { group_spent_micro: groupSpent } : {}) });
       if (teamSpent + cost > teamBudget) return json(429, { reason: "team", member_spent_micro: memberSpent, team_spent_micro: teamSpent, ...(group ? { group_spent_micro: groupSpent } : {}) });
       const groupBudget = Number.isFinite(body?.group_budget_micro) ? Math.max(0, body.group_budget_micro) : 0;
       if (group && groupSpent + cost > groupBudget) return json(429, { reason: "group", member_spent_micro: memberSpent, team_spent_micro: teamSpent, group_spent_micro: groupSpent });

@@ -1082,7 +1082,7 @@ async function handleReview(c: any, tier: ReviewTier) {
   let settled: PromiseSettledResult<any>[];
   try {
     // What's left of the reviewers' budget, never past the payment authorization's own deadline.
-    const budgetMs = reviewBudget({ budgetMs: REVIEWER_BUDGET_MS, elapsedMs: started - g.t0, header: c.req.header("x-payment") });
+    const budgetMs = reviewBudget({ budgetMs: REVIEWER_BUDGET_MS, elapsedMs: started - g.t0, header: c.get("team") ? undefined : c.req.header("x-payment") });
     if (budgetMs === null) {
       // Give the in-flight reservation back here: on the late-admission path it was taken in this handler, and the
       // guard (which only wraps the normal path) never sees it. Found by Claude 5.0's code check, Oct 28.
@@ -1110,13 +1110,13 @@ async function handleReview(c: any, tier: ReviewTier) {
       return busy(600, "the AI provider's account limit was reached; reviews resume when it's lifted.");
     }
     await record("record");
-    stat(c, "paid_failed");
+    if (!c.get("team")) stat(c, "paid_failed"); // team reviews are counted as team_<member>_* instead
     return err(502, `A reviewer didn't return a usable verdict (${msg.slice(0, 200)}). Nothing was charged; try again.`);
   }
   const votes = settled.map((r) => (r as PromiseFulfilledResult<any>).value);
   console.log(`review ${tier} ok in ${Date.now() - started}ms: ${votes.map((v) => `${v.model}=${v.verdict}`).join(" ")}`);
   await record("record_ok");
-  stat(c, `paid_ok_${tier.replace("-", "")}`);
+  if (!c.get("team")) stat(c, `paid_ok_${tier.replace("-", "")}`);
   const payload = await reviewPayload({
     tier,
     input,
@@ -1186,7 +1186,7 @@ async function handleMultiReview(c: any, tier: MultiTier) {
   async function runMulti() {
     let settled: PromiseSettledResult<any>[];
     try {
-      const budgetMs = reviewBudget({ budgetMs: MULTI_BUDGET_MS, elapsedMs: started - st.t0, header: c.req.header("x-payment") });
+      const budgetMs = reviewBudget({ budgetMs: MULTI_BUDGET_MS, elapsedMs: started - st.t0, header: c.get("team") ? undefined : c.req.header("x-payment") });
       if (budgetMs === null) return busy(10, "not enough time was left in this payment's window for a full review.");
       const fake = fakeAiConfig(c.env, { mix: c.req.header("x-test-fake-mix"), delay: c.req.header("x-test-fake-delay") });
       const keys = { ANTHROPIC_API_KEY: c.env.ANTHROPIC_API_KEY, OPENROUTER_API_KEY: c.env.OPENROUTER_API_KEY, fake };
@@ -1223,8 +1223,10 @@ async function handleMultiReview(c: any, tier: MultiTier) {
         return busy(600, "the AI provider's account limit was reached; reviews resume when it's lifted.");
       }
       await record("record");
-      stat(c, "paid_failed");
-      stat(c, `paid_failed_${tier.replace("-", "")}`);
+      if (!c.get("team")) {
+        stat(c, "paid_failed");
+        stat(c, `paid_failed_${tier.replace("-", "")}`);
+      }
       return new Response(
         JSON.stringify({ error: `A reviewer didn't return a usable verdict (${msg.slice(0, 200)}). Nothing was charged; this failed review counts as ${weight} of today's allowed failures. Try again.`, ...forOperator() }),
         { status: 502, headers: { "content-type": "application/json" } },
@@ -1233,7 +1235,7 @@ async function handleMultiReview(c: any, tier: MultiTier) {
     const votes = settled.map((r) => (r as PromiseFulfilledResult<any>).value);
     console.log(`review ${tier} ok in ${Date.now() - started}ms: ${votes.map((v) => `${v.model}=${v.verdict}${v.issues_dropped ? ` (dropped ${v.issues_dropped})` : ""}`).join(" ")}`);
     await record("record_ok");
-    stat(c, `paid_ok_${tier.replace("-", "")}`);
+    if (!c.get("team")) stat(c, `paid_ok_${tier.replace("-", "")}`);
     const payload = await multiReviewPayload({ tier, input, commitment, votes, payer: c.get("team") ? undefined : payerFromPaymentHeader(c.req.header("x-payment")), network: c.env.NETWORK, id: randomToken(12), ...(c.get("team") ? { funding: "team" as const } : {}) });
     const receipt = await signReceipt(payload, c.env.SIGNING_KEY, c.env.PUBLIC_KEY);
     return c.json({
@@ -1293,6 +1295,9 @@ function teamConfig(env: Env) {
   for (const raw of String(env.TEAM_GROUPS ?? "").split(";")) {
     const m = raw.trim().match(/^([A-Za-z0-9._-]{1,32})=([A-Za-z0-9._,-]+):(\d+(?:\.\d+)?)$/);
     if (!m) continue;
+    // A member belongs to the first group that lists it, and a group name is used once (a repeat is ignored), so two
+    // amounts can never apply to one pool. Pools are never deleted: give each run a new group name.
+    if ([...groups.values()].some((g) => g.name === m[1])) continue;
     for (const who of m[2].split(",")) if (who && !groups.has(who)) groups.set(who, { name: m[1], micro: Math.round(Number(m[3]) * 1_000_000) });
   }
   return {
@@ -1367,6 +1372,8 @@ async function teamBudget(c: any, next: any) {
   let q: any;
   try {
     const pool = cfg.groups.get(team.member);
+    // If this times out after the ledger applied it, the review stays counted (there's no token to release): the
+    // safe side for a budget.
     q = await ledgerJson(c.env, undefined, "team", { member: team.member, cost_micro: cost, member_budget_micro: memberBudget(cfg, team.member), team_budget_micro: cfg.teamMicro, ...(pool ? { group: pool.name, group_budget_micro: pool.micro } : {}) }, true);
   } catch (e: any) {
     await recordEvent(c.env, "ledger_error", `team: ${String(e?.message ?? e)}`);
@@ -1399,6 +1406,7 @@ async function teamBudget(c: any, next: any) {
   stat(c, `${statName}_ok`);
   const body: any = await c.res.clone().json().catch(() => null);
   if (body && typeof body === "object") {
+    c.res = undefined; // so Hono doesn't copy the old response's headers (a stale content-length) onto the new one
     c.res = new Response(JSON.stringify({ ...body, team: teamView(cfg, team.member, q.member_spent_micro, q.team_spent_micro, q.group_spent_micro) }), { status, headers: { "content-type": "application/json" } });
   }
 }

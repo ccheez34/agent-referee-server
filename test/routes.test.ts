@@ -1083,3 +1083,25 @@ t("team allowance: a group pool is shared by its members, is a total (not daily)
   assert.equal((await call(e, "/team/review-3", review, as2("S1"))).status, 200);
   assert.equal((await call(e, "/team/review", review, as2("S1"))).status, 429, "S1's own pool is used up");
 });
+
+t("team allowance: team reviews are counted as team_<member>_*, never as paid ones", async () => {
+  const e = env(TEAM);
+  assert.equal((await call(e, "/team/review", review, as2("2.0"))).status, 200);
+  await call(e, "/team/review", review, as2("2.0", { "x-test-fake-mix": "500:1", "x-test-fake-delay": "1-2" }));
+  await tick();
+  const r = await call(e, "/admin/stats", undefined, { authorization: `Bearer ${ADMIN}` });
+  const today = r.body.today.counts;
+  assert.equal(today["team_2-0_ok"], 1, JSON.stringify(today));
+  assert.equal(today["team_2-0_failed"], 1);
+  assert.equal(today.paid_ok_review, undefined, "not a paid review");
+  assert.equal(today.paid_failed, undefined);
+});
+
+t("team allowance: TEAM_GROUPS ignores a repeated group name, and a member keeps its first group", async () => {
+  const e = env({ ...TEAM, TEAM_MEMBERS: "T3,T4", TEAM_MEMBER_DAILY_USD: "8", TEAM_DAILY_USD: "40", TEAM_GROUPS: "A=T3:0.20;A=T4:5.00;B=T3,T4:5.00" });
+  const t3 = await call(e, "/team/allowance", undefined, as2("T3"));
+  assert.equal(t3.body.team.group, "A");
+  assert.equal(t3.body.team.group_total, "$0.20");
+  const t4 = await call(e, "/team/allowance", undefined, as2("T4"));
+  assert.equal(t4.body.team.group, "B", "the repeated A is ignored, so T4 is in B");
+});
