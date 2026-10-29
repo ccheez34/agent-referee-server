@@ -460,7 +460,9 @@ test("worst case per match stays under both seats' price: every judge at full ma
   }
 });
 
-test("today's JS client refuses judge-multi-v1 receipts and never passes one (0.8.0: unknown tier; 0.8.1+: unknown receipt_format)", async () => {
+test("the installed JS client either refuses judge-multi-v1 receipts clearly (0.8.x, 0.9.x) or checks them (0.10.0+), and never passes a wrong one", async () => {
+  // 0.8.0 refuses the unknown tier; 0.8.1 to 0.9.x refuse the unknown receipt_format ("update the client"); 0.10.0 and
+  // later check judge-multi-v1. Whichever is installed, a receipt whose piece hashes were changed must never pass.
   const { verifyOutcome, verifySignature } = await import("agent-referee-client");
   const w = world();
   const ai = fakeAi();
@@ -471,8 +473,14 @@ test("today's JS client refuses judge-multi-v1 receipts and never passes one (0.
     const receipt = done.body.match.receipt;
     assert.equal(await verifySignature(receipt, [keys.PUBLIC_KEY]), true, "the signature itself is fine");
     const r = await verifyOutcome(receipt);
-    assert.equal(r.ok, false);
-    assert.ok(r.problems.some((x: string) => /Unknown tier "judge-3x3"|judge-multi-v1|[Uu]pdate the client/.test(x)), r.problems.join("; "));
+    const refused = r.problems.some((x: string) => /Unknown tier "judge-3x3"|judge-multi-v1|[Uu]pdate the client/.test(x));
+    assert.ok(r.ok || refused, `neither checked nor clearly refused: ${r.problems.join("; ")}`);
+    const bad = JSON.parse(JSON.stringify(receipt));
+    bad.payload.proof.pieces_sha256.alpha = "0".repeat(64);
+    assert.equal((await verifyOutcome(bad)).ok, false, "a receipt with a changed piece hash must not pass");
+    const swapped = JSON.parse(JSON.stringify(receipt));
+    swapped.payload.proof.pieces.alpha[0].sha256 = "f".repeat(64);
+    assert.equal((await verifyOutcome(swapped)).ok, false, "a receipt with a changed piece record must not pass");
   } finally {
     ai.restore();
   }
