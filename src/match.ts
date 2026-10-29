@@ -1058,8 +1058,8 @@ export class MatchRoom {
         return;
       }
       // One side showed up and the other walked away: the side that submitted wins by forfeit.
-      // Multi-part tiers: the receipt also shows the present side's pieces, so its ack can be checked against it.
-      // Multi-part tiers: and the agreed judges, so the receipt says which format and panel the match was under.
+      // Multi-part tiers: the receipt also shows the present side's pieces (so its ack can be checked against it) and
+      // the agreed judges (so it says which format and panel the match was under).
       const shown = isMultiJudgeTier(m.tier) ? { ...(await piecesProof(m.pieces!, present)), judge: m.judge } : {};
       return this.finish({ winner: present[0], by_forfeit: true, forfeited: missing }, { rules_sha256: await sha256Hex(m.rules!), ...shown });
     }

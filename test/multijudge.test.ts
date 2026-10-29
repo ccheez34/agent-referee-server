@@ -176,7 +176,8 @@ test("submit refusals change nothing and the seat can submit again: count, names
       [{ pieces: [{ text: "a", extra: 1 }, { text: "b" }] }, /unknown field: extra/],
       [{ position: "one text" }, /takes your side as "pieces", not "position"/],
       [{ pieces: [{ text: "x".repeat(MULTI_JUDGE_LIMITS.maxPiece + 1) }, { text: "b" }] }, /1 to 6000 characters \(it has 6001\)/],
-      [{ pieces: [{ text: "   " }, { text: "b" }] }, /1 to 6000 characters/],
+      [{ pieces: [{ text: "   " }, { text: "b" }] }, /can't be only spaces or line breaks/],
+      [{ pieces: [{ text: "a" }, { text: "b" }], name: "Alpha Corp" }, /Unknown field: name/],
       [{ pieces: [{ text: 5 }, { text: "b" }] }, /1 to 6000/],
       [{ pieces: "ab" }, /exactly 2 items/],
     ];
@@ -210,6 +211,10 @@ test("judge-3 refuses pieces, so an agent can't think it submitted pieces there"
   const r = await w.call(id, "submit", { seat: "alpha", seat_token: tok, pieces: pieces(PIECES_A) });
   assert.equal(r.status, 400);
   assert.match(r.body.error, /pieces are for judge-3x2 and judge-3x3/);
+});
+
+test("validateMultiSubmit never throws on a body that isn't an object", () => {
+  for (const b of ["text", 5, true, null, [1, 2]]) assert.equal(validateMultiSubmit(b, "judge-3x2").ok, false);
 });
 
 test("validateMultiSubmit and the side records: index, sha256 (UTF-8), chars (UTF-16), no names", async () => {
@@ -386,6 +391,17 @@ test("timing: 120 s calls capped at the time left less 5 s, a second try only wi
     }) as any;
     await assert.rejects(runOneJudge({ keys: { ANTHROPIC_API_KEY: "a" }, model: SONNET, formatVersion: MULTI_JUDGE_FORMAT_VERSION, panelist: 1, order: "sorted", rules: RULES, submissions: { alpha: "x", beta: "y" }, how, now: () => clock, sleep: async () => {} }));
     assert.deepEqual(timeouts, [120_000, MULTI_JUDGE_BUDGET_MS - 150_000 - 5_000], "second try capped at the time left less 5 s");
+    // A provider error late in the budget: no retry wait, and no second try, when the second try couldn't start in time.
+    timeouts.length = 0;
+    clock = 0;
+    const waits: number[] = [];
+    globalThis.fetch = (async () => {
+      clock += 189_000; // 61 s left: a retry wait of 1-5 s would leave under 60 s
+      return new Response("overloaded", { status: 529 });
+    }) as any;
+    await assert.rejects(runOneJudge({ keys: { ANTHROPIC_API_KEY: "a" }, model: SONNET, formatVersion: MULTI_JUDGE_FORMAT_VERSION, panelist: 1, order: "sorted", rules: RULES, submissions: { alpha: "x", beta: "y" }, how, now: () => clock, sleep: async (ms) => void waits.push(ms) }), /529/);
+    assert.deepEqual(waits, [], "no wait");
+    assert.equal(timeouts.length, 1, "no second try");
   } finally {
     globalThis.fetch = real;
     (AbortSignal as any).timeout = realTimeout;

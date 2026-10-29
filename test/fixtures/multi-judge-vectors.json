@@ -1,7 +1,7 @@
 {
   "generated_by": "agent-referee-server scripts/gen-multi-judge-vectors.mjs",
   "receipt_format": "judge-multi-v1",
-  "public_key": "ZqR8BpdxwbIymFguvJOUht6PSTAvhAXlcyq+eCbrBzE=",
+  "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI=",
   "notes": [
     "Verify the signature (Ed25519 over canonical JSON of payload) against public_key, for the receipt and for every ack.",
     "Then: receipt_format must be known; tier judge-3x2 (2 pieces per side) or judge-3x3 (3); proof.judge.format_version agent-referee-judge-v5-multi; no proof.submission_sha256; for every side in proof.pieces, proof.pieces_sha256[side] = sha256 hex of canonical JSON of proof.pieces[side], each record {index, sha256, chars} (no name), chars in UTF-16 code units.",
@@ -81,7 +81,7 @@
               "tier": "judge-3x2",
               "seat": "alpha",
               "step": "submit",
-              "accepted_at": "2026-10-29T04:43:03.111Z",
+              "accepted_at": "2026-10-29T05:19:54.171Z",
               "receipt_format": "judge-multi-v1",
               "pieces": [
                 {
@@ -97,9 +97,9 @@
               ],
               "pieces_sha256": "e9f5507dcab94a8f8b8a33a6aaeb1e2752648008f51999a889e5a8b4d60d16f5"
             },
-            "signature": "rilqQA5OuECXHnddtHPsdj/uKGgwrviXWsC6BVXfB7sv2ezPrVKVctsup59+Me2fciEdYs0AqggwNLmy443IAg==",
+            "signature": "It5hWSKnD9K9q6jvp5jNoB+jEvABzsJy5NZXeigYnEI6yeXPBYEMXlK/cX8cuvzFhcs/piszhKrjMImGFv9wCQ==",
             "algorithm": "Ed25519",
-            "public_key": "ZqR8BpdxwbIymFguvJOUht6PSTAvhAXlcyq+eCbrBzE="
+            "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
           },
           {
             "payload": {
@@ -109,7 +109,7 @@
               "tier": "judge-3x2",
               "seat": "beta",
               "step": "submit",
-              "accepted_at": "2026-10-29T04:43:03.113Z",
+              "accepted_at": "2026-10-29T05:19:54.173Z",
               "receipt_format": "judge-multi-v1",
               "pieces": [
                 {
@@ -125,9 +125,9 @@
               ],
               "pieces_sha256": "1de523c62eb8fe6c7f97935fff74acc66af36db57f7f34dfa1b8c49d37b14b69"
             },
-            "signature": "ll5gNBz4ZL9oF31bukuWF4V18yzv3peh1fWqVbKeC8zPheRosBE4p1XVTXHB4vPfT0LkhTtr206hOUls6luvCQ==",
+            "signature": "7/1toTXsmhKfe09toQe1BGtbhi7F7BHXmSgeieReWIYXbpIKq8klt4ZaBkRh6az7VulBX9vSI/uEgriL9rZFDw==",
             "algorithm": "Ed25519",
-            "public_key": "ZqR8BpdxwbIymFguvJOUht6PSTAvhAXlcyq+eCbrBzE="
+            "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
           }
         ]
       },
@@ -142,7 +142,7 @@
             "alpha",
             "beta"
           ],
-          "decided_at": "2026-10-29T04:43:03.118Z",
+          "decided_at": "2026-10-29T05:19:54.178Z",
           "outcome": {
             "winner": "alpha",
             "decision_rule": "majority",
@@ -220,7 +220,7 @@
               "model": "claude-sonnet-5-5",
               "temperature": null,
               "format_version": "agent-referee-judge-v5-multi",
-              "prompt_sha256": "aaf76c52a7c674b4e78cd4f80b656982a464830798399fcd082f73e075840ad1",
+              "prompt_sha256": "f99d08cb4dd1b1b2739b032d38db5f3100f4c170ac0f99b1e9870ff80bd27a05",
               "panel": [
                 {
                   "model": "claude-sonnet-5-5",
@@ -251,9 +251,9 @@
             "beta": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
           }
         },
-        "signature": "5+121Z0JYVTLOWcdVISGqJrBz4JqLYnsVz6yM7Ha1/R1Esb1zt6+hC82YOotDSGk5QYQoVlOVr8Y9k5gNGdJBQ==",
+        "signature": "Id5mgr8PkMML1VZz6IJ1ksok9bDHxPnpLOa5WSirpUjU3KFIA+8Y5+/lwE/3fxOQP2JwF1/AMbB00gtpKlLYAA==",
         "algorithm": "Ed25519",
-        "public_key": "ZqR8BpdxwbIymFguvJOUht6PSTAvhAXlcyq+eCbrBzE="
+        "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
       },
       "expect": {
         "ok": true,
@@ -285,7 +285,7 @@
               "tier": "judge-3x3",
               "seat": "alpha",
               "step": "submit",
-              "accepted_at": "2026-10-29T04:43:03.123Z",
+              "accepted_at": "2026-10-29T05:19:54.184Z",
               "receipt_format": "judge-multi-v1",
               "pieces": [
                 {
@@ -306,9 +306,9 @@
               ],
               "pieces_sha256": "dccccf636177272c8dbd5a1a97d1d0e9b01e46cb07acd33eb240c9d16ce69036"
             },
-            "signature": "oIGi/XQnS/OykuyHl3PLdbheOyh79z9u7ovy4jM8xvmYhBClfl/IbBUDyHPUWHUaUeaADWpSqdy/KaTDOmVEDg==",
+            "signature": "WKVIty1WQYdEKNpwnlMk0QC5HYhnAemqx+VjOBUFDF9YBY/xKFXgElToGMOhJVwipOLPnQV/fBQyCn6cUnWoAw==",
             "algorithm": "Ed25519",
-            "public_key": "ZqR8BpdxwbIymFguvJOUht6PSTAvhAXlcyq+eCbrBzE="
+            "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
           },
           {
             "payload": {
@@ -318,7 +318,7 @@
               "tier": "judge-3x3",
               "seat": "beta",
               "step": "submit",
-              "accepted_at": "2026-10-29T04:43:03.124Z",
+              "accepted_at": "2026-10-29T05:19:54.185Z",
               "receipt_format": "judge-multi-v1",
               "pieces": [
                 {
@@ -339,9 +339,9 @@
               ],
               "pieces_sha256": "02a12ce1ad35151b71dfafea536feed9bb0cb0a95cad7aaeec22f7a697273f1a"
             },
-            "signature": "gStQmM3VELvIqwdMU+0eE+dYc+tQty8BXGA40v4CaEPxchy8ySPig7DtRYLH+c7mygZCLqcrHUTEmUF/zmsECg==",
+            "signature": "ugVaa8x+3nfm1OWihPR/qTd3b8uM8GV0lTa0lzibcGPQVEefYBm98djBQOiMmo7IIPts76ee0Sb0VDWBMVYxCw==",
             "algorithm": "Ed25519",
-            "public_key": "ZqR8BpdxwbIymFguvJOUht6PSTAvhAXlcyq+eCbrBzE="
+            "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
           }
         ]
       },
@@ -356,7 +356,7 @@
             "alpha",
             "beta"
           ],
-          "decided_at": "2026-10-29T04:43:03.125Z",
+          "decided_at": "2026-10-29T05:19:54.187Z",
           "outcome": {
             "winner": "beta",
             "decision_rule": "majority",
@@ -444,7 +444,7 @@
               "model": "claude-sonnet-5-5",
               "temperature": null,
               "format_version": "agent-referee-judge-v5-multi",
-              "prompt_sha256": "aaf76c52a7c674b4e78cd4f80b656982a464830798399fcd082f73e075840ad1",
+              "prompt_sha256": "f99d08cb4dd1b1b2739b032d38db5f3100f4c170ac0f99b1e9870ff80bd27a05",
               "panel": [
                 {
                   "model": "claude-sonnet-5-5",
@@ -475,9 +475,9 @@
             "beta": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
           }
         },
-        "signature": "e8tLiksuqcgUw/+Nk1RpPErwkx6NlgVt2R50q1GUEZmJhVedaXoybn9XLxbOYVZ5k8T9gZF7cFzPC6X9hnZ/Cw==",
+        "signature": "FFx21USHCAzEuP/HfPa9gPFs2ub3vCS4d/JxZS4g8YZ5CUy+rOYr5kjGknJFKdQGQOkWWo52t8EmRO/FCe6uDA==",
         "algorithm": "Ed25519",
-        "public_key": "ZqR8BpdxwbIymFguvJOUht6PSTAvhAXlcyq+eCbrBzE="
+        "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
       },
       "expect": {
         "ok": true,
@@ -503,7 +503,7 @@
               "tier": "judge-3x2",
               "seat": "alpha",
               "step": "submit",
-              "accepted_at": "2026-10-29T04:43:03.128Z",
+              "accepted_at": "2026-10-29T05:19:54.191Z",
               "receipt_format": "judge-multi-v1",
               "pieces": [
                 {
@@ -519,9 +519,9 @@
               ],
               "pieces_sha256": "e9f5507dcab94a8f8b8a33a6aaeb1e2752648008f51999a889e5a8b4d60d16f5"
             },
-            "signature": "ks7a+Mkh0w0M5TDHnL1ordf0KA+YvOIU07CZru69rOx2DImuaZ0IvYxKJY7r9r+YL8SdTnsMie/x9XKXP91TAw==",
+            "signature": "ZQ78l/xjQR/m+AbYW8PbbfzZgRcSGrKBtMnVlOG57SscBd/8QMlGyYUIDaNGbDBS7htbBxxH68W1+hKlSSDpBQ==",
             "algorithm": "Ed25519",
-            "public_key": "ZqR8BpdxwbIymFguvJOUht6PSTAvhAXlcyq+eCbrBzE="
+            "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
           }
         ]
       },
@@ -536,7 +536,7 @@
             "alpha",
             "beta"
           ],
-          "decided_at": "2026-10-29T04:54:03.129Z",
+          "decided_at": "2026-10-29T05:30:54.192Z",
           "outcome": {
             "winner": "alpha",
             "by_forfeit": true,
@@ -567,7 +567,7 @@
               "model": "claude-sonnet-5-5",
               "temperature": null,
               "format_version": "agent-referee-judge-v5-multi",
-              "prompt_sha256": "aaf76c52a7c674b4e78cd4f80b656982a464830798399fcd082f73e075840ad1",
+              "prompt_sha256": "f99d08cb4dd1b1b2739b032d38db5f3100f4c170ac0f99b1e9870ff80bd27a05",
               "panel": [
                 {
                   "model": "claude-sonnet-5-5",
@@ -598,9 +598,9 @@
             "beta": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
           }
         },
-        "signature": "HjXJNooQ/BGKpcekoCOAfqpwHlglPHH6J2rjZu0bOuuyVx2QNKAZ9KyHnsb4b/Emh/MN3ZbsK/QRTdh7FZl3BA==",
+        "signature": "pB8cjO/sFI3w7zQjfgDMpU2gmVyFAQJ+RR8gxTiVMGbGpGnpdo8AoozTFWBa8SOarFjKxNbVNxHR21xsBKGbDg==",
         "algorithm": "Ed25519",
-        "public_key": "ZqR8BpdxwbIymFguvJOUht6PSTAvhAXlcyq+eCbrBzE="
+        "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
       },
       "expect": {
         "ok": true,
@@ -634,7 +634,7 @@
             "alpha",
             "beta"
           ],
-          "decided_at": "2026-10-29T04:43:03.118Z",
+          "decided_at": "2026-10-29T05:19:54.178Z",
           "outcome": {
             "winner": "alpha",
             "decision_rule": "majority",
@@ -712,7 +712,7 @@
               "model": "claude-sonnet-5-5",
               "temperature": null,
               "format_version": "agent-referee-judge-v5-multi",
-              "prompt_sha256": "aaf76c52a7c674b4e78cd4f80b656982a464830798399fcd082f73e075840ad1",
+              "prompt_sha256": "f99d08cb4dd1b1b2739b032d38db5f3100f4c170ac0f99b1e9870ff80bd27a05",
               "panel": [
                 {
                   "model": "claude-sonnet-5-5",
@@ -743,9 +743,9 @@
             "beta": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
           }
         },
-        "signature": "5+121Z0JYVTLOWcdVISGqJrBz4JqLYnsVz6yM7Ha1/R1Esb1zt6+hC82YOotDSGk5QYQoVlOVr8Y9k5gNGdJBQ==",
+        "signature": "Id5mgr8PkMML1VZz6IJ1ksok9bDHxPnpLOa5WSirpUjU3KFIA+8Y5+/lwE/3fxOQP2JwF1/AMbB00gtpKlLYAA==",
         "algorithm": "Ed25519",
-        "public_key": "ZqR8BpdxwbIymFguvJOUht6PSTAvhAXlcyq+eCbrBzE="
+        "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
       },
       "expect": {
         "ok": false,
@@ -778,7 +778,7 @@
             "alpha",
             "beta"
           ],
-          "decided_at": "2026-10-29T04:43:03.118Z",
+          "decided_at": "2026-10-29T05:19:54.178Z",
           "outcome": {
             "winner": "alpha",
             "decision_rule": "majority",
@@ -856,7 +856,7 @@
               "model": "claude-sonnet-5-5",
               "temperature": null,
               "format_version": "agent-referee-judge-v5-multi",
-              "prompt_sha256": "aaf76c52a7c674b4e78cd4f80b656982a464830798399fcd082f73e075840ad1",
+              "prompt_sha256": "f99d08cb4dd1b1b2739b032d38db5f3100f4c170ac0f99b1e9870ff80bd27a05",
               "panel": [
                 {
                   "model": "claude-sonnet-5-5",
@@ -887,9 +887,9 @@
             "beta": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
           }
         },
-        "signature": "5+121Z0JYVTLOWcdVISGqJrBz4JqLYnsVz6yM7Ha1/R1Esb1zt6+hC82YOotDSGk5QYQoVlOVr8Y9k5gNGdJBQ==",
+        "signature": "Id5mgr8PkMML1VZz6IJ1ksok9bDHxPnpLOa5WSirpUjU3KFIA+8Y5+/lwE/3fxOQP2JwF1/AMbB00gtpKlLYAA==",
         "algorithm": "Ed25519",
-        "public_key": "ZqR8BpdxwbIymFguvJOUht6PSTAvhAXlcyq+eCbrBzE="
+        "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
       },
       "expect": {
         "ok": false,
@@ -923,7 +923,7 @@
             "alpha",
             "beta"
           ],
-          "decided_at": "2026-10-29T04:43:03.118Z",
+          "decided_at": "2026-10-29T05:19:54.178Z",
           "outcome": {
             "winner": "alpha",
             "decision_rule": "majority",
@@ -1001,7 +1001,7 @@
               "model": "claude-sonnet-5-5",
               "temperature": null,
               "format_version": "agent-referee-judge-v5-multi",
-              "prompt_sha256": "aaf76c52a7c674b4e78cd4f80b656982a464830798399fcd082f73e075840ad1",
+              "prompt_sha256": "f99d08cb4dd1b1b2739b032d38db5f3100f4c170ac0f99b1e9870ff80bd27a05",
               "panel": [
                 {
                   "model": "claude-sonnet-5-5",
@@ -1032,9 +1032,9 @@
             "beta": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
           }
         },
-        "signature": "5+121Z0JYVTLOWcdVISGqJrBz4JqLYnsVz6yM7Ha1/R1Esb1zt6+hC82YOotDSGk5QYQoVlOVr8Y9k5gNGdJBQ==",
+        "signature": "Id5mgr8PkMML1VZz6IJ1ksok9bDHxPnpLOa5WSirpUjU3KFIA+8Y5+/lwE/3fxOQP2JwF1/AMbB00gtpKlLYAA==",
         "algorithm": "Ed25519",
-        "public_key": "ZqR8BpdxwbIymFguvJOUht6PSTAvhAXlcyq+eCbrBzE="
+        "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
       },
       "expect": {
         "ok": false,
@@ -1067,7 +1067,7 @@
             "alpha",
             "beta"
           ],
-          "decided_at": "2026-10-29T04:43:03.118Z",
+          "decided_at": "2026-10-29T05:19:54.178Z",
           "outcome": {
             "winner": "alpha",
             "decision_rule": "majority",
@@ -1145,7 +1145,7 @@
               "model": "claude-sonnet-5-5",
               "temperature": null,
               "format_version": "agent-referee-judge-v5-multi",
-              "prompt_sha256": "aaf76c52a7c674b4e78cd4f80b656982a464830798399fcd082f73e075840ad1",
+              "prompt_sha256": "f99d08cb4dd1b1b2739b032d38db5f3100f4c170ac0f99b1e9870ff80bd27a05",
               "panel": [
                 {
                   "model": "claude-sonnet-5-5",
@@ -1176,9 +1176,9 @@
             "beta": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
           }
         },
-        "signature": "7+SLuzIaay/0GkYkeDb3uqGtZFTOCyMB2h1H0dSYIhOPXHmsMlnPW2IlYdm7C1GFFBFKPEGU/XGER60FrNpQCA==",
+        "signature": "AfVNF2QasW8ENr1L4IIoKiuCYA/MCovOGUJm1G/nP3phXmvmJdUGnsYudhzc4AyrHJvRBQakfsK0pfY9IlgEAA==",
         "algorithm": "Ed25519",
-        "public_key": "ZqR8BpdxwbIymFguvJOUht6PSTAvhAXlcyq+eCbrBzE="
+        "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
       },
       "expect": {
         "ok": false,
@@ -1213,7 +1213,7 @@
             "alpha",
             "beta"
           ],
-          "decided_at": "2026-10-29T04:43:03.125Z",
+          "decided_at": "2026-10-29T05:19:54.187Z",
           "outcome": {
             "winner": "beta",
             "decision_rule": "majority",
@@ -1301,7 +1301,7 @@
               "model": "claude-sonnet-5-5",
               "temperature": null,
               "format_version": "agent-referee-judge-v5-multi",
-              "prompt_sha256": "aaf76c52a7c674b4e78cd4f80b656982a464830798399fcd082f73e075840ad1",
+              "prompt_sha256": "f99d08cb4dd1b1b2739b032d38db5f3100f4c170ac0f99b1e9870ff80bd27a05",
               "panel": [
                 {
                   "model": "claude-sonnet-5-5",
@@ -1332,9 +1332,9 @@
             "beta": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
           }
         },
-        "signature": "sjLJ0nN7mrJYEkVkpgPGFtNkX+2L8K4BIxh6Hb17sjki6GBOdu+4unclwzsY9h7YZLA9oKXZbirQNjZhHJMCDQ==",
+        "signature": "awUvGuMD+qLFZOPqhlSjG6wgNPmwY2E1tN7CjuLu5+fskhq0rLGMH+GIc7CZ1/xzpveS2ql2MOs535UhDUe+CQ==",
         "algorithm": "Ed25519",
-        "public_key": "ZqR8BpdxwbIymFguvJOUht6PSTAvhAXlcyq+eCbrBzE="
+        "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
       },
       "expect": {
         "ok": false,
@@ -1367,7 +1367,7 @@
             "alpha",
             "beta"
           ],
-          "decided_at": "2026-10-29T04:43:03.118Z",
+          "decided_at": "2026-10-29T05:19:54.178Z",
           "outcome": {
             "winner": "alpha",
             "decision_rule": "majority",
@@ -1432,7 +1432,7 @@
               "model": "claude-sonnet-5-5",
               "temperature": null,
               "format_version": "agent-referee-judge-v5-multi",
-              "prompt_sha256": "aaf76c52a7c674b4e78cd4f80b656982a464830798399fcd082f73e075840ad1",
+              "prompt_sha256": "f99d08cb4dd1b1b2739b032d38db5f3100f4c170ac0f99b1e9870ff80bd27a05",
               "panel": [
                 {
                   "model": "claude-sonnet-5-5",
@@ -1463,9 +1463,9 @@
             "beta": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
           }
         },
-        "signature": "+Ivvw6Rv5ShPpA9IT+b+mmzAOn3/AWhZVWmZtkcr2cphPC6fpPEXKA5U55QT0qIdprOUPI28oaX7nh3usDB+BQ==",
+        "signature": "1jJDchBLA1v7+yoe0L3quO8LamjrmylJBI+PEE4DFJjaew1cRIpbV8/ZimfnubPD9rtEYV32rT9BvflN9/YZBA==",
         "algorithm": "Ed25519",
-        "public_key": "ZqR8BpdxwbIymFguvJOUht6PSTAvhAXlcyq+eCbrBzE="
+        "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
       },
       "expect": {
         "ok": false,
@@ -1498,7 +1498,7 @@
             "alpha",
             "beta"
           ],
-          "decided_at": "2026-10-29T04:43:03.118Z",
+          "decided_at": "2026-10-29T05:19:54.178Z",
           "outcome": {
             "winner": "alpha",
             "decision_rule": "majority",
@@ -1576,7 +1576,7 @@
               "model": "claude-sonnet-5-5",
               "temperature": null,
               "format_version": "agent-referee-judge-v5-multi",
-              "prompt_sha256": "aaf76c52a7c674b4e78cd4f80b656982a464830798399fcd082f73e075840ad1",
+              "prompt_sha256": "f99d08cb4dd1b1b2739b032d38db5f3100f4c170ac0f99b1e9870ff80bd27a05",
               "panel": [
                 {
                   "model": "claude-sonnet-5-5",
@@ -1611,9 +1611,9 @@
             "beta": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
           }
         },
-        "signature": "lKvLRCaXDgzJlibY9n8szezmRyAFc342vFrmwtdJ0jyNxkpS9rJw71q0qQN4A+LM5iDGpilIvfqVVPv7iA4bAw==",
+        "signature": "a7ovGezriiFyknnSaC4NEjmKaX9fJ3T5Lx63F9+PZ8nimdL1619CQ27eH1gF5iEUg4AEk6uXChMamqJYeJbxDw==",
         "algorithm": "Ed25519",
-        "public_key": "ZqR8BpdxwbIymFguvJOUht6PSTAvhAXlcyq+eCbrBzE="
+        "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
       },
       "expect": {
         "ok": false,
@@ -1646,7 +1646,7 @@
             "alpha",
             "beta"
           ],
-          "decided_at": "2026-10-29T04:43:03.118Z",
+          "decided_at": "2026-10-29T05:19:54.178Z",
           "outcome": {
             "winner": "beta",
             "decision_rule": "majority",
@@ -1724,7 +1724,7 @@
               "model": "claude-sonnet-5-5",
               "temperature": null,
               "format_version": "agent-referee-judge-v5-multi",
-              "prompt_sha256": "aaf76c52a7c674b4e78cd4f80b656982a464830798399fcd082f73e075840ad1",
+              "prompt_sha256": "f99d08cb4dd1b1b2739b032d38db5f3100f4c170ac0f99b1e9870ff80bd27a05",
               "panel": [
                 {
                   "model": "claude-sonnet-5-5",
@@ -1755,9 +1755,9 @@
             "beta": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
           }
         },
-        "signature": "+ZJa5CKp5a/5Qkb9LoIhtIB6ERlkN0vbyto31rh/bIjDIk6k65dNrYj/hTdYkjpBQkFRDwSaizj/4P6xicDCAQ==",
+        "signature": "8Lr3w8UB2+otyo2rlIvb0wrTkptcc6hy5w7b9cW7bj9+7sT3VvVPHIVASqWrgdRmVESR3ft4qDdFukod7n3bBQ==",
         "algorithm": "Ed25519",
-        "public_key": "ZqR8BpdxwbIymFguvJOUht6PSTAvhAXlcyq+eCbrBzE="
+        "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
       },
       "expect": {
         "ok": false,
@@ -1790,7 +1790,7 @@
             "alpha",
             "beta"
           ],
-          "decided_at": "2026-10-29T04:43:03.118Z",
+          "decided_at": "2026-10-29T05:19:54.178Z",
           "outcome": {
             "winner": "alpha",
             "decision_rule": "majority",
@@ -1868,7 +1868,7 @@
               "model": "claude-sonnet-5-5",
               "temperature": null,
               "format_version": "agent-referee-judge-v5-multi",
-              "prompt_sha256": "aaf76c52a7c674b4e78cd4f80b656982a464830798399fcd082f73e075840ad1",
+              "prompt_sha256": "f99d08cb4dd1b1b2739b032d38db5f3100f4c170ac0f99b1e9870ff80bd27a05",
               "panel": [
                 {
                   "model": "claude-sonnet-5-5",
@@ -1899,9 +1899,9 @@
             "beta": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
           }
         },
-        "signature": "Dt+gmS//b8Psp5EOg0qvF2fqcMDqNCf+T4Ju7yYriV+i/oJlaZgG2tx8cQcYHgHpCfHAuPdBrbvBd3GjkmfyAw==",
+        "signature": "d97nsh6/fMqWuTjIim7VpBa2FfKoRUM78iOkSpGF6SH0ZjD0a1iEiIW8AZ8FjNgY1Kz+Us+98M3e3JcVoLzcCw==",
         "algorithm": "Ed25519",
-        "public_key": "ZqR8BpdxwbIymFguvJOUht6PSTAvhAXlcyq+eCbrBzE="
+        "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
       },
       "expect": {
         "ok": false,
@@ -1934,7 +1934,7 @@
             "alpha",
             "beta"
           ],
-          "decided_at": "2026-10-29T04:43:03.118Z",
+          "decided_at": "2026-10-29T05:19:54.178Z",
           "outcome": {
             "winner": "alpha",
             "decision_rule": "majority",
@@ -2002,7 +2002,7 @@
               "model": "claude-sonnet-5-5",
               "temperature": null,
               "format_version": "agent-referee-judge-v5-multi",
-              "prompt_sha256": "aaf76c52a7c674b4e78cd4f80b656982a464830798399fcd082f73e075840ad1",
+              "prompt_sha256": "f99d08cb4dd1b1b2739b032d38db5f3100f4c170ac0f99b1e9870ff80bd27a05",
               "panel": [
                 {
                   "model": "claude-sonnet-5-5",
@@ -2033,9 +2033,9 @@
             "beta": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
           }
         },
-        "signature": "u9bwMNEOt9M47iRAS0E0CHYnomacnD2TEm4cMwFBShVu7JzLwHZ1uFguJ+K5MPtetNNNGIk4/9mMJ+ktBM8WBQ==",
+        "signature": "E/KFPHxCg++FayBp96tuHIiXgkV8j8PgX1TD8H0hnKPxjtEDRH+hRQPc2lVqqA0JhEF27zc8jQQI4S74P2/gDw==",
         "algorithm": "Ed25519",
-        "public_key": "ZqR8BpdxwbIymFguvJOUht6PSTAvhAXlcyq+eCbrBzE="
+        "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
       },
       "expect": {
         "ok": false,
@@ -2068,7 +2068,7 @@
             "alpha",
             "beta"
           ],
-          "decided_at": "2026-10-29T04:43:03.118Z",
+          "decided_at": "2026-10-29T05:19:54.178Z",
           "outcome": {
             "winner": "alpha",
             "decision_rule": "majority",
@@ -2146,7 +2146,7 @@
               "model": "claude-sonnet-5-5",
               "temperature": null,
               "format_version": "agent-referee-judge-v5-multi",
-              "prompt_sha256": "aaf76c52a7c674b4e78cd4f80b656982a464830798399fcd082f73e075840ad1",
+              "prompt_sha256": "f99d08cb4dd1b1b2739b032d38db5f3100f4c170ac0f99b1e9870ff80bd27a05",
               "panel": [
                 {
                   "model": "claude-sonnet-5-5",
@@ -2177,9 +2177,9 @@
             "beta": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
           }
         },
-        "signature": "aXLhKIlpvg6l5myVhfpS54iGqCNFhfSggwdOYERBajb8KSs/K1acGl7oNHay764v3nxA11Xu6/Wric4eR986CQ==",
+        "signature": "V8ZxI9oPfQen8H79jVTxzhpL7MoqBa7NXg9bLuJ25x+hyseklfNv5v1dGaASvp3nMvZN7VF9kJBnbzsTkpmoAA==",
         "algorithm": "Ed25519",
-        "public_key": "ZqR8BpdxwbIymFguvJOUht6PSTAvhAXlcyq+eCbrBzE="
+        "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
       },
       "expect": {
         "ok": false,
@@ -2212,7 +2212,7 @@
             "alpha",
             "beta"
           ],
-          "decided_at": "2026-10-29T04:43:03.118Z",
+          "decided_at": "2026-10-29T05:19:54.178Z",
           "outcome": {
             "winner": "alpha",
             "decision_rule": "majority",
@@ -2290,7 +2290,7 @@
               "model": "claude-sonnet-5-5",
               "temperature": null,
               "format_version": "agent-referee-judge-v4",
-              "prompt_sha256": "aaf76c52a7c674b4e78cd4f80b656982a464830798399fcd082f73e075840ad1",
+              "prompt_sha256": "f99d08cb4dd1b1b2739b032d38db5f3100f4c170ac0f99b1e9870ff80bd27a05",
               "panel": [
                 {
                   "model": "claude-sonnet-5-5",
@@ -2321,9 +2321,9 @@
             "beta": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
           }
         },
-        "signature": "HpfHfmmUeX2ip9tJSAigLoPF+kBdc9wdOCLmtix2NStLoaDNGoL9kxIrMP2tmWniMeOjAD8HiesTC+h+3LWMDw==",
+        "signature": "l/xlo8kLuf0QRvdFYrqmrn3VdJ2s1vArDQhL6s2lUa+UP9D9+8crwp8S2I9+fbfxrwjmE+T8NGvMcBAzLdJjAA==",
         "algorithm": "Ed25519",
-        "public_key": "ZqR8BpdxwbIymFguvJOUht6PSTAvhAXlcyq+eCbrBzE="
+        "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
       },
       "expect": {
         "ok": false,
@@ -2356,7 +2356,7 @@
             "alpha",
             "beta"
           ],
-          "decided_at": "2026-10-29T04:43:03.118Z",
+          "decided_at": "2026-10-29T05:19:54.178Z",
           "outcome": {
             "winner": "alpha",
             "decision_rule": "majority",
@@ -2434,7 +2434,7 @@
               "model": "claude-sonnet-5-5",
               "temperature": null,
               "format_version": "agent-referee-judge-v5-multi",
-              "prompt_sha256": "aaf76c52a7c674b4e78cd4f80b656982a464830798399fcd082f73e075840ad1",
+              "prompt_sha256": "f99d08cb4dd1b1b2739b032d38db5f3100f4c170ac0f99b1e9870ff80bd27a05",
               "panel": [
                 {
                   "model": "claude-sonnet-5-5",
@@ -2465,9 +2465,9 @@
             "beta": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
           }
         },
-        "signature": "6jXX+bAPsqlLv2bte4BD/rWgUEKohvmzibrhkhBlF3QPqzLQDJJ5xMDDR2/A3EfsM4WqI9pyRULA13t+YDIuBQ==",
+        "signature": "kVaNb5+piNcAin5u0YFFtFECaIFSlsMmk7FD1F5CxpncoQU3D6C5DmdY5/aUXSRHNjb2WbDzlM/bOJNSwHXLAQ==",
         "algorithm": "Ed25519",
-        "public_key": "ZqR8BpdxwbIymFguvJOUht6PSTAvhAXlcyq+eCbrBzE="
+        "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
       },
       "expect": {
         "ok": false,
@@ -2500,7 +2500,7 @@
             "alpha",
             "beta"
           ],
-          "decided_at": "2026-10-29T04:43:03.118Z",
+          "decided_at": "2026-10-29T05:19:54.178Z",
           "outcome": {
             "winner": "alpha",
             "decision_rule": "majority",
@@ -2578,7 +2578,7 @@
               "model": "claude-sonnet-5-5",
               "temperature": null,
               "format_version": "agent-referee-judge-v5-multi",
-              "prompt_sha256": "aaf76c52a7c674b4e78cd4f80b656982a464830798399fcd082f73e075840ad1",
+              "prompt_sha256": "f99d08cb4dd1b1b2739b032d38db5f3100f4c170ac0f99b1e9870ff80bd27a05",
               "panel": [
                 {
                   "model": "claude-sonnet-5-5",
@@ -2609,9 +2609,9 @@
             "beta": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
           }
         },
-        "signature": "IC4fjrdV9x09Ebn99SYw3lb5tFpyc4olcQirYGi3JKv6ztWGFBj843e4gSRC66HIFWi5omUIclHCkDWfQwRsCg==",
+        "signature": "LB2KlmEal6QZpfCRu1azsNwEZH8JC1uL7E6AfIY8eDOZ7dBo9v2dubH0uy3FCJnpQNqQLKzCEgWVTgrYm4dVDA==",
         "algorithm": "Ed25519",
-        "public_key": "ZqR8BpdxwbIymFguvJOUht6PSTAvhAXlcyq+eCbrBzE="
+        "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
       },
       "expect": {
         "ok": false,
@@ -2644,7 +2644,7 @@
             "alpha",
             "beta"
           ],
-          "decided_at": "2026-10-29T04:43:03.118Z",
+          "decided_at": "2026-10-29T05:19:54.178Z",
           "outcome": {
             "winner": "beta",
             "decision_rule": "majority",
@@ -2722,7 +2722,7 @@
               "model": "claude-sonnet-5-5",
               "temperature": null,
               "format_version": "agent-referee-judge-v5-multi",
-              "prompt_sha256": "aaf76c52a7c674b4e78cd4f80b656982a464830798399fcd082f73e075840ad1",
+              "prompt_sha256": "f99d08cb4dd1b1b2739b032d38db5f3100f4c170ac0f99b1e9870ff80bd27a05",
               "panel": [
                 {
                   "model": "claude-sonnet-5-5",
@@ -2753,9 +2753,9 @@
             "beta": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
           }
         },
-        "signature": "5+121Z0JYVTLOWcdVISGqJrBz4JqLYnsVz6yM7Ha1/R1Esb1zt6+hC82YOotDSGk5QYQoVlOVr8Y9k5gNGdJBQ==",
+        "signature": "Id5mgr8PkMML1VZz6IJ1ksok9bDHxPnpLOa5WSirpUjU3KFIA+8Y5+/lwE/3fxOQP2JwF1/AMbB00gtpKlLYAA==",
         "algorithm": "Ed25519",
-        "public_key": "ZqR8BpdxwbIymFguvJOUht6PSTAvhAXlcyq+eCbrBzE="
+        "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
       },
       "expect": {
         "ok": false,
@@ -2776,7 +2776,7 @@
               "tier": "judge-3x2",
               "seat": "alpha",
               "step": "submit",
-              "accepted_at": "2026-10-29T04:43:03.111Z",
+              "accepted_at": "2026-10-29T05:19:54.171Z",
               "receipt_format": "judge-multi-v1",
               "pieces": [
                 {
@@ -2792,9 +2792,9 @@
               ],
               "pieces_sha256": "1111111111111111111111111111111111111111111111111111111111111111"
             },
-            "signature": "RSA8QJBPwyXRt1d+S3DBQrNX8CesSfQQl7SfGsv6zfAYWHFZ7FKIIqISxO4x164fs/aFRFtyFL+FpkLUwiHnAw==",
+            "signature": "JRkvIIIqwa2UnTaoNfFei8+LqYcSp/kDTgtYqQAU80fE+M6bpvnxAetOD7hWZ94XL4AERRRMavLzDocoy6eeBw==",
             "algorithm": "Ed25519",
-            "public_key": "ZqR8BpdxwbIymFguvJOUht6PSTAvhAXlcyq+eCbrBzE="
+            "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
           }
         ]
       },
@@ -2809,7 +2809,7 @@
             "alpha",
             "beta"
           ],
-          "decided_at": "2026-10-29T04:43:03.118Z",
+          "decided_at": "2026-10-29T05:19:54.178Z",
           "outcome": {
             "winner": "alpha",
             "decision_rule": "majority",
@@ -2887,7 +2887,7 @@
               "model": "claude-sonnet-5-5",
               "temperature": null,
               "format_version": "agent-referee-judge-v5-multi",
-              "prompt_sha256": "aaf76c52a7c674b4e78cd4f80b656982a464830798399fcd082f73e075840ad1",
+              "prompt_sha256": "f99d08cb4dd1b1b2739b032d38db5f3100f4c170ac0f99b1e9870ff80bd27a05",
               "panel": [
                 {
                   "model": "claude-sonnet-5-5",
@@ -2918,9 +2918,9 @@
             "beta": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
           }
         },
-        "signature": "5+121Z0JYVTLOWcdVISGqJrBz4JqLYnsVz6yM7Ha1/R1Esb1zt6+hC82YOotDSGk5QYQoVlOVr8Y9k5gNGdJBQ==",
+        "signature": "Id5mgr8PkMML1VZz6IJ1ksok9bDHxPnpLOa5WSirpUjU3KFIA+8Y5+/lwE/3fxOQP2JwF1/AMbB00gtpKlLYAA==",
         "algorithm": "Ed25519",
-        "public_key": "ZqR8BpdxwbIymFguvJOUht6PSTAvhAXlcyq+eCbrBzE="
+        "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
       },
       "expect": {
         "ok": false,
@@ -2946,7 +2946,7 @@
               "tier": "judge-3x2",
               "seat": "alpha",
               "step": "submit",
-              "accepted_at": "2026-10-29T04:43:03.128Z",
+              "accepted_at": "2026-10-29T05:19:54.191Z",
               "receipt_format": "judge-multi-v1",
               "pieces": [
                 {
@@ -2962,9 +2962,9 @@
               ],
               "pieces_sha256": "e9f5507dcab94a8f8b8a33a6aaeb1e2752648008f51999a889e5a8b4d60d16f5"
             },
-            "signature": "ks7a+Mkh0w0M5TDHnL1ordf0KA+YvOIU07CZru69rOx2DImuaZ0IvYxKJY7r9r+YL8SdTnsMie/x9XKXP91TAw==",
+            "signature": "ZQ78l/xjQR/m+AbYW8PbbfzZgRcSGrKBtMnVlOG57SscBd/8QMlGyYUIDaNGbDBS7htbBxxH68W1+hKlSSDpBQ==",
             "algorithm": "Ed25519",
-            "public_key": "ZqR8BpdxwbIymFguvJOUht6PSTAvhAXlcyq+eCbrBzE="
+            "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
           },
           {
             "payload": {
@@ -2974,7 +2974,7 @@
               "tier": "judge-3x2",
               "seat": "beta",
               "step": "submit",
-              "accepted_at": "2026-10-29T04:43:03.111Z",
+              "accepted_at": "2026-10-29T05:19:54.171Z",
               "receipt_format": "judge-multi-v1",
               "pieces": [
                 {
@@ -2990,9 +2990,9 @@
               ],
               "pieces_sha256": "1de523c62eb8fe6c7f97935fff74acc66af36db57f7f34dfa1b8c49d37b14b69"
             },
-            "signature": "SWzdwSD4rZX7MCMH7G1XQ2fcpmHR60jXkPkTkhMk+qsgh95QqFFDsyetxNnWPQwjTrX/d4kMQbtZnryB4+4fBg==",
+            "signature": "hBW+uR5IoCGQuPRdypGZZ0msDYNOwyOdN2nCigLyveafvLja+Ds4cLbDIKZjCFvmL8oV8To/F6U9Neeac6BhAg==",
             "algorithm": "Ed25519",
-            "public_key": "ZqR8BpdxwbIymFguvJOUht6PSTAvhAXlcyq+eCbrBzE="
+            "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
           }
         ]
       },
@@ -3007,7 +3007,7 @@
             "alpha",
             "beta"
           ],
-          "decided_at": "2026-10-29T04:54:03.129Z",
+          "decided_at": "2026-10-29T05:30:54.192Z",
           "outcome": {
             "winner": "alpha",
             "by_forfeit": true,
@@ -3038,7 +3038,7 @@
               "model": "claude-sonnet-5-5",
               "temperature": null,
               "format_version": "agent-referee-judge-v5-multi",
-              "prompt_sha256": "aaf76c52a7c674b4e78cd4f80b656982a464830798399fcd082f73e075840ad1",
+              "prompt_sha256": "f99d08cb4dd1b1b2739b032d38db5f3100f4c170ac0f99b1e9870ff80bd27a05",
               "panel": [
                 {
                   "model": "claude-sonnet-5-5",
@@ -3069,9 +3069,9 @@
             "beta": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
           }
         },
-        "signature": "HjXJNooQ/BGKpcekoCOAfqpwHlglPHH6J2rjZu0bOuuyVx2QNKAZ9KyHnsb4b/Emh/MN3ZbsK/QRTdh7FZl3BA==",
+        "signature": "pB8cjO/sFI3w7zQjfgDMpU2gmVyFAQJ+RR8gxTiVMGbGpGnpdo8AoozTFWBa8SOarFjKxNbVNxHR21xsBKGbDg==",
         "algorithm": "Ed25519",
-        "public_key": "ZqR8BpdxwbIymFguvJOUht6PSTAvhAXlcyq+eCbrBzE="
+        "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
       },
       "expect": {
         "ok": false,

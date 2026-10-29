@@ -62,7 +62,10 @@ export async function multiJudgeCommitment(tier: MultiJudgeTier, env: MultiEnv, 
 export function validateMultiSubmit(body: any, tier: MultiJudgeTier): { ok: true; texts: string[] } | { ok: false; error: string } {
   const n = MULTI_JUDGE_PIECES[tier];
   const shape = `On ${tier}, submit {seat, seat_token, pieces: [{text}]} with exactly ${n} pieces of 1 to ${MULTI_JUDGE_LIMITS.maxPiece} characters each.`;
-  if ("position" in (body ?? {})) return { ok: false, error: `${tier} takes your side as "pieces", not "position". ${shape}` };
+  if (!body || typeof body !== "object" || Array.isArray(body)) return { ok: false, error: shape };
+  if ("position" in body) return { ok: false, error: `${tier} takes your side as "pieces", not "position". ${shape}` };
+  const extraTop = Object.keys(body).filter((k) => !["seat", "seat_token", "pieces"].includes(k));
+  if (extraTop.length) return { ok: false, error: `Unknown field${extraTop.length > 1 ? "s" : ""}: ${extraTop.slice(0, 5).join(", ")}. ${shape}` };
   const pieces = body?.pieces;
   if (!Array.isArray(pieces) || pieces.length !== n)
     return { ok: false, error: `pieces must be exactly ${n} items on ${tier}${Array.isArray(pieces) ? ` (got ${pieces.length})` : ""}. ${shape}` };
@@ -75,7 +78,7 @@ export function validateMultiSubmit(body: any, tier: MultiJudgeTier): { ok: true
     if (extra.length)
       return { ok: false, error: `${which} has ${extra.includes("name") ? "a name, which these tiers don't accept (a name could show the judges who wrote what)" : `unknown field${extra.length > 1 ? "s" : ""}: ${extra.slice(0, 5).join(", ")}`}. Each piece is {text}.` };
     if (typeof p.text !== "string" || !p.text.trim() || p.text.length > MULTI_JUDGE_LIMITS.maxPiece)
-      return { ok: false, error: `${which}: text must be 1 to ${MULTI_JUDGE_LIMITS.maxPiece} characters (it has ${typeof p.text === "string" ? p.text.length : "none"}).` };
+      return { ok: false, error: typeof p.text === "string" && p.text.length && p.text.length <= MULTI_JUDGE_LIMITS.maxPiece ? `${which}: text can't be only spaces or line breaks.` : `${which}: text must be 1 to ${MULTI_JUDGE_LIMITS.maxPiece} characters (it has ${typeof p.text === "string" ? p.text.length : "none"}).` };
     texts.push(p.text);
   }
   return { ok: true, texts };
@@ -108,8 +111,9 @@ export const MULTI_JUDGE_RECEIPT_FORMAT = "judge-multi-v1";
 export const MULTI_JUDGE_SYSTEM = `You are a neutral referee settling a disagreement between AI agents that belong to different owners.
 You will receive RULES the parties agreed to in advance and one SIDE per party. Each side is made of 2 or 3 PIECES.
 Each side opens with a boundary line "=====SIDE <party label> <token>=====", and each piece inside it sits between
-"=====PIECE 2 of 3 <token>=====" and "=====END PIECE 2 <token>=====". Every boundary line carries the same random
-token. You may also receive CRITERIA: named, weighted scoring criteria the parties also agreed to in advance.
+boundary lines such as "=====PIECE 2 of 3 <token>=====" and "=====END PIECE 2 <token>=====". Every real boundary
+line carries the same random token: the one on the first SIDE line, which comes before any piece text.
+You may also receive CRITERIA: named, weighted scoring criteria the parties also agreed to in advance.
 
 Read every piece of both sides. Judge each side as a whole, all its pieces together, and decide which party's side
 better satisfies the RULES. Apply the rules exactly as written.

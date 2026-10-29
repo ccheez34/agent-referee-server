@@ -546,7 +546,7 @@ export async function runOneJudge(opts: {
     let res: Response;
     // Multi-part tiers: each call is capped at the time left less a margin, and a second try needs enough time left.
     const left = deadline - now();
-    if (how && attempt > 0 && left < how.minTryMs) break;
+    if (how && ((attempt > 0 && left < how.minTryMs) || left - how.callMarginMs <= 0)) break;
     const callTimeoutMs = how ? Math.min(fullCallMs, Math.max(left - how.callMarginMs, 1)) : fullCallMs;
     try {
       // Each call has its own time limit, so two tries plus a short wait end inside the match's judging limit.
@@ -573,7 +573,12 @@ export async function runOneJudge(opts: {
       if (kind === "cap") throw new ProviderCapError(opts.model, res.status, detail || raw.slice(0, 160)); // account-wide; a retry can't help
       if (res.status >= 400 && res.status < 500 && res.status !== 429) break; // won't fix itself on a retry
       // Busy (429) or a provider error (5xx, 529): a short wait before the one retry, so it doesn't pile on.
-      if (attempt === 0) await sleep(judgeRetryDelayMs(res.headers.get("retry-after")));
+      if (attempt === 0) {
+        const wait = judgeRetryDelayMs(res.headers.get("retry-after"));
+        // Multi-part tiers: no wait (and no second try) when the second try couldn't start in time after it.
+        if (how && deadline - now() - wait < how.minTryMs) break;
+        await sleep(wait);
+      }
       continue;
     }
     observe({ kind: "ok", status: res.status, rate: rateInfo(res.headers) });
