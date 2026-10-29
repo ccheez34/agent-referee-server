@@ -813,8 +813,8 @@ t("multi-part: paid through the real paywall at its own price, settled once", as
     const e = env({ ...MP, PAYMENTS_ENABLED: "true" });
     const challenge = await call(e, "/review-3x3", multi(3));
     assert.equal(challenge.status, 402);
-    assert.equal(challenge.body.accepts?.[0]?.maxAmountRequired, "500000", "$0.50");
-    const r = await call(e, "/review-3x3", multi(3), { "x-payment": payHeader("0x" + "c".repeat(40), "500000") });
+    assert.equal(challenge.body.accepts?.[0]?.maxAmountRequired, "700000", "$0.70");
+    const r = await call(e, "/review-3x3", multi(3), { "x-payment": payHeader("0x" + "c".repeat(40), "700000") });
     assert.equal(r.status, 200, JSON.stringify(r.body));
     assert.equal(r.body.receipt.payload.payer?.toLowerCase(), "0x" + "c".repeat(40));
     assert.deepEqual(f.calls, { verify: 1, settle: 1 });
@@ -827,7 +827,9 @@ t("multi-part: GET /reviewers describes the tiers, the eligible models and the p
   const r = await call(env(), "/reviewers");
   const m = r.body.multi_part;
   assert.equal(m.status, "not open yet");
-  assert.equal(m.tiers["review-3x3"].price, "$0.50");
+  assert.equal(m.tiers["review-3x3"].price, "$0.70");
+  assert.match(m.why_no_opus, /worst case/);
+  assert.ok(!m.eligible_models.includes("claude-opus-5-5"));
   assert.ok(!m.eligible_models.includes("claude-haiku-5-5"));
   assert.equal(m.format_version, "agent-referee-review-v4-multi");
   assert.match(m.prompt_sha256, /^[0-9a-f]{64}$/);

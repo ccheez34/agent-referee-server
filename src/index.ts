@@ -77,7 +77,8 @@ function reviewPrices(env: Env): Record<ReviewTier, string> {
 }
 // Multi-part review: one price per route (x402 prices are fixed per route). Provisional until the cost test (spec 4.3).
 function multiPrices(env: Env): Record<MultiTier, string> {
-  return { "review-3x2": env.PRICE_REVIEW_3X2 || "$0.35", "review-3x3": env.PRICE_REVIEW_3X3 || "$0.50" };
+  // Set after the live cost test (Oct 28, option B): above the worst-case AI cost even for CJK input, with Opus left out.
+  return { "review-3x2": env.PRICE_REVIEW_3X2 || "$0.60", "review-3x3": env.PRICE_REVIEW_3X3 || "$0.70" };
 }
 /** The multi-part routes are off for the public until MULTI_PART_ENABLED=true; the operator can test them with
  * x-operator-token: <ADMIN_TOKEN>. */
@@ -1420,6 +1421,12 @@ async function multiPartInfo(env: Env) {
     drawn_from: m.drawable,
     panel: 'Default and "rotate": one model from each of three companies, drawn from drawn_from. An exact list or agreed sets must name eligible models from three different companies. Light models (Haiku) and opt-in models are refused.',
     max_tokens: Object.fromEntries(m.eligible.map((x) => [x, multiMaxTokens(x, env)])),
+    ...(m.eligible.includes("claude-opus-5-5")
+      ? {}
+      : {
+          why_no_opus:
+            "Claude Opus isn't offered on these tiers for now. A review is only charged when it completes, so the price has to cover the worst case: every reviewer using its full answer room (12,000 tokens) on both of its tries. With Opus's output price that worst case came to about $1.00-1.25 per 3-piece review (live test, Oct 28, 2026), above the price. Claude Sonnet is the Anthropic reviewer instead. Opus could come back at a higher price; ask at hello@agentreferee.ai if you need it.",
+        }),
     timeouts: "Each reviewer call is limited to 120 seconds (or the reviewer's remaining time less 5 seconds). A second try starts only with at least 60 seconds left. Each reviewer has 240 seconds in all, and the three run in parallel, inside the 300-second payment authorization.",
     issues: 'Each issue starts with "[piece N]" or "[all]" (a hint, not checked). The service keeps the first 10 (2 pieces) or 15 (3 pieces) issues of each vote; issues_dropped in each signed vote says how many it left out.',
     receipt: `receipt_format "${MULTI_RECEIPT_FORMAT}": every review-3 field (task_sha256 included) except output_sha256, replaced by pieces [{index, name, sha256, chars}] and pieces_sha256 = sha256 of the canonical JSON of pieces. Older clients refuse these receipts.`,

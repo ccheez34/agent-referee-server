@@ -44,11 +44,11 @@ export interface Env {
   PRICE_JUDGE_3?: string; // per seat, 3-judge panel
   PRICE_REVIEW?: string; // sealed review, one reviewer (per review, default $0.05)
   PRICE_REVIEW_3?: string; // sealed review, three reviewers (per review, default $0.20)
-  PRICE_REVIEW_3X2?: string; // multi-part review, 2 pieces (per review, default $0.35, provisional)
-  PRICE_REVIEW_3X3?: string; // multi-part review, 3 pieces (per review, default $0.50, provisional)
+  PRICE_REVIEW_3X2?: string; // multi-part review, 2 pieces (per review, default $0.60)
+  PRICE_REVIEW_3X3?: string; // multi-part review, 3 pieces (per review, default $0.70)
   MULTI_PART_ENABLED?: string; // "true" opens /review-3x2 and /review-3x3 to everyone; otherwise only x-operator-token: <ADMIN_TOKEN>
   MULTI_PART_OPT_IN?: string; // opt-in models made eligible for the multi-part tiers after passing the live test (named only, never drawn)
-  MULTI_PART_EXCLUDE?: string; // default-pool models left out of the multi-part tiers (failed the live test)
+  MULTI_PART_EXCLUDE?: string; // default-pool models left out of the multi-part tiers (default "claude-opus-5-5"; "" leaves none out)
   MULTI_PART_MAX_TOKENS?: string; // "model=n,model=n": lower a model's max_tokens on the multi-part tiers (cost test, spec 4.3)
   OPT_IN_MODELS?: string; // models agents may name but that are never drawn at random (default: judge.ts DEFAULT_OPT_IN_MODELS; "" turns them off)
   MODEL_POOL?: string; // models agents may choose for panels and reviews, comma separated (default: judge.ts DEFAULT_MODEL_POOL)

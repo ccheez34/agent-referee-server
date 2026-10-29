@@ -23,7 +23,7 @@ const task = "Review the handoff: every fact must match the code, and every open
 const vote = (i, verdict, issues = [], dropped = 0) => ({ reviewer: i + 1, model: models[i], verdict, confidence: "high", issues, reasoning: "Short reasoning.", issues_dropped: dropped });
 
 async function make(tier, pieces, verdicts, extra = {}) {
-  const commitment = await mp.multiCommitment(tier, {}, models);
+  const commitment = await mp.multiCommitment(tier, { MULTI_PART_EXCLUDE: "" }, models) // Opus allowed here: the vectors test the receipt format, not the panel rules;
   const votes = verdicts.map((v, i) => vote(i, v, v === "pass" ? [] : [`[piece 1] problem from reviewer ${i + 1}`, "[all] a problem across pieces"], i === 0 ? 3 : 0));
   const payload = await mp.multiReviewPayload({ tier, input: { task, pieces, title: "Handoff v5", ...extra }, commitment, votes, payer: "0x28275fa8fe39996501e160104a23e1af5e005f58", network: "base", id: "a1b2c3d4e5f6a1b2c3d4e5f6", now: new Date("2026-10-28T22:00:00.000Z") });
   return payload;

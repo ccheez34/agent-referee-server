@@ -62,10 +62,25 @@ export const MODEL_OUTPUT_LIMITS: Record<string, number | null> = {
   "moonshotai/kimi-k3": null,
 };
 
-/** max_tokens for one model on these routes: 12,000, capped at the model's published limit, and lowered further by
- * MULTI_PART_MAX_TOKENS ("model=n,model=n") after the cost test (spec 4.3). */
+/**
+ * Lower max_tokens chosen after the live cost test (Oct 28, spec 4.3, ccheez34's option B): 3 times the longest answer
+ * each model gave on 30,000-36,000-character input (Luna 1,215, Argon 932, Flash 1,206 tokens), rounded up. Claude
+ * models keep 12,000: 3 times their longest answers (Opus 4,628, Sonnet 4,216) is above it.
+ */
+export const MULTI_DEFAULT_MAX_TOKENS: Record<string, number> = {
+  "openai/gpt-6-luna": 4_000,
+  "google/gemini-4-argon": 4_000,
+  "google/gemini-3.7-flash": 4_000,
+};
+
+/** Left out of these tiers by default after the live cost test: Opus's worst case (12,000 output tokens at $20 per
+ * million, twice) can't stay under the price. Sonnet is the Anthropic reviewer. MULTI_PART_EXCLUDE replaces this list. */
+export const DEFAULT_MULTI_PART_EXCLUDE = "claude-opus-5-5";
+
+/** max_tokens for one model on these routes: 12,000, capped at the model's published limit and at
+ * MULTI_DEFAULT_MAX_TOKENS, and lowered further by MULTI_PART_MAX_TOKENS ("model=n,model=n"). Never raised. */
 export function multiMaxTokens(model: string, env: { MULTI_PART_MAX_TOKENS?: string } = {}): number {
-  let n = MULTI_MAX_TOKENS;
+  let n = Math.min(MULTI_MAX_TOKENS, MULTI_DEFAULT_MAX_TOKENS[model] ?? MULTI_MAX_TOKENS);
   const published = MODEL_OUTPUT_LIMITS[model];
   if (typeof published === "number" && published > 0) n = Math.min(n, published);
   for (const part of String(env.MULTI_PART_MAX_TOKENS ?? "").split(",")) {
@@ -87,7 +102,7 @@ export type MultiEnv = {
   /** Opt-in models made eligible after passing the live test (spec 4.3). They can be named, never drawn, and only once
    * their published output limit is recorded in MODEL_OUTPUT_LIMITS (so none runs uncapped). */
   MULTI_PART_OPT_IN?: string;
-  /** Default-pool models left out after failing the live test (spec 4.3). */
+  /** Default-pool models left out of these tiers (default: DEFAULT_MULTI_PART_EXCLUDE; "" leaves none out). */
   MULTI_PART_EXCLUDE?: string;
   MULTI_PART_MAX_TOKENS?: string;
 };
@@ -101,7 +116,7 @@ const list = (s?: string) => String(s ?? "").split(",").map((x) => x.trim()).fil
  */
 export function multiModels(env: MultiEnv): { drawable: string[]; eligible: string[]; missing: string[]; poolCompanies: number } {
   const light = longReviewRule(env).light_models;
-  const exclude = list(env.MULTI_PART_EXCLUDE);
+  const exclude = list(env.MULTI_PART_EXCLUDE ?? DEFAULT_MULTI_PART_EXCLUDE);
   const ok = (m: string) => !light.includes(m) && !exclude.includes(m);
   const pool = modelPool(env);
   const drawable = pool.filter(ok);

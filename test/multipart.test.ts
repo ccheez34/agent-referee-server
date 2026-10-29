@@ -113,6 +113,8 @@ test("the 256 KB body limit is applied before parsing, and fits the largest vali
 
 // ---------- who reviews ----------
 
+/** Opus allowed again (MULTI_PART_EXCLUDE set to ""): the tests of the general rules use the whole pool. */
+const ALL = { MULTI_PART_EXCLUDE: "" };
 const OPUS = "claude-opus-5-5", SONNET = "claude-sonnet-5-5", HAIKU = "claude-haiku-5-5", LUNA = "openai/gpt-6-luna", ARGON = "google/gemini-4-argon", FLASH = "google/gemini-3.7-flash", KIMI = "moonshotai/kimi-k3";
 
 /** Opt-in models are eligible only once their published output limit is recorded; tests that need Kimi set one. */
@@ -130,7 +132,7 @@ function withKimiChecked<T>(fn: () => T): T {
 }
 
 test("eligible models: the default pool without Haiku; opt-in models only once listed, and never drawn", () => {
-  const m = multiModels({});
+  const m = multiModels(ALL);
   assert.deepEqual(m.drawable.sort(), [OPUS, SONNET, LUNA, ARGON, FLASH].sort());
   assert.deepEqual(m.eligible.sort(), m.drawable.sort());
   assert.deepEqual(m.missing, []);
@@ -157,7 +159,7 @@ test("refused before payment: Haiku, opt-in models, two models from one company,
     [[[OPUS, LUNA, ARGON], [OPUS, SONNET, FLASH]], /three different AI companies/],
     [["made-up/model", LUNA, ARGON], /Not eligible/],
   ];
-  for (const [panel, re] of bad) await assert.rejects(multiCommitment("review-3x3", {}, panel as any), re, JSON.stringify(panel));
+  for (const [panel, re] of bad) await assert.rejects(multiCommitment("review-3x3", ALL, panel as any), re, JSON.stringify(panel));
   const exact = await multiCommitment("review-3x2", {}, [SONNET, LUNA, FLASH]);
   assert.deepEqual(exact.models, [SONNET, LUNA, FLASH]);
   assert.equal(exact.panel_selection?.mode, "custom");
@@ -177,7 +179,7 @@ test("a company with no eligible model closes the tiers (503), never fewer than 
 });
 
 test("random draws (the default, rotate and agreed sets) never pick an ineligible model, and always three companies", async () => {
-  const env = { MULTI_PART_OPT_IN: KIMI, MULTI_PART_EXCLUDE: FLASH };
+  const env = { MULTI_PART_OPT_IN: KIMI, MULTI_PART_EXCLUDE: FLASH }; // replaces the default list, so Opus is back in
   MODEL_OUTPUT_LIMITS[KIMI] = 16_000; // Kimi eligible (named), so this shows it's still never drawn
   assert.ok(multiModels(env).eligible.includes(KIMI));
   let i = 0;
@@ -197,7 +199,7 @@ test("random draws (the default, rotate and agreed sets) never pick an ineligibl
   assert.deepEqual([...seen].sort(), [OPUS, SONNET, LUNA, ARGON].sort(), "every drawable model comes up");
   MODEL_OUTPUT_LIMITS[KIMI] = null;
   const sets = [[OPUS, LUNA, ARGON], [SONNET, LUNA, ARGON]];
-  const c = await multiCommitment("review-3x2", {}, sets, rand);
+  const c = await multiCommitment("review-3x2", ALL, sets, rand);
   assert.ok(sets.some((s) => canonicalJson(s) === canonicalJson(c.models)));
   assert.equal(c.panel_selection?.mode, "random_set");
 });
@@ -245,21 +247,23 @@ test("the issue cap: the first 10 (2 pieces) or 15 (3 pieces) issues are kept, a
 
 // ---------- answer room and time ----------
 
-test("max_tokens is 12,000 for every reviewer, capped by the model's published limit and by MULTI_PART_MAX_TOKENS", () => {
+test("max_tokens: 12,000 for Claude, 4,000 for Luna, Argon and Flash (cost test), lowered further by MULTI_PART_MAX_TOKENS", () => {
   assert.equal(MULTI_MAX_TOKENS, 12_000);
-  for (const m of [OPUS, LUNA, ARGON]) assert.equal(multiMaxTokens(m), 12_000);
-  assert.equal(multiMaxTokens(LUNA, { MULTI_PART_MAX_TOKENS: `${LUNA}=9000, ${OPUS}=bad` }), 9000);
-  assert.equal(multiMaxTokens(OPUS, { MULTI_PART_MAX_TOKENS: `${LUNA}=9000, ${OPUS}=bad` }), 12_000);
-  assert.equal(multiMaxTokens(LUNA, { MULTI_PART_MAX_TOKENS: `${LUNA}=20000` }), 12_000, "can lower, never raise");
-  for (const bad of [`${LUNA}=5=6`, `${LUNA}=5.5`, `${LUNA}=-5`, `${LUNA}= `, `${LUNA}=1e3`, `${LUNA}`]) assert.equal(multiMaxTokens(LUNA, { MULTI_PART_MAX_TOKENS: bad }), 12_000, `ignored: ${bad}`);
+  for (const m of [OPUS, SONNET]) assert.equal(multiMaxTokens(m), 12_000);
+  for (const m of [LUNA, ARGON, FLASH]) assert.equal(multiMaxTokens(m), 4_000);
+  assert.equal(multiMaxTokens(LUNA, { MULTI_PART_MAX_TOKENS: `${LUNA}=3000, ${OPUS}=bad` }), 3000);
+  assert.equal(multiMaxTokens(OPUS, { MULTI_PART_MAX_TOKENS: `${LUNA}=3000, ${OPUS}=bad` }), 12_000);
+  assert.equal(multiMaxTokens(LUNA, { MULTI_PART_MAX_TOKENS: `${LUNA}=20000` }), 4_000, "can lower, never raise");
+  assert.equal(multiMaxTokens(SONNET, { MULTI_PART_MAX_TOKENS: `${SONNET}=9000` }), 9000);
+  for (const bad of [`${LUNA}=5=6`, `${LUNA}=5.5`, `${LUNA}=-5`, `${LUNA}= `, `${LUNA}=1e3`, `${LUNA}`]) assert.equal(multiMaxTokens(LUNA, { MULTI_PART_MAX_TOKENS: bad }), 4_000, `ignored: ${bad}`);
   const saved = MODEL_OUTPUT_LIMITS[ARGON];
-  MODEL_OUTPUT_LIMITS[ARGON] = 8192;
-  assert.equal(multiMaxTokens(ARGON), 8192, "a lower published limit wins");
+  MODEL_OUTPUT_LIMITS[ARGON] = 2048;
+  assert.equal(multiMaxTokens(ARGON), 2048, "a lower published limit wins");
   MODEL_OUTPUT_LIMITS[ARGON] = saved;
 });
 
 test("before launch: every eligible model has a checked output limit (spec section 1, Answer room)", () => {
-  for (const m of multiModels({}).eligible) assert.equal(typeof MODEL_OUTPUT_LIMITS[m], "number", `${m}: published output limit not recorded`);
+  for (const m of multiModels(ALL).eligible) assert.equal(typeof MODEL_OUTPUT_LIMITS[m], "number", `${m}: published output limit not recorded`);
 });
 
 function stubFetch(handler: (url: string, body: any) => Response | Promise<Response>) {
@@ -275,7 +279,7 @@ function stubFetch(handler: (url: string, body: any) => Response | Promise<Respo
 const anthropicOk = (text: string) => new Response(JSON.stringify({ model: OPUS, content: [{ type: "text", text }], stop_reason: "end_turn" }), { headers: { "content-type": "application/json" } });
 const openrouterOk = (text: string) => new Response(JSON.stringify({ model: LUNA, choices: [{ message: { content: text }, finish_reason: "stop" }] }), { headers: { "content-type": "application/json" } });
 
-test("each reviewer gets the multi-part prompt and 12,000 max_tokens, Claude and OpenRouter alike", async () => {
+test("each reviewer gets the multi-part prompt and its max_tokens (Claude 12,000, Luna 4,000)", async () => {
   const input: MultiInput = { task, pieces: [{ name: "A", text: "one" }, { text: "two" }] };
   const f = stubFetch((url) => (url.includes("anthropic") ? anthropicOk(answer(["[all] x"])) : openrouterOk(answer(["[piece 1] y"]))));
   try {
@@ -285,7 +289,7 @@ test("each reviewer gets the multi-part prompt and 12,000 max_tokens, Claude and
     assert.equal(f.calls[0].body.max_tokens, 12_000);
     assert.equal(f.calls[0].body.system, MULTI_SYSTEM);
     assert.ok(f.calls[0].body.messages[0].content.includes("=====PIECE 1 of 2 abcdabcdabcdabcd=====\nName: A\none"));
-    assert.equal(f.calls[1].body.max_tokens, 12_000);
+    assert.equal(f.calls[1].body.max_tokens, 4_000);
     assert.equal(f.calls[1].body.messages[0].content, MULTI_SYSTEM);
     assert.equal(a.issues_dropped, 0);
     assert.deepEqual(o.issues, ["[piece 1] y"]);
@@ -353,7 +357,7 @@ const PUBLIC_KEY = b64((await crypto.subtle.exportKey("raw", kp.publicKey)) as A
 async function sampleReceipt(tier: "review-3x2" | "review-3x3" = "review-3x3") {
   const n = tier === "review-3x2" ? 2 : 3;
   const input: MultiInput = { task, pieces: [{ name: "Server", text: "漢😀 piece one" }, { text: "piece two" }, { name: "Docs", text: "piece three" }].slice(0, n), title: "Handoff" };
-  const commitment = await multiCommitment(tier, {}, [OPUS, LUNA, ARGON]);
+  const commitment = await multiCommitment(tier, ALL, [OPUS, LUNA, ARGON]);
   const votes = commitment.models.map((model, i) => ({ reviewer: i + 1, model, verdict: (i === 2 ? "pass" : "needs_changes") as any, confidence: "high" as const, issues: i === 2 ? [] : ["[all] x"], reasoning: "r", issues_dropped: i }));
   const payload = await multiReviewPayload({ tier, input, commitment, votes, payer: "0xabc", network: "base", id: "rid", now: new Date("2026-10-28T00:00:00Z") });
   return { input, payload, receipt: await signReceipt(payload as any, SIGNING_KEY, PUBLIC_KEY) };
@@ -380,7 +384,7 @@ test("the receipt: review-multi-v1, task_sha256 kept, output_sha256 replaced by 
   assert.equal(p.result.verdict, "needs_changes");
   assert.equal(await verifyReceipt(receipt, PUBLIC_KEY), true);
   // A vote without the field still gets issues_dropped: 0.
-  const c = await multiCommitment("review-3x2", {}, [OPUS, LUNA, ARGON]);
+  const c = await multiCommitment("review-3x2", ALL, [OPUS, LUNA, ARGON]);
   const p2: any = await multiReviewPayload({ tier: "review-3x2", input: { task, pieces: [piece(3), piece(3)] }, commitment: c, votes: c.models.map((model, i) => ({ reviewer: i + 1, model, verdict: "pass", confidence: "high", issues: [], reasoning: "r" })) as any });
   assert.deepEqual(p2.votes.map((v: any) => v.issues_dropped), [0, 0, 0]);
 });
@@ -468,4 +472,34 @@ test("each provider call is reported with its model, try, time, outcome and toke
     { model: OPUS, try_number: 1, ms: 40_000, outcome: "error", status: 529 },
     { model: OPUS, try_number: 2, ms: 40_000, outcome: "answered", status: 200, input_tokens: 9000, output_tokens: 650 },
   ]);
+});
+
+// ---------- the live cost test's decisions (Oct 28, spec 4.3, option B) ----------
+
+test("by default Opus is left out of these tiers (worst-case cost), Sonnet reviews for Anthropic; MULTI_PART_EXCLUDE can bring it back", async () => {
+  const m = multiModels({});
+  assert.ok(!m.eligible.includes(OPUS) && !m.drawable.includes(OPUS));
+  assert.ok(m.drawable.includes(SONNET));
+  assert.deepEqual(m.missing, []);
+  await assert.rejects(multiCommitment("review-3x3", {}, [OPUS, LUNA, ARGON]), /Not eligible.*taken off these tiers/);
+  for (let i = 0; i < 50; i++) assert.ok(!(await multiCommitment("review-3x3", {})).models.includes(OPUS));
+  assert.ok(multiModels(ALL).eligible.includes(OPUS), 'MULTI_PART_EXCLUDE="" allows Opus again');
+});
+
+/** Per million tokens, input / output, as checked Oct 28 (see research/checks/multi-part-live-2026-10-28/COST-AND-SPEED.md). */
+const PRICE_PER_M: Record<string, [number, number]> = { [OPUS]: [4, 20], [SONNET]: [2, 10], [LUNA]: [0.1, 0.5], [ARGON]: [2, 10], [FLASH]: [0.75, 3.75] };
+
+test("worst case stays under the price: every reviewer at full max_tokens on both tries, full-size CJK input (1 token per character)", () => {
+  for (const [tier, chars, price] of [["review-3x3", 36_000, 0.7], ["review-3x2", 24_000, 0.6]] as const) {
+    const inputTokens = chars + 4_000 + 2_500; // pieces + task + instructions, at 1 token per character
+    const { drawable, eligible } = multiModels({});
+    const byCompany = new Map<string, string[]>();
+    for (const x of eligible) byCompany.set(companyOf(x), [...(byCompany.get(companyOf(x)) ?? []), x]);
+    let worst = 0;
+    for (const ms of byCompany.values()) {
+      worst += Math.max(...ms.map((x) => 2 * (inputTokens * PRICE_PER_M[x][0] + multiMaxTokens(x) * PRICE_PER_M[x][1]) / 1e6));
+    }
+    assert.ok(drawable.length >= 3);
+    assert.ok(worst < price, `${tier}: worst case $${worst.toFixed(3)} is not under $${price}`);
+  }
 });
