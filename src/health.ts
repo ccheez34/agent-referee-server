@@ -3,7 +3,7 @@
 // Only rare things are written here, so it never becomes a hot spot: pause state is cached per isolate for 15 s.
 import type { DOState, Env } from "./types.ts";
 
-export type HealthEventKind = "settle_failure" | "facilitator_problem" | "credit_problem" | "ledger_error" | "provider_errors" | "out_of_tokens";
+export type HealthEventKind = "settle_failure" | "facilitator_problem" | "credit_problem" | "ledger_error" | "provider_errors" | "out_of_tokens" | "credit_pack_alert";
 export type HealthEvent = { kind: HealthEventKind; at: number; detail: string };
 /** A wallet whose payment failed to settle after the work was delivered: what it owes, its strikes, and whether it's banned. */
 export type WalletRecord = { owed_micro: number; strikes: number[]; permanent: boolean; history: { at: number; what: string; micro: number; detail: string }[] };
@@ -38,7 +38,7 @@ export class Health {
       return json(200, { paid: false, reviews: false, ...((await st.get<Pause>("pause")) ?? {}) });
     }
     if (action === "event") {
-      const kinds: HealthEventKind[] = ["settle_failure", "facilitator_problem", "credit_problem", "ledger_error", "provider_errors", "out_of_tokens"];
+      const kinds: HealthEventKind[] = ["settle_failure", "facilitator_problem", "credit_problem", "ledger_error", "provider_errors", "out_of_tokens", "credit_pack_alert"];
       if (!kinds.includes(body?.kind)) return json(400, { error: "Unknown event kind." });
       const events = (await st.get<HealthEvent[]>("events")) ?? [];
       events.push({ kind: body.kind, at: this.now(), detail: String(body.detail ?? "").slice(0, 300) });
@@ -228,6 +228,10 @@ export function evaluateHealth(input: { gates: Record<string, any>; events: Heal
   if (recent.some((e) => e.kind === "provider_errors")) warnings.push("provider_errors");
   // An AI answer was cut off at its token limit: worth raising that model's limit (GET /admin/stats has the details).
   if (input.events.some((e) => e.kind === "out_of_tokens" && now - e.at < 24 * 3_600_000)) warnings.push("out_of_tokens");
+  // Credit packs (switched off until the lawyer): a payment held for a check by hand, a balance pushed past its cap, a
+  // refund that found the credits already spent, a dispute, an early fraud warning, or a webhook that keeps failing.
+  // Each needs the operator, not a pause, so it's a warning for a day (the details are in the event).
+  if (input.events.some((e) => e.kind === "credit_pack_alert" && now - e.at < 24 * 3_600_000)) warnings.push("credit_pack_alert");
   // A paid match that couldn't be judged is waiting for a refund: that needs the operator, so it alerts.
   if ((input.unjudgedOpen ?? 0) > 0) reasons.push(`unjudged_to_refund:${input.unjudgedOpen}`);
   return { degraded: reasons.length > 0, reasons: [...new Set(reasons)], warnings };

@@ -28,6 +28,9 @@ import {
   MULTI_JUDGE_BUDGET_MS, MULTI_JUDGE_CALL_TIMEOUT_MS, MULTI_JUDGE_DEFAULT_PRICES, MULTI_JUDGE_FORMAT_VERSION, MULTI_JUDGE_LIMITS, MULTI_JUDGE_MESSAGE_FORMAT, MULTI_JUDGE_PIECES,
   MULTI_JUDGE_RECEIPT_FORMAT, MULTI_JUDGE_SYSTEM, MULTI_JUDGE_TIMEOUT_MS, MULTI_JUDGE_TIERS, isMultiJudgeTier, multiJudgePromptSha,
 } from "./multijudge.ts";
+import { creditsConfig, MICRO_PER_USD } from "./credits-ledger.ts";
+import { StripeCallError, checkoutSessionIdOk, stripeCall, stripeKeyKind, verifyStripeSignature } from "./stripe.ts";
+import { NO_STORE, PAGE_HEADERS, buyPage, donePage, keyPage, messagePage, usdFromMicro, type DoneState } from "./credits-pages.ts";
 
 export { MatchRoom, Ledger, Gate, Health };
 
@@ -43,7 +46,9 @@ const CORS = {
   "access-control-expose-headers": "x-payment-response, retry-after",
   "access-control-max-age": "86400",
 };
-const corsFor = (path: string) => !path.startsWith("/admin") && !path.startsWith("/internal") && !path.startsWith("/team");
+// Credit packs (/credits/*) get none either: the key is a bearer secret for agents, the pages are same-origin, and
+// Stripe's servers call the webhook.
+const corsFor = (path: string) => !path.startsWith("/admin") && !path.startsWith("/internal") && !path.startsWith("/team") && !path.startsWith("/credits");
 app.use("*", async (c, next) => {
   if (!corsFor(c.req.path)) return next();
   if (c.req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
@@ -393,6 +398,7 @@ const paidRoute = async (c: any, next: any) => {
 async function reviewGuard(c: any, next: any) {
   const tier: ReviewTier = routePath(c) === "/review-3" ? "review-3" : "review";
   const team = c.get("team") as TeamCaller | undefined;
+  const credits = c.get("credits") as CreditsCaller | undefined;
   const t0 = Date.now();
   if (await paidPausedNow(c.env)) return err(503, PAUSED_MSG);
   if (await reviewsPausedNow(c.env)) return err(503, REVIEWS_PAUSED_MSG);
@@ -406,7 +412,7 @@ async function reviewGuard(c: any, next: any) {
     return err(400, `${String(e?.message ?? e)} Nothing was charged.`);
   }
   if (missingReviewKey(c.env, commitment.models)) return err(503, "Sealed review is temporarily unavailable. Nothing was charged.");
-  const paying = c.env.PAYMENTS_ENABLED === "false" || !!c.req.header("x-payment") || !!team;
+  const paying = c.env.PAYMENTS_ENABLED === "false" || !!c.req.header("x-payment") || !!team || !!credits;
   // Counted once per paid review (the call carrying the payment), not again for the unpaid first call.
   const region = regionCheck(c, commitment.models, "Nothing was charged.", paying);
   if (region) return region;
@@ -418,13 +424,14 @@ async function reviewGuard(c: any, next: any) {
     return next();
   }
   // A failed review isn't charged, so failed reviews are capped per address per day: nobody gets free AI calls in bulk.
-  const caller = team ? `team:${team.member}` : await callerHash(c);
+  // Team and credits callers are counted by member and by account.
+  const caller = team ? `team:${team.member}` : credits ? `credits:${credits.account_id}` : await callerHash(c);
   const failLimit = Number(c.env.REVIEW_FAIL_LIMIT || 10);
   // Only a payment that at least claims to pay us the right amount takes slots before verification; anything else
   // goes straight to the paywall (which refuses it), and if the facilitator accepts it anyway the handler takes its
   // slots then. So fake payment headers can't fill the gates.
   const price = priceMicro(reviewPrices(c.env)[tier]);
-  const plausible = c.env.PAYMENTS_ENABLED === "false" || !!team || plausiblePayment(c.req.header("x-payment"), { payTo: c.env.PAY_TO, network: c.env.NETWORK, minMicro: price });
+  const plausible = c.env.PAYMENTS_ENABLED === "false" || !!team || !!credits || plausiblePayment(c.req.header("x-payment"), { payTo: c.env.PAY_TO, network: c.env.NETWORK, minMicro: price });
   if (!plausible) {
     c.set("review", { tier, input: v.value, commitment, t0, caller, failLimit });
     return next();
@@ -504,6 +511,7 @@ const busyWhat = (reason: string) =>
 async function multiGuard(c: any, next: any) {
   const tier: MultiTier = routePath(c) === "/review-3x2" ? "review-3x2" : "review-3x3";
   const team = c.get("team") as TeamCaller | undefined;
+  const credits = c.get("credits") as CreditsCaller | undefined;
   const weight = MULTI_PIECES[tier];
   const t0 = Date.now();
   if (await paidPausedNow(c.env)) return err(503, PAUSED_MSG);
@@ -521,7 +529,7 @@ async function multiGuard(c: any, next: any) {
     return err(400, `${String(e?.message ?? e)} Nothing was charged.`);
   }
   if (missingReviewKey(c.env, commitment.models)) return err(503, "Sealed review is temporarily unavailable. Nothing was charged.");
-  const paying = c.env.PAYMENTS_ENABLED === "false" || !!c.req.header("x-payment") || !!team;
+  const paying = c.env.PAYMENTS_ENABLED === "false" || !!c.req.header("x-payment") || !!team || !!credits;
   const region = regionCheck(c, commitment.models, "Nothing was charged.", paying);
   if (region) return region;
   if (!paying) {
@@ -530,10 +538,10 @@ async function multiGuard(c: any, next: any) {
     c.set("review", { tier, input: v.value, commitment, t0 });
     return next();
   }
-  const caller = team ? `team:${team.member}` : await callerHash(c);
+  const caller = team ? `team:${team.member}` : credits ? `credits:${credits.account_id}` : await callerHash(c);
   const failLimit = Number(c.env.REVIEW_FAIL_LIMIT || 10);
   const price = priceMicro(multiPrices(c.env)[tier]);
-  const plausible = c.env.PAYMENTS_ENABLED === "false" || !!team || plausiblePayment(c.req.header("x-payment"), { payTo: c.env.PAY_TO, network: c.env.NETWORK, minMicro: price });
+  const plausible = c.env.PAYMENTS_ENABLED === "false" || !!team || !!credits || plausiblePayment(c.req.header("x-payment"), { payTo: c.env.PAY_TO, network: c.env.NETWORK, minMicro: price });
   if (!plausible) {
     c.set("review", { tier, input: v.value, commitment, t0, caller, failLimit });
     return next();
@@ -600,6 +608,11 @@ app.use("/team/review", teamAuth, reviewGuard, teamBudget);
 app.use("/team/review-3", teamAuth, reviewGuard, teamBudget);
 app.use("/team/review-3x2", teamAuth, multiGuard, teamBudget);
 app.use("/team/review-3x3", teamAuth, multiGuard, teamBudget);
+// Credit packs (see "credit packs" below): the same checks, paid from a prepaid balance with a credits key.
+app.use("/credits/review", creditsAuth, reviewGuard, creditsBudget);
+app.use("/credits/review-3", creditsAuth, reviewGuard, creditsBudget);
+app.use("/credits/review-3x2", creditsAuth, multiGuard, creditsBudget);
+app.use("/credits/review-3x3", creditsAuth, multiGuard, creditsBudget);
 
 function room(env: Env, id: string) {
   return env.MATCHES.get(env.MATCHES.idFromName(id));
@@ -783,6 +796,9 @@ app.get("/health", async (c) => {
   const reviewsPaused = env.REVIEWS_PAUSED === "true" || pause.reviews;
   const ok = signing && records !== "error";
   const allJudges = Object.values(judges).every((v) => v === "ok");
+  // Credit packs: off, test, live, or misconfigured (a live Stripe key without CREDITS_LIVE, or the reverse).
+  const credits = creditsConfig(env);
+  if (credits.mode === "misconfigured") verdict.warnings.push("credits_misconfigured");
   const status = !ok ? "down" : verdict.degraded || !allJudges ? "degraded" : paused || reviewsPaused ? "paused" : "ok";
   const body = {
     ok,
@@ -795,6 +811,7 @@ app.get("/health", async (c) => {
       payments: env.PAYMENTS_ENABLED === "false" ? "off" : paused ? "paused" : "on",
       reviews: reviewsPaused || paused ? "paused" : "on",
       judges,
+      credits: credits.mode,
       providers: Object.fromEntries(
         Object.entries(gates).map(([p, g]: [string, any]) => [p, g?.error ? "unreachable" : g?.tripped ? "capped" : g?.full ? "full" : g?.throttled_until ? "throttled" : "ok"]),
       ),
@@ -1082,7 +1099,7 @@ async function handleReview(c: any, tier: ReviewTier) {
   let settled: PromiseSettledResult<any>[];
   try {
     // What's left of the reviewers' budget, never past the payment authorization's own deadline.
-    const budgetMs = reviewBudget({ budgetMs: REVIEWER_BUDGET_MS, elapsedMs: started - g.t0, header: c.get("team") ? undefined : c.req.header("x-payment") });
+    const budgetMs = reviewBudget({ budgetMs: REVIEWER_BUDGET_MS, elapsedMs: started - g.t0, header: fundedBy(c) ? undefined : c.req.header("x-payment") });
     if (budgetMs === null) {
       // Give the in-flight reservation back here: on the late-admission path it was taken in this handler, and the
       // guard (which only wraps the normal path) never sees it. Found by Claude 5.0's code check, Oct 28.
@@ -1110,22 +1127,24 @@ async function handleReview(c: any, tier: ReviewTier) {
       return busy(600, "the AI provider's account limit was reached; reviews resume when it's lifted.");
     }
     await record("record");
-    if (!c.get("team")) stat(c, "paid_failed"); // team reviews are counted as team_<member>_* instead
+    if (!fundedBy(c)) stat(c, "paid_failed"); // team and credits reviews are counted as team_<member>_* and credits_* instead
     return err(502, `A reviewer didn't return a usable verdict (${msg.slice(0, 200)}). Nothing was charged; try again.`);
   }
   const votes = settled.map((r) => (r as PromiseFulfilledResult<any>).value);
   console.log(`review ${tier} ok in ${Date.now() - started}ms: ${votes.map((v) => `${v.model}=${v.verdict}`).join(" ")}`);
   await record("record_ok");
-  if (!c.get("team")) stat(c, `paid_ok_${tier.replace("-", "")}`);
+  const funded = fundedBy(c);
+  if (!funded) stat(c, `paid_ok_${tier.replace("-", "")}`);
   const payload = await reviewPayload({
     tier,
     input,
     commitment,
     votes,
-    payer: c.get("team") ? undefined : payerFromPaymentHeader(c.req.header("x-payment")),
-    network: c.env.NETWORK,
+    // A team or credits review has no payer (an x-payment header sent along is ignored) and credits receipts no network.
+    payer: funded ? undefined : payerFromPaymentHeader(c.req.header("x-payment")),
+    network: funded === "credits" ? undefined : c.env.NETWORK,
     id: randomToken(12),
-    ...(c.get("team") ? { funding: "team" as const } : {}),
+    ...(funded ? { funding: funded } : {}),
   });
   const receipt = await signReceipt(payload, c.env.SIGNING_KEY, c.env.PUBLIC_KEY);
   return c.json({
@@ -1186,7 +1205,7 @@ async function handleMultiReview(c: any, tier: MultiTier) {
   async function runMulti() {
     let settled: PromiseSettledResult<any>[];
     try {
-      const budgetMs = reviewBudget({ budgetMs: MULTI_BUDGET_MS, elapsedMs: started - st.t0, header: c.get("team") ? undefined : c.req.header("x-payment") });
+      const budgetMs = reviewBudget({ budgetMs: MULTI_BUDGET_MS, elapsedMs: started - st.t0, header: fundedBy(c) ? undefined : c.req.header("x-payment") });
       if (budgetMs === null) return busy(10, "not enough time was left in this payment's window for a full review.");
       const fake = fakeAiConfig(c.env, { mix: c.req.header("x-test-fake-mix"), delay: c.req.header("x-test-fake-delay") });
       const keys = { ANTHROPIC_API_KEY: c.env.ANTHROPIC_API_KEY, OPENROUTER_API_KEY: c.env.OPENROUTER_API_KEY, fake };
@@ -1223,7 +1242,7 @@ async function handleMultiReview(c: any, tier: MultiTier) {
         return busy(600, "the AI provider's account limit was reached; reviews resume when it's lifted.");
       }
       await record("record");
-      if (!c.get("team")) {
+      if (!fundedBy(c)) {
         stat(c, "paid_failed");
         stat(c, `paid_failed_${tier.replace("-", "")}`);
       }
@@ -1235,8 +1254,9 @@ async function handleMultiReview(c: any, tier: MultiTier) {
     const votes = settled.map((r) => (r as PromiseFulfilledResult<any>).value);
     console.log(`review ${tier} ok in ${Date.now() - started}ms: ${votes.map((v) => `${v.model}=${v.verdict}${v.issues_dropped ? ` (dropped ${v.issues_dropped})` : ""}`).join(" ")}`);
     await record("record_ok");
-    if (!c.get("team")) stat(c, `paid_ok_${tier.replace("-", "")}`);
-    const payload = await multiReviewPayload({ tier, input, commitment, votes, payer: c.get("team") ? undefined : payerFromPaymentHeader(c.req.header("x-payment")), network: c.env.NETWORK, id: randomToken(12), ...(c.get("team") ? { funding: "team" as const } : {}) });
+    const funded = fundedBy(c);
+    if (!funded) stat(c, `paid_ok_${tier.replace("-", "")}`);
+    const payload = await multiReviewPayload({ tier, input, commitment, votes, payer: funded ? undefined : payerFromPaymentHeader(c.req.header("x-payment")), network: funded === "credits" ? undefined : c.env.NETWORK, id: randomToken(12), ...(funded ? { funding: funded } : {}) });
     const receipt = await signReceipt(payload, c.env.SIGNING_KEY, c.env.PUBLIC_KEY);
     return c.json({
       review_id: payload.review_id,
@@ -1256,6 +1276,10 @@ app.post("/team/review", (c) => handleReview(c, "review"));
 app.post("/team/review-3", (c) => handleReview(c, "review-3"));
 app.post("/team/review-3x2", (c) => handleMultiReview(c, "review-3x2"));
 app.post("/team/review-3x3", (c) => handleMultiReview(c, "review-3x3"));
+app.post("/credits/review", (c) => handleReview(c, "review"));
+app.post("/credits/review-3", (c) => handleReview(c, "review-3"));
+app.post("/credits/review-3x2", (c) => handleMultiReview(c, "review-3x2"));
+app.post("/credits/review-3x3", (c) => handleMultiReview(c, "review-3x3"));
 app.get("/team/allowance", teamAuth, async (c) => {
   const cfg = teamConfig(c.env);
   const team = c.get("team") as TeamCaller;
@@ -1347,8 +1371,11 @@ async function sameToken(want: string | undefined, got: string | undefined): Pro
   return diff === 0;
 }
 
-/** The route without the /team prefix, so the review guards pick the same tier for both. */
-const routePath = (c: any): string => String(c.req.path).replace(/^\/team(?=\/)/, "");
+/** The route without the /team or /credits prefix, so the review guards pick the same tier for all three. */
+const routePath = (c: any): string => String(c.req.path).replace(/^\/(team|credits)(?=\/)/, "");
+
+/** Who pays for this review when it isn't x402: the team allowance or a credit pack. */
+const fundedBy = (c: any): "team" | "credits" | undefined => (c.get("team") ? "team" : c.get("credits") ? "credits" : undefined);
 
 async function teamAuth(c: any, next: any) {
   if (!c.env.TEAM_TOKEN) return err(404, "Not found. GET / for how to use this service.");
@@ -1439,6 +1466,633 @@ async function teamBudget(c: any, next: any) {
     c.res = new Response(JSON.stringify({ ...body, team: teamView(cfg, team.member, q.member_spent_micro, q.team_spent_micro, q.group_spent_micro) }), { status, headers });
   }
 }
+
+// ---------- credit packs (card payments through Stripe; switched off until the lawyer and ccheez34 say yes) ----------
+// Spec v2: research\specs\credit-packs\credit-packs-spec.md. A developer buys a pack on Stripe's hosted Checkout page;
+// the balance lives in the one "credits" Ledger object (credits-ledger.ts), in micro-USD at list price, and the agent
+// spends it with a credits key, the way team members use the team allowance. Closed loop: spent only here, no cash-out.
+// - CREDITS_ENABLED=true turns on buying and spending; without it those routes answer 404 (as for TEAM_TOKEN unset),
+//   except to the operator's x-operator-token, for tests.
+// - STRIPE_SECRET_KEY is needed for buying only (a restricted test key, rk_test_, is preferred). A live key without
+//   CREDITS_LIVE, or the reverse, answers 503 and /health says credits: misconfigured.
+// - STRIPE_WEBHOOK_SECRET turns on the webhook, the only path that adds credits. It stays live while CREDITS_ENABLED is
+//   off, so refunds and disputes after a switch-off still freeze and debit.
+// - Receipts say "funding": "credits", with no payer, no network and no account id.
+// Stripe is called with fetch and its signatures checked with WebCrypto (stripe.ts): no stripe-node (CR1).
+
+type CreditsCaller = { account_id: string; key_hash: string };
+
+const CREDITS_KEY_RE = /^arc_[A-Za-z0-9_-]{43}$/;
+const CLAIM_CODE_RE = /^arcc_[A-Za-z0-9_-]{24}$/;
+const NONCE_COOKIE = "ar_credits_nonce";
+const NOT_FOUND_TEXT = "Not found. GET / for how to use this service.";
+const CREDITS_DOWN = "Credits can't be checked right now. Nothing was used; try again in a minute.";
+const CREDITS_CONTACT = "hello@agentreferee.ai";
+
+function randomB64url(n: number): string {
+  const b = new Uint8Array(n);
+  crypto.getRandomValues(b);
+  return btoa(String.fromCharCode(...b)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+/** A new credits key: 32 random bytes, base64url. Only its SHA-256 is ever stored; the key is shown once. */
+const newCreditsKey = () => `arc_${randomB64url(32)}`;
+/** A one-time claim code for a lost key: 18 random bytes, valid 24 hours. Only its SHA-256 is stored. */
+const newClaimCode = () => `arcc_${randomB64url(18)}`;
+
+/** Buying and spending are on (CREDITS_ENABLED=true), or the operator is testing with x-operator-token. */
+async function creditsOn(c: any): Promise<boolean> {
+  return creditsConfig(c.env).enabled || (await isOperator(c));
+}
+
+/** The key, from x-credits-key or "Authorization: Bearer arc_…". */
+function creditsKeyOf(c: any): string | undefined {
+  const h = c.req.header("x-credits-key")?.trim();
+  if (h) return h;
+  const auth = c.req.header("authorization") ?? "";
+  return /^Bearer\s+arc_/i.test(auth) ? auth.replace(/^Bearer\s+/i, "").trim() : undefined;
+}
+
+/** The one "credits" Ledger object. Never through ledgerJson: ledgerShardName("credits") would hash it to shard-12, the
+ * wrong object. The same timeout and fail-closed behaviour: throws on any error, timeout (ledgerTimeout: true), 5xx or
+ * unreadable answer; `answers` lists the 4xx statuses that are answers, not failures. */
+async function creditsJson(env: Env, action: string, body: unknown, answers: number[] = []): Promise<any> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const limitMs = Math.min(10_000, Number(env.LEDGER_TIMEOUT_MS) > 0 ? Number(env.LEDGER_TIMEOUT_MS) : 10_000);
+  try {
+    const stub = env.LEDGER!.get(env.LEDGER!.idFromName("credits"));
+    const res = await Promise.race([
+      stub.fetch(`https://ledger/${action}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }),
+      new Promise<never>((_, rej) => (timer = setTimeout(() => rej(Object.assign(new Error("credits ledger timed out"), { ledgerTimeout: true })), limitMs))),
+    ]);
+    if (!res.ok && !answers.includes(res.status)) throw new Error(`credits ledger answered ${res.status}`);
+    const data: any = await res.json();
+    if (!data || typeof data !== "object") throw new Error("credits ledger answer unreadable");
+    return { ...data, __status: res.status };
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+/** What an agent sees about its balance next to a review (never the account id: the answer carries a shareable receipt). */
+const creditsSpendView = (balanceMicro: number, chargedMicro?: number) => ({
+  funding: "credits",
+  ...(chargedMicro !== undefined ? { charged: usdFromMicro(chargedMicro) } : {}),
+  balance: usdFromMicro(balanceMicro),
+  balance_micro: balanceMicro,
+});
+
+/** A browser form (or a page request) gets pages; an agent gets JSON. */
+function wantsPage(c: any): boolean {
+  const ct = c.req.header("content-type") ?? "";
+  return ct.includes("application/x-www-form-urlencoded") || ct.includes("multipart/form-data") || wantsHtml(c.req.header("accept"), undefined);
+}
+async function creditsBody(c: any): Promise<Record<string, unknown>> {
+  const ct = c.req.header("content-type") ?? "";
+  if (ct.includes("application/x-www-form-urlencoded") || ct.includes("multipart/form-data")) return ((await c.req.parseBody().catch(() => ({}))) ?? {}) as Record<string, unknown>;
+  const j = await c.req.json().catch(() => null);
+  return j && typeof j === "object" ? j : {};
+}
+const creditsPage = (status: number, html: string, extra: Record<string, string> = {}) => new Response(html, { status, headers: { ...PAGE_HEADERS, ...extra } });
+const jsonNoStore = (status: number, body: unknown, extra: Record<string, string> = {}) =>
+  new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...NO_STORE, ...extra } });
+/** A refusal: a page for a browser form, JSON for an agent. */
+const creditsRefusal = (c: any, status: number, title: string, text: string) => (wantsPage(c) ? creditsPage(status, messagePage(title, text)) : jsonNoStore(status, { error: text }));
+
+function cookieOf(c: any, name: string): string | undefined {
+  for (const part of String(c.req.header("cookie") ?? "").split(";")) {
+    const i = part.indexOf("=");
+    if (i > 0 && part.slice(0, i).trim() === name) return part.slice(i + 1).trim();
+  }
+  return undefined;
+}
+
+/** Only the Checkout Session fields the ledger checks (spec §5.2). */
+function sessionFields(s: any) {
+  if (!s || typeof s !== "object") return null;
+  const m = s.metadata && typeof s.metadata === "object" ? s.metadata : {};
+  return {
+    id: s.id,
+    object: s.object,
+    status: s.status,
+    mode: s.mode,
+    payment_status: s.payment_status,
+    currency: s.currency,
+    amount_subtotal: s.amount_subtotal,
+    livemode: s.livemode,
+    payment_intent: typeof s.payment_intent === "string" ? s.payment_intent : (s.payment_intent?.id ?? null),
+    metadata: { pack: m.pack, account_id: m.account_id, pending_id: m.pending_id, nonce_hash: m.nonce_hash },
+  };
+}
+
+/** Something the operator should look at (a held payment, a balance past its cap, a shortfall, a dispute, a fraud
+ * warning, a webhook Stripe has to retry): logged, and a warning in /health for a day. */
+const creditsAlert = (c: any, what: string) => recordEvent(c.env, "credit_pack_alert", what);
+
+const creditsPrices = (env: Env): Record<string, string> => ({ ...reviewPrices(env), ...multiPrices(env) });
+
+/** Spending and the balance: the switch, the key (x-credits-key or Bearer), and the account it belongs to. A frozen
+ * account can read its balance but not spend. */
+async function creditsAuth(c: any, next: any) {
+  if (!(await creditsOn(c))) return err(404, NOT_FOUND_TEXT);
+  const cfg = creditsConfig(c.env);
+  if (cfg.mode === "misconfigured") {
+    console.error(JSON.stringify({ credits: "misconfigured", problem: cfg.problem }));
+    return err(503, "Credits are temporarily unavailable. Nothing was used.");
+  }
+  const want = c.req.path === "/credits/account" ? "GET" : "POST";
+  if (c.req.method !== want) return err(405, `Use ${want}.`);
+  if (!c.env.LEDGER) return err(503, CREDITS_DOWN);
+  const key = creditsKeyOf(c);
+  if (!key) return err(401, "No credits key arrived: send it as x-credits-key (or Authorization: Bearer). Nothing was used.");
+  if (!CREDITS_KEY_RE.test(key)) return err(401, "That isn't a credits key (keys start with arc_). Nothing was used.");
+  const keyHash = await sha256Hex(key);
+  let a: any;
+  try {
+    a = await creditsJson(c.env, "credits-auth", { key_hash: keyHash }, [401]);
+  } catch (e: any) {
+    await recordEvent(c.env, "ledger_error", `credits-auth: ${String(e?.message ?? e)}`);
+    return err(503, CREDITS_DOWN);
+  }
+  if (a.__status === 401) return err(401, "Unknown credits key, or it was replaced. Nothing was used.");
+  if (a.frozen && want === "POST") return jsonNoStore(403, { error: `This credits account is frozen. Nothing was used. Contact ${CREDITS_CONTACT}.`, credits: creditsSpendView(a.balance_micro) });
+  c.set("credits", { account_id: a.account_id, key_hash: keyHash } as CreditsCaller);
+  return next();
+}
+
+/**
+ * After the review guard (input checked, panel drawn, slots taken) and before the review runs: hold the price under a
+ * token this Worker makes (spec §3). Delivered (status < 400): commit. Anything else (a status of 400 or more, a throw,
+ * a ledger timeout): release by token, which leaves a tombstone if the reserve hasn't arrived yet. The ledger's alarm
+ * releases any hold older than 10 minutes, so a lost commit or release can't keep a buyer's money.
+ */
+async function creditsBudget(c: any, next: any) {
+  const cr = c.get("credits") as CreditsCaller;
+  const g = c.get("review") as { tier: string } | undefined;
+  if (!g || !c.env.LEDGER) return err(503, "Sealed review is temporarily unavailable. Nothing was used.");
+  const cost = priceMicro(creditsPrices(c.env)[g.tier]);
+  const token = randomToken(16);
+  const release = async (why: string) => {
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        await creditsJson(c.env, "credits-release", { token, why });
+        return;
+      } catch (e: any) {
+        if (attempt === 2) await recordEvent(c.env, "ledger_error", `credits release (${why}): ${String(e?.message ?? e)}`);
+      }
+    }
+  };
+  let q: any;
+  try {
+    q = await creditsJson(c.env, "credits-reserve", { account_id: cr.account_id, key_hash: cr.key_hash, amount_micro: cost, token }, [401, 403, 409, 429]);
+  } catch (e: any) {
+    // The reserve may have reached the ledger: release by token, so nothing stays held (a tombstone if it hasn't).
+    await release(e?.ledgerTimeout ? "timeout" : "error");
+    await recordEvent(c.env, "ledger_error", `credits-reserve: ${String(e?.message ?? e)}`);
+    return err(503, CREDITS_DOWN);
+  }
+  if (q.__status === 429) {
+    // 429, not 402: x402 clients read a 402 as a request for payment.
+    stat(c, "credits_refused");
+    return jsonNoStore(429, { error: `Not enough credits: this ${g.tier} costs ${usdFromMicro(cost)} and the balance is ${usdFromMicro(q.balance_micro)}. Nothing was used. Top up at ${new URL(c.req.url).origin}/credits.`, credits: creditsSpendView(q.balance_micro) });
+  }
+  if (q.__status === 403) return jsonNoStore(403, { error: `This credits account is frozen. Nothing was used. Contact ${CREDITS_CONTACT}.` });
+  if (q.__status === 401) return err(401, "Unknown credits key, or it was replaced. Nothing was used.");
+  // Fail closed: nothing held means the review doesn't run. (409: a token already used; it never happens with a fresh one.)
+  if (q.__status !== 200 || q.ok !== true) return err(503, CREDITS_DOWN);
+  try {
+    await next();
+  } catch (e) {
+    // Anything thrown past Hono's error handling: the review didn't finish, so nothing is used.
+    await release("threw");
+    stat(c, "credits_failed");
+    throw e;
+  }
+  const status = c.res?.status ?? 500;
+  if (status >= 400) {
+    await release("failed");
+    stat(c, "credits_failed");
+    return;
+  }
+  const body: any = await c.res.clone().json().catch(() => null);
+  let committed: any = null;
+  for (let attempt = 1; attempt <= 2 && !committed; attempt++) {
+    try {
+      committed = await creditsJson(c.env, "credits-commit", { token, ...(typeof body?.review_id === "string" ? { review_id: body.review_id } : {}) });
+    } catch (e: any) {
+      // Not recorded: the alarm gives the hold back within 10 minutes, so this review ends up free. Never charged twice.
+      if (attempt === 2) await recordEvent(c.env, "ledger_error", `credits commit: ${String(e?.message ?? e)}`);
+    }
+  }
+  stat(c, `credits_ok_${g.tier.replace("-", "")}`);
+  if (body && typeof body === "object") {
+    const headers = new Headers(c.res.headers);
+    headers.delete("content-length");
+    headers.set("content-type", "application/json");
+    c.res = undefined; // so Hono doesn't merge the old response's headers in again
+    c.res = new Response(JSON.stringify({ ...body, credits: creditsSpendView(typeof committed?.balance_micro === "number" ? committed.balance_micro : q.balance_micro, cost) }), { status, headers });
+  }
+}
+
+app.get("/credits/account", creditsAuth, async (c) => {
+  const cr = c.get("credits") as CreditsCaller;
+  let v: any;
+  try {
+    v = await creditsJson(c.env, "credits-view", { key_hash: cr.key_hash }, [401]);
+  } catch {
+    return err(503, CREDITS_DOWN);
+  }
+  if (v.__status === 401) return err(401, "Unknown credits key, or it was replaced.");
+  return jsonNoStore(200, {
+    credits: {
+      account_id: v.account_id,
+      balance: usdFromMicro(v.balance_micro),
+      balance_micro: v.balance_micro,
+      held: usdFromMicro(v.held_micro),
+      frozen: v.frozen,
+      total_bought: usdFromMicro(v.total_bought_micro),
+      total_spent: usdFromMicro(v.total_spent_micro),
+      created_at: v.created_at,
+      purchases: (v.purchases ?? []).map((p: any) => ({ pack: p.pack, credits: usdFromMicro(p.credits_micro), at: p.fulfilled_at, status: p.status, ...(p.refunded_cents ? { refunded: usdFromMicro(p.refunded_cents * 10_000) } : {}) })),
+    },
+    prices: creditsPrices(c.env),
+    note: `Spend with POST /credits/review (or review-3, review-3x2, review-3x3) and this key as x-credits-key. Questions: ${CREDITS_CONTACT}.`,
+  });
+});
+
+/** Buying: needs the switch (or the operator's token) and a Stripe key; otherwise 404. A misconfigured key: 503. */
+async function creditsBuyGate(c: any, next: any) {
+  if (!(await creditsOn(c)) || stripeKeyKind(c.env.STRIPE_SECRET_KEY) === "none" || !c.env.LEDGER) return err(404, NOT_FOUND_TEXT);
+  if (creditsConfig(c.env).mode === "misconfigured") return err(503, "Buying credits is temporarily unavailable. Nothing was charged.");
+  return next();
+}
+for (const p of ["/credits", "/credits/checkout", "/credits/done", "/credits/done/reveal", "/credits/claim"]) app.use(p, creditsBuyGate);
+
+app.get("/credits", (c) => {
+  const cfg = creditsConfig(c.env);
+  const packs = [...cfg.packs.entries()];
+  if (wantsHtml(c.req.header("accept"), c.req.query("format")))
+    return creditsPage(200, buyPage({ packs, test: !cfg.live, prices: creditsPrices(c.env), base: new URL(c.req.url).origin, maxBalanceMicro: cfg.maxBalanceMicro, maxDailyMicro: cfg.maxDailyMicro }));
+  return jsonNoStore(200, {
+    credits: "Prepaid credits for Agent Referee's sealed reviews, bought by card through Stripe and spent with a credits key.",
+    mode: cfg.mode,
+    packs: packs.map(([pack, cents]) => ({ pack, price: usdFromMicro(cents * 10_000), credits: usdFromMicro(cents * 10_000) })),
+    buy: 'Open this page in a browser to buy: a new account\'s key is shown once, in the browser that paid. POST /credits/checkout {"pack": "small"} answers {url}; with x-credits-key it tops up that account.',
+    spend: Object.fromEntries(Object.entries(creditsPrices(c.env)).map(([tier, price]) => [`POST /credits/${tier}`, price])),
+    balance: "GET /credits/account with x-credits-key",
+    rules: [
+      "$1 buys $1 of credits at list price: no bonus credits, no fees, no expiry.",
+      "Spent only on Agent Referee's own services; they can't be withdrawn, cashed out or transferred.",
+      "The key is a bearer secret: whoever holds it can spend the balance.",
+      "A review's price is held while it runs; a review that fails or is refused uses nothing. Out of credits: 429, nothing used.",
+      `At most ${usdFromMicro(cfg.maxBalanceMicro)} per account (balance, reviews in progress and open checkouts) and ${usdFromMicro(cfg.maxDailyMicro)} of purchases a day.`,
+    ],
+  });
+});
+
+app.post("/credits/checkout", async (c) => {
+  const cfg = creditsConfig(c.env);
+  // 1. Region (the sanctions list: no AI model is involved yet), pauses, the pack.
+  const sanctioned = regionCheck(c, [], "Nothing was charged.");
+  if (sanctioned) return sanctioned;
+  if (await paidPausedNow(c.env)) return creditsRefusal(c, 503, "Paused", "Buying credits is paused for a moment. Nothing was charged; try again later.");
+  const body = await creditsBody(c);
+  const pack = typeof body.pack === "string" ? body.pack : "";
+  const cents = cfg.packs.get(pack);
+  if (!cents) return creditsRefusal(c, 400, "Unknown pack", `Unknown pack. Packs: ${[...cfg.packs.keys()].join(", ") || "none on sale"}. Nothing was charged.`);
+  // 2. A top-up: the key must be valid and the account not frozen (checked again, with the caps, in step 3).
+  const key = creditsKeyOf(c) ?? (typeof body.key === "string" && body.key.trim() ? body.key.trim() : undefined);
+  let topUp: CreditsCaller | undefined;
+  if (key) {
+    if (!CREDITS_KEY_RE.test(key)) return creditsRefusal(c, 401, "Not a credits key", "That isn't a credits key (keys start with arc_). Nothing was charged.");
+    const keyHash = await sha256Hex(key);
+    let a: any;
+    try {
+      a = await creditsJson(c.env, "credits-auth", { key_hash: keyHash }, [401]);
+    } catch {
+      return creditsRefusal(c, 503, "Try again", "Checkout can't start right now. Nothing was charged; try again in a minute.");
+    }
+    if (a.__status === 401) return creditsRefusal(c, 401, "Unknown key", "Unknown credits key, or it was replaced. Nothing was charged.");
+    if (a.frozen) return creditsRefusal(c, 403, "Account frozen", `This credits account is frozen, so it can't be topped up. Nothing was charged. Contact ${CREDITS_CONTACT}.`);
+    topUp = { account_id: a.account_id, key_hash: keyHash };
+  }
+  // 3. The caps (max balance and per day, open checkouts included) and at most 3 open checkouts per address, recorded
+  //    before Stripe is called so two checkouts at once can't both pass. Its id goes in the session's metadata.
+  const pendingId = randomToken(16);
+  const expiresAt = Date.now() + 31 * 60_000; // Stripe's minimum is 30 minutes from creation
+  let p: any;
+  try {
+    p = await creditsJson(c.env, "credits-pending-add", { pending_id: pendingId, pack, expires_at: expiresAt, ip: (await callerHash(c)) ?? null, ...(topUp ?? {}) }, [401, 403, 429]);
+  } catch (e: any) {
+    await recordEvent(c.env, "ledger_error", `credits-pending-add: ${String(e?.message ?? e)}`);
+    return creditsRefusal(c, 503, "Try again", "Checkout can't start right now. Nothing was charged; try again in a minute.");
+  }
+  if (p.__status !== 200) {
+    const why =
+      p.reason === "open_checkouts"
+        ? `There are already ${p.limit} checkouts open from here. Finish one, or wait 30 minutes for them to expire.`
+        : p.reason === "max_balance"
+          ? `This pack would take the account over ${usdFromMicro(p.max_micro)} (balance, reviews in progress and open checkouts together).`
+          : p.reason === "max_daily"
+            ? `This pack would take today's purchases over ${usdFromMicro(p.max_micro)} (open checkouts count).`
+            : p.reason === "frozen"
+              ? "This credits account is frozen."
+              : "Unknown credits key, or it was replaced.";
+    return creditsRefusal(c, p.__status, "Can't start the checkout", `${why} Nothing was charged.`);
+  }
+  // 4. A new account's key is revealed only in the browser that started the checkout: a random nonce in a cookie,
+  //    its hash in the session's metadata. A top-up never issues a key, so it gets neither.
+  const nonce = topUp ? undefined : randomToken(32);
+  const origin = new URL(c.req.url).origin;
+  // 5. The Checkout Session, priced from CREDITS_PACKS (the one source of truth: no Stripe price ids).
+  let session: any;
+  try {
+    session = await stripeCall(
+      c.env.STRIPE_SECRET_KEY!,
+      "POST",
+      "/checkout/sessions",
+      {
+        mode: "payment",
+        payment_method_types: ["card"],
+        line_items: [{ quantity: 1, price_data: { currency: "usd", unit_amount: cents, product_data: { name: `Agent Referee credits – ${pack}` } } }],
+        expires_at: Math.floor(expiresAt / 1000),
+        success_url: `${origin}/credits/done?session_id={CHECKOUT_SESSION_ID}`,
+        cancel_url: `${origin}/credits`,
+        metadata: { pack, pending_id: pendingId, ...(nonce ? { nonce_hash: await sha256Hex(nonce) } : {}), ...(topUp ? { account_id: topUp.account_id } : {}) },
+      },
+      { idempotencyKey: `credits-checkout-${pendingId}` },
+    );
+    if (typeof session?.url !== "string" || !session.url.startsWith("https://checkout.stripe.com/")) throw new Error("Stripe answered without a checkout URL");
+  } catch (e: any) {
+    await creditsJson(c.env, "credits-pending-clear", { pending_id: pendingId }).catch(() => {}); // or the alarm, after 31 minutes
+    console.error(JSON.stringify({ credits_checkout: "stripe_failed", error: String(e?.message ?? e).slice(0, 200) }));
+    return creditsRefusal(c, 502, "Try again", "Checkout couldn't be started. Nothing was charged; try again in a minute.");
+  }
+  stat(c, "credits_checkout");
+  const cookie: Record<string, string> = nonce ? { "set-cookie": `${NONCE_COOKIE}=${nonce}; Path=/credits/done; Max-Age=86400; HttpOnly; Secure; SameSite=Lax` } : {};
+  if (wantsPage(c)) return new Response(null, { status: 303, headers: { location: session.url, ...NO_STORE, ...cookie } });
+  return jsonNoStore(
+    200,
+    {
+      url: session.url,
+      pack,
+      price: usdFromMicro(cents * 10_000),
+      expires_at: new Date(expiresAt).toISOString(),
+      note: topUp
+        ? "Open the url to pay; the credits are added to this key's account."
+        : "Open the url in a browser to pay. Afterwards Stripe sends that browser to /credits/done, which shows the new account's key once, and only with this answer's cookie. To get the key, start the checkout from GET /credits in a browser.",
+    },
+    cookie,
+  );
+});
+
+/**
+ * Stripe's webhook: the only path that adds credits (spec §5.1). The raw body's signature is checked first (stripe.ts),
+ * then the mode. Fulfilment uses the signed event's Checkout Session (a snapshot event), so it needs no Stripe call.
+ * Answers 5xx so Stripe retries when the ledger can't answer or a refund or dispute arrives before its purchase.
+ */
+app.post("/credits/stripe-webhook", async (c) => {
+  const secret = c.env.STRIPE_WEBHOOK_SECRET;
+  if (!secret || !c.env.LEDGER) return err(404, NOT_FOUND_TEXT);
+  const cfg = creditsConfig(c.env);
+  const say = (what: string, extra: Record<string, unknown> = {}) => console.log(JSON.stringify({ credits_webhook: what, ...extra }));
+  if (cfg.mode === "misconfigured") {
+    say("misconfigured", { problem: cfg.problem });
+    return err(503, "Not handled: the service's Stripe settings need fixing. Retry later.");
+  }
+  if (Number(c.req.header("content-length") ?? 0) > 1_000_000) return err(413, "Too large.");
+  const raw = new Uint8Array(await c.req.arrayBuffer());
+  if (raw.length > 1_000_000) return err(413, "Too large.");
+  const sig = await verifyStripeSignature(raw, c.req.header("stripe-signature"), secret, Math.floor(Date.now() / 1000));
+  if (!sig.ok) {
+    say("bad_signature", { reason: sig.reason });
+    return err(400, "Bad signature.");
+  }
+  let event: any;
+  try {
+    event = JSON.parse(new TextDecoder().decode(raw));
+  } catch {
+    say("bad_json");
+    return err(400, "Bad JSON.");
+  }
+  const type = String(event?.type ?? "");
+  const obj = event?.data?.object;
+  if (event?.livemode !== cfg.live) {
+    say("livemode_mismatch", { type, event: event?.id });
+    return err(400, "Wrong mode.");
+  }
+  const retry = async (what: string, detail: string) => {
+    say("retry", { type, event: event?.id, what, detail: detail.slice(0, 200) });
+    await creditsAlert(c, `webhook ${type} not handled (${what}): ${detail.slice(0, 120)}`);
+    return err(503, "Not handled yet; Stripe will retry.");
+  };
+  try {
+    if (type === "checkout.session.completed") {
+      const r = await creditsJson(c.env, "credits-fulfill", { session: sessionFields(obj) }, [400, 409]);
+      if (r.__status !== 200) {
+        say("fulfill_refused", { session: obj?.id, reason: r.reason ?? r.error });
+        return c.json({ received: true, ignored: String(r.reason ?? r.error ?? "") });
+      }
+      if (r.alert) await creditsAlert(c, `${r.alert}: checkout ${obj?.id}${r.reason ? ` (${r.reason})` : ""}`);
+      say(r.already ? "duplicate" : r.held ? "held" : "fulfilled", { session: obj?.id });
+      return c.json({ received: true });
+    }
+    if (type === "checkout.session.expired") {
+      const pid = obj?.metadata?.pending_id;
+      if (typeof pid === "string" && /^[0-9a-f]{32}$/.test(pid)) await creditsJson(c.env, "credits-pending-clear", { pending_id: pid });
+      return c.json({ received: true });
+    }
+    // radar.early_fraud_warning.created freezes too (C8 default yes): a dispute's fee is more than a small pack.
+    const kind = type === "charge.refunded" ? "refund" : type === "charge.dispute.created" ? "dispute" : type === "radar.early_fraud_warning.created" ? "fraud_warning" : null;
+    if (!kind) return c.json({ received: true, ignored: true });
+    const pi = typeof obj?.payment_intent === "string" ? obj.payment_intent : null;
+    if (!pi) {
+      say("no_payment_intent", { type, event: event?.id });
+      return c.json({ received: true, ignored: "no payment intent" });
+    }
+    const r = await creditsJson(c.env, "credits-debit", { kind, payment_intent: pi, ...(typeof obj?.id === "string" ? { ref: obj.id } : {}), ...(kind === "refund" ? { amount_refunded: obj?.amount_refunded } : {}) }, [400, 404]);
+    // Events can arrive out of order: a refund or dispute before its purchase is answered 5xx, and Stripe retries.
+    if (r.__status === 404) return retry("unknown_payment", pi);
+    if (r.__status === 400) {
+      say("debit_refused", { type, error: r.error });
+      return c.json({ received: true, ignored: String(r.error ?? "") });
+    }
+    if (r.alert) await creditsAlert(c, `${r.alert}: ${type} for ${pi}`);
+    say(r.applied ? "applied" : "duplicate", { type, payment_intent: pi });
+    return c.json({ received: true });
+  } catch (e: any) {
+    return retry("ledger_error", String(e?.message ?? e));
+  }
+});
+
+/** Where Stripe sends the buyer back (spec §5.3). Never says "failed": paid is added, being added, or held for a check. */
+app.get("/credits/done", async (c) => {
+  const cfg = creditsConfig(c.env);
+  const sid = c.req.query("session_id");
+  // Anything but a Checkout Session id of the configured mode: a plain "not found", with no Stripe call.
+  if (!checkoutSessionIdOk(sid, cfg.live)) return creditsPage(404, donePage({ state: "not_found" }));
+  const read = () => creditsJson(c.env, "credits-session", { session_id: sid }, [404]);
+  let s: any = await read().catch(() => null);
+  if (s?.__status === 404) {
+    // Not recorded yet (the webhook may still be on its way): ask Stripe, and fulfil only a finished checkout.
+    try {
+      const session = await stripeCall(c.env.STRIPE_SECRET_KEY!, "GET", `/checkout/sessions/${sid}`);
+      if (session?.status === "open") return creditsPage(200, donePage({ state: "open" }));
+      if (session?.status === "expired") return creditsPage(200, donePage({ state: "expired" }));
+      s = null;
+      if (session?.status === "complete") {
+        const r = await creditsJson(c.env, "credits-fulfill", { session: sessionFields(session) }, [400, 409]);
+        if (r.alert) await creditsAlert(c, `${r.alert}: checkout ${sid}${r.reason ? ` (${r.reason})` : ""}`);
+        s = await read();
+      }
+    } catch (e: any) {
+      if (e instanceof StripeCallError && e.status === 404) return creditsPage(404, donePage({ state: "not_found" }));
+      console.error(JSON.stringify({ credits_done: "not_yet", error: String(e?.message ?? e).slice(0, 200) }));
+      s = null; // Stripe or the ledger can't answer right now: "being added", and the page refreshes itself
+    }
+  }
+  if (!s || s.__status !== 200) return creditsPage(200, donePage({ state: "adding" }));
+  if (s.status === "held") return creditsPage(200, donePage({ state: "held" }));
+  const state: DoneState = { state: "fulfilled", credits_micro: s.credits_micro, balance_micro: s.balance_micro ?? null, created_account: !!s.created_account, key_available: !!s.key_available, session_id: sid! };
+  return creditsPage(200, donePage(state));
+});
+
+/** A POST, so link previews and prefetchers can't use the one reveal up. */
+app.post("/credits/done/reveal", async (c) => {
+  const cfg = creditsConfig(c.env);
+  const body = await creditsBody(c);
+  const sid = body.session_id;
+  const clear = { "set-cookie": `${NONCE_COOKIE}=; Path=/credits/done; Max-Age=0; HttpOnly; Secure; SameSite=Lax` };
+  const show = (status: number, o: { key: string; balance_micro?: number } | { problem: string }, extra: Record<string, string> = {}) =>
+    wantsPage(c) ? creditsPage(status, keyPage(o), extra) : jsonNoStore(status, "key" in o ? { key: o.key, ...(o.balance_micro !== undefined ? { balance: usdFromMicro(o.balance_micro) } : {}) } : { error: o.problem }, extra);
+  if (!checkoutSessionIdOk(sid, cfg.live)) return show(404, { problem: "There's no checkout here." });
+  const otherBrowser = `Open this page in the browser you paid from: only that browser can reveal the key. If you can't, email ${CREDITS_CONTACT} with your Stripe receipt.`;
+  const nonce = cookieOf(c, NONCE_COOKIE);
+  if (!nonce || !/^[0-9a-f]{64}$/.test(nonce)) return show(403, { problem: otherBrowser });
+  const key = newCreditsKey();
+  let r: any;
+  try {
+    r = await creditsJson(c.env, "credits-issue-key", { session_id: sid, nonce_hash: await sha256Hex(nonce), key_hash: await sha256Hex(key) }, [403, 409]);
+  } catch {
+    return show(503, { problem: "The key can't be shown right now. Nothing is lost: go back and try again in a minute." });
+  }
+  if (r.__status === 200) return show(200, { key, balance_micro: r.balance_micro }, clear);
+  const problem =
+    r.reason === "already_shown"
+      ? `This key has already been shown. If you lost it, email ${CREDITS_CONTACT} with your Stripe receipt.`
+      : r.reason === "wrong_browser"
+        ? otherBrowser
+        : "There's no key to show for this checkout (a top-up keeps the account's key).";
+  return show(r.__status, { problem });
+});
+
+/** A one-time claim code (from the operator's rotate, after a lost key) becomes a new key, once. */
+app.post("/credits/claim", async (c) => {
+  const body = await creditsBody(c);
+  const code = typeof body.code === "string" ? body.code.trim() : "";
+  const show = (status: number, o: { key: string; balance_micro?: number } | { problem: string }) =>
+    wantsPage(c) ? creditsPage(status, keyPage(o)) : jsonNoStore(status, "key" in o ? { key: o.key, ...(o.balance_micro !== undefined ? { balance: usdFromMicro(o.balance_micro) } : {}) } : { error: o.problem });
+  if (!CLAIM_CODE_RE.test(code)) return show(400, { problem: "That isn't a claim code (codes start with arcc_)." });
+  const key = newCreditsKey();
+  let r: any;
+  try {
+    r = await creditsJson(c.env, "credits-claim", { code_hash: await sha256Hex(code), key_hash: await sha256Hex(key) }, [404, 409, 410]);
+  } catch {
+    return show(503, { problem: "The claim can't be checked right now. The code still works: try again in a minute." });
+  }
+  if (r.__status === 200) return show(200, { key, balance_micro: r.balance_micro });
+  return show(r.__status, { problem: r.reason === "expired" ? "This claim code has expired (they last 24 hours). Ask for a new one." : "This claim code doesn't work (it may have been used already)." });
+});
+
+// The operator (Authorization: Bearer <ADMIN_TOKEN>). Each call is logged in the credits log. Work whatever the switch.
+const CSV_COLS = ["seq", "at", "type", "account_id", "amount_micro", "balance_micro", "session_id", "payment_intent", "pack", "paid_cents", "refunded_cents", "shortfall_micro", "review_id", "ref", "why", "reason"];
+function csvCell(v: unknown): string {
+  if (v === undefined || v === null) return "";
+  let s = typeof v === "string" ? v : JSON.stringify(v);
+  if (typeof v === "string" && /^[=+\-@\t\r]/.test(s)) s = `'${s}`; // a spreadsheet must never run a cell as a formula
+  return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+app.get("/admin/credits/export", async (c) => {
+  const denied = await admin(c);
+  if (denied) return denied;
+  const rows: Record<string, unknown>[] = [];
+  let after = 0;
+  for (let n = 0; n < 200; n++) {
+    let r: any;
+    try {
+      r = await creditsJson(c.env, "credits-export", { after, limit: 1_000, ...(n === 0 ? { log_admin: true } : {}) });
+    } catch {
+      return err(503, "The credits log can't be read right now; try again in a minute.");
+    }
+    rows.push(...r.entries);
+    if (r.next === null || r.next === undefined) break;
+    after = r.next;
+  }
+  const lines = [[...CSV_COLS, "other"].join(",")];
+  for (const row of rows) {
+    const other = Object.fromEntries(Object.entries(row).filter(([k]) => !CSV_COLS.includes(k)));
+    lines.push([...CSV_COLS.map((k) => csvCell(row[k])), csvCell(Object.keys(other).length ? other : undefined)].join(","));
+  }
+  return new Response(lines.join("\r\n") + "\r\n", {
+    headers: { "content-type": "text/csv; charset=utf-8", "content-disposition": `attachment; filename="agent-referee-credits-${new Date().toISOString().slice(0, 10)}.csv"`, ...NO_STORE },
+  });
+});
+
+app.get("/admin/credits/:account", async (c) => {
+  const denied = await admin(c);
+  if (denied) return denied;
+  const id = c.req.param("account");
+  const by = /^cs_/.test(id) ? { session_id: id } : /^pi_/.test(id) ? { payment_intent: id } : { account_id: id };
+  let v: any;
+  try {
+    v = await creditsJson(c.env, "credits-view", { ...by, log_admin: true }, [400, 404]);
+  } catch {
+    return err(503, "The credits ledger can't be read right now; try again in a minute.");
+  }
+  const { __status, ...view } = v;
+  if (__status !== 200) return err(__status, String(view.error ?? "No such account, checkout or payment."));
+  return jsonNoStore(200, { ...view, mode: creditsConfig(c.env).mode, note: "refundable_cents per purchase: min(paid - refunded, balance). Refund in the Stripe dashboard; the webhook debits the credits." });
+});
+
+/** { account_id | create: true, amount_usd? (e.g. "5.00" or "-2.50"), freeze?, unfreeze?, clear_shortfall?, reason } */
+app.post("/admin/credits/adjust", async (c) => {
+  const denied = await admin(c);
+  if (denied) return denied;
+  const b: any = await c.req.json().catch(() => null);
+  if (!b || typeof b !== "object") return err(400, "Send JSON.");
+  const usdIn = b.amount_usd;
+  const amount = usdIn === undefined ? 0 : Math.round(Number(usdIn) * MICRO_PER_USD);
+  if (!Number.isSafeInteger(amount) || Math.abs(amount) > 10_000 * MICRO_PER_USD) return err(400, "amount_usd must be a number of dollars, at most 10,000 either way.");
+  let r: any;
+  try {
+    r = await creditsJson(
+      c.env,
+      "credits-adjust",
+      { ...(b.create === true ? { create: true } : { account_id: b.account_id }), amount_micro: amount, freeze: b.freeze === true, unfreeze: b.unfreeze === true, clear_shortfall: b.clear_shortfall === true, reason: b.reason },
+      [400, 404, 409],
+    );
+  } catch {
+    return err(503, "The credits ledger can't be changed right now; nothing was changed. Try again in a minute.");
+  }
+  const { __status, ...view } = r;
+  return jsonNoStore(__status, view);
+});
+
+/** { account_id, reason } -> the old key stops working now, and a one-time claim code (24 hours) to send the buyer. */
+app.post("/admin/credits/rotate", async (c) => {
+  const denied = await admin(c);
+  if (denied) return denied;
+  const b: any = await c.req.json().catch(() => null);
+  const code = newClaimCode();
+  let r: any;
+  try {
+    r = await creditsJson(c.env, "credits-rotate", { account_id: b?.account_id, code_hash: await sha256Hex(code), reason: b?.reason }, [400, 404]);
+  } catch {
+    return err(503, "The credits ledger can't be changed right now; nothing was changed. Try again in a minute.");
+  }
+  if (r.__status !== 200) return err(r.__status, String(r.error ?? r.reason ?? "Not changed."));
+  return jsonNoStore(200, { claim_code: code, expires_at: r.expires_at, note: "Send this to the buyer any way you like. It works once, until expires_at, at POST /credits/claim. The old key stopped working just now." });
+});
 
 // ---------- free sealed review (the operator pays; small daily allowance) ----------
 

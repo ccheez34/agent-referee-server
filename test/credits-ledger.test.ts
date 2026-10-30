@@ -2,6 +2,7 @@
 // no network, no keys. Spec v2 §8: reservations, fulfilment, keys, refunds and disputes, caps, config.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { Ledger } from "../src/ledger.ts";
 import { checkPaidSession, creditsConfig, parsePacks, HOLD_MAX_MS, MARKER_KEEP_MS, CLAIM_TTL_MS, MICRO_PER_USD } from "../src/credits-ledger.ts";
 
@@ -565,4 +566,32 @@ test("bad input is refused before anything is read or written", async () => {
     assert.equal(r.status, 400, `${action} ${JSON.stringify(body)}`);
   }
   assert.equal((await s.call("credits-nope", {})).status, 404);
+});
+
+// ---------- deploy safety ----------
+
+/** wrangler.jsonc without its comments (strings, like the URLs in it, are left alone). */
+function jsonc(text: string): any {
+  let out = "";
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '"') {
+      let j = i + 1;
+      while (j < text.length && text[j] !== '"') j += text[j] === "\\" ? 2 : 1;
+      out += text.slice(i, j + 1);
+      i = j;
+    } else if (ch === "/" && text[i + 1] === "/") while (i < text.length && text[i] !== "\n") i++;
+    else if (ch === "/" && text[i + 1] === "*") {
+      i = text.indexOf("*/", i + 2) + 1;
+    } else out += ch;
+  }
+  return JSON.parse(out.replace(/,(\s*[}\]])/g, "$1"));
+}
+
+test("deploy safety: wrangler.jsonc's top-level vars hold no CREDITS_* setting and no Stripe secret", () => {
+  const cfg = jsonc(readFileSync(new URL("../wrangler.jsonc", import.meta.url), "utf8"));
+  assert.ok(cfg.vars && typeof cfg.vars === "object", "the top-level vars were found");
+  assert.ok("PAY_TO" in cfg.vars, "the real vars, not an empty object");
+  const bad = Object.keys(cfg.vars).filter((k) => k.startsWith("CREDITS_") || k.startsWith("STRIPE_"));
+  assert.deepEqual(bad, [], "a production deploy must not be able to switch credits on");
 });

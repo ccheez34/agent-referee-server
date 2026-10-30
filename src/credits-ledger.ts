@@ -449,6 +449,9 @@ export async function creditsAction(st: DOStorage, action: string, b: any, cfg: 
     if (!sid) return no(400, { error: "Bad session." });
     const existing = await st.get<CreditsSession>(`cs:${sid}`);
     if (existing) return ok({ already: true, status: existing.status, created_account: existing.created_account, credits_micro: existing.credits_micro });
+    // Only a finished checkout is ever recorded: an open one would otherwise be stored as "held" and never credited
+    // once it's paid. (The webhook's checkout.session.completed is always "complete"; /credits/done checks first.)
+    if (s.status !== undefined && s.status !== "complete") return no(409, { reason: "not_complete" });
     const meta = s.metadata && typeof s.metadata === "object" ? s.metadata : {};
     const pid = str(meta.pending_id, TOKEN);
     if (pid) await clearPending(st, pid);
@@ -627,7 +630,8 @@ export async function creditsAction(st: DOStorage, action: string, b: any, cfg: 
     } else return no(400, { error: "Give an account id, a cs_ session id or a pi_ payment intent." });
     const a = await account(st, id);
     if (!id || !a) return no(404, { reason: "not_found" });
-    const purchases = [];
+    if (b?.log_admin === true) await log(st, nowMs, { type: "admin_view", account_id: id });
+    const purchases: ReturnType<typeof purchaseView>[] = [];
     for (const sid of a.purchases.slice(-200)) {
       const s = await st.get<CreditsSession>(`cs:${sid}`);
       if (s) purchases.push(purchaseView(sid, s, a));
@@ -696,6 +700,7 @@ export async function creditsAction(st: DOStorage, action: string, b: any, cfg: 
     const after = Number.isSafeInteger(b?.after) && b.after >= 0 ? b.after : 0;
     const limit = Number.isSafeInteger(b?.limit) && b.limit > 0 ? Math.min(b.limit, 1_000) : 1_000;
     if (!st.list) return ok({ entries: [], next: null });
+    if (b?.log_admin === true) await log(st, nowMs, { type: "admin_export", after });
     const found = await st.list<Record<string, unknown>>({ prefix: "cl:", start: `cl:${String(after + 1).padStart(12, "0")}`, limit });
     const entries = [...found.values()].filter((e) => e && (e.seq as number) > after);
     const last = entries.length ? (entries[entries.length - 1].seq as number) : null;
