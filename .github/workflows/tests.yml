@@ -1,0 +1,41 @@
+# Runs the server's tests and type check on GitHub for every push and pull request,
+# so no one has to run them by hand (ccheez34, Oct 30, 2026). No secrets, no deploys:
+# deploying stays a manual step by the owner.
+name: tests
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Install
+        run: npm install --no-audit --no-fund
+      - name: Versions
+        continue-on-error: true
+        run: |
+          node -e 'const fs = require("fs"); const v = (p) => JSON.parse(fs.readFileSync("node_modules/" + p + "/package.json", "utf8")).version; console.log("::notice::node " + process.version + ", typescript " + v("typescript") + ", hono " + v("hono") + ", workers-types " + v("@cloudflare/workers-types"));'
+      - name: Tests
+        run: npm test
+      - name: Type check
+        run: npm run typecheck

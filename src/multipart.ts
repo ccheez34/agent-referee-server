@@ -289,7 +289,7 @@ export async function readJsonCapped(req: Request, maxBytes: number): Promise<un
   let at = 0;
   for (const c of chunks) (all.set(c, at), (at += c.byteLength));
   try {
-    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(all));
+    return JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(all));
   } catch {
     return null;
   }
