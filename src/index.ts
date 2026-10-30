@@ -1380,7 +1380,8 @@ async function teamBudget(c: any, next: any) {
     q = await ledgerJson(c.env, undefined, "team", { member: team.member, cost_micro: cost, member_budget_micro: memberBudget(cfg, team.member), team_budget_micro: cfg.teamMicro, ...(pool ? { group: pool.name, group_budget_micro: pool.micro } : {}) }, true);
   } catch (e: any) {
     await recordEvent(c.env, "ledger_error", `team: ${String(e?.message ?? e)}`);
-    return err(503, "The team allowance can't be checked right now. Nothing was used; try again in a minute.");
+    // A timeout may come after the ledger applied the reservation, so don't promise nothing was counted (3.0's point).
+    return err(503, "The team allowance can't be checked right now. The review didn't run, but this attempt may have been counted against the allowance; check GET /team/allowance before trying again.");
   }
   if (q.__status === 429) {
     stat(c, `${statName}_refused`);
