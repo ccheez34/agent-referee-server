@@ -32,7 +32,9 @@ jobs:
       - name: Install
         run: npm install --no-audit --no-fund
       - name: Versions
-        run: echo "::notice::node $(node -v), typescript $(node -p \"require('typescript/package.json').version\"), hono $(node -p \"require('hono/package.json').version\"), workers-types $(node -p \"require('@cloudflare/workers-types/package.json').version\")"
+        continue-on-error: true
+        run: |
+          node -e 'const fs = require("fs"); const v = (p) => JSON.parse(fs.readFileSync("node_modules/" + p + "/package.json", "utf8")).version; console.log("::notice::node " + process.version + ", typescript " + v("typescript") + ", hono " + v("hono") + ", workers-types " + v("@cloudflare/workers-types"));'
       - name: Tests
         run: npm test
       - name: Type check
