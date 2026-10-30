@@ -4,6 +4,7 @@
 // Any agent can look up a counterparty's record before trusting it. A wallet can make its record private
 // by joining a paid match with "private_record": true (and public again with false).
 import type { DOState, Env } from "./types.ts";
+import { creditsAction, creditsConfig, creditsSweep } from "./credits-ledger.ts";
 
 export const LEDGER_SHARDS = 16;
 
@@ -145,10 +146,35 @@ export class Ledger {
     await st.setAlarm(this.now() + 5_000);
   }
 
-  /** Deletes counter keys from earlier days (and the old one-map-per-day layout), up to 5,000 per run. */
+  /** The alarm: the daily counter cleanup, then the credits sweep (only on an object that has credits records: the
+   * "credits" object), which runs through the same serialized chain as requests. One alarm per object, so the next
+   * one is set once, to whichever comes first. The "credits" object only ever runs credits actions, so newDay()'s alarm
+   * never competes with the credits one there. */
   async alarm() {
+    const more = await this.cleanup();
+    const run = this.chain.then(() => this.creditsAlarm(), () => this.creditsAlarm());
+    this.chain = run.catch(() => {});
+    const due = await run;
+    const next = [more ? this.now() + 1_000 : null, due].filter((x): x is number => x !== null);
+    if (!next.length) return;
+    const at = Math.min(...next);
+    await this.state.storage.setAlarm(at);
+    if (due !== null) await this.state.storage.put("c_alarm", at); // what credits actions compare with (credits-ledger.ts)
+  }
+
+  private async creditsAlarm(): Promise<number | null> {
     const st = this.state.storage;
-    if (!st.list || !st.delete) return;
+    if (!(await st.get<boolean>("c_active"))) return null;
+    const due = await creditsSweep(st, this.now());
+    if (due === null && st.delete) await st.delete("c_alarm");
+    return due;
+  }
+
+  /** Deletes counter keys from earlier days (and the old one-map-per-day layout), up to 5,000 per run. Returns true
+   * when it stopped at that limit, so the alarm runs again a second later. */
+  private async cleanup(): Promise<boolean> {
+    const st = this.state.storage;
+    if (!st.list || !st.delete) return false;
     const today = (await st.get<string>("counters_day")) ?? new Date(this.now()).toISOString().slice(0, 10);
     const yesterday = new Date(Date.parse(`${today}T00:00:00Z`) - 86_400_000).toISOString().slice(0, 10);
     let deleted = 0;
@@ -175,7 +201,7 @@ export class Ledger {
       deleted += old.length;
       if (found.size < 128) break;
     }
-    if (deleted >= 5_000) await st.setAlarm(this.now() + 1_000);
+    return deleted >= 5_000;
   }
 
   // One counter request at a time: each is a read-check-write, and two interleaved ones could both pass a check.
@@ -192,6 +218,13 @@ export class Ledger {
     const action = url.pathname.replace(/^\//, "");
     const body: any = req.method === "POST" ? await req.json().catch(() => null) : null;
     const nowIso = new Date(this.now()).toISOString();
+
+    if (action.startsWith("credits-")) {
+      // Credit packs (credits-ledger.ts). Only ever sent to the one object named "credits"; the packs, caps and mode
+      // come from this object's own settings, never from the request.
+      const r = await creditsAction(this.state.storage, action, body, creditsConfig(this.env), this.now());
+      return json(r.status, r.body);
+    }
 
     if (action === "record") {
       // body: { updates: RecordUpdate[] }  -> returns summaries for the wallets touched

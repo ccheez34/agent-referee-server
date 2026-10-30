@@ -19,6 +19,13 @@ export interface Env {
   TEAM_GROUPS?: string; // shared pools, a total each (not daily): "name=member,member:usd;..." e.g. "TB-run1=T3,T4,T5:8.00"
   TEAM_MEMBER_DAILY_USD?: string; // each member's daily review budget at list price (default 8.00)
   TEAM_DAILY_USD?: string; // the whole team's daily review budget at list price (default 40.00)
+  // Credit packs (card payments through Stripe; credits-ledger.ts, spec v2). Never in the top-level vars of
+  // wrangler.jsonc (a test checks), so a production deploy can't switch them on by accident.
+  CREDITS_ENABLED?: string; // "true" turns on buying and spending (/credits/*); the webhook works whenever its secret is set
+  CREDITS_LIVE?: string; // "true" only after the lawyer and ccheez34 say so: live keys and live events. Never on the credit-packs branch
+  CREDITS_PACKS?: string; // "small=10,medium=25,large=100" (USD): the one source of pack prices and credits
+  CREDITS_MAX_BALANCE_USD?: string; // per account: balance + held + open checkouts (default 500)
+  CREDITS_MAX_DAILY_USD?: string; // per account per UTC day: bought + open checkouts (default 500)
   INTERNAL_TOKEN?: string; // secret shared with the hosted MCP server (ChatGPT); enables /internal/free/*
   EXT_FREE_DAILY_BUDGET_USD?: string; // daily budget for free reviews sent by the hosted MCP server (off when unset)
   EXT_FREE_REVIEWS_PER_DAY?: string; // per hosted-server user per UTC day (default 3)
@@ -81,6 +88,8 @@ export interface Env {
   SIGNING_KEY?: string; // base64 PKCS8 Ed25519 private key (scripts/gen-keys.mjs)
   PUBLIC_KEY?: string; // base64 raw Ed25519 public key
   PUBLIC_KEY_HISTORY?: string; // JSON list of retired keys: [{"public_key":"...","retired":"2027-01-01"}]
+  STRIPE_SECRET_KEY?: string; // credit packs: a restricted test key (rk_test_) preferred, sk_test_ accepted; a live key is refused unless CREDITS_LIVE
+  STRIPE_WEBHOOK_SECRET?: string; // credit packs: whsec_… from the test-mode endpoint (snapshot payload) or `stripe listen`
 }
 
 // Minimal structural types so the Durable Object can also run under Node in tests.
