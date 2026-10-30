@@ -417,8 +417,9 @@ export async function multiReviewPayload(opts: {
   network?: string;
   now?: Date;
   id?: string;
-  /** "team": the operator's own team allowance paid for it (no payer). Multi-part reviews are never free. */
-  funding?: "team";
+  /** "team": the operator's own team allowance paid for it (no payer). "credits": a credit pack paid for it (no payer
+   * and no network). Multi-part reviews are never free. */
+  funding?: "team" | "credits";
 }) {
   const decision = decideReview(opts.commitment.decision_rule, opts.votes.map((v) => v.verdict));
   const pieces = await pieceRecords(opts.input.pieces);
@@ -429,7 +430,7 @@ export async function multiReviewPayload(opts: {
     review_id: opts.id,
     tier: opts.tier,
     created_at: (opts.now ?? new Date()).toISOString(),
-    network: opts.network,
+    network: opts.funding === "credits" ? undefined : opts.network,
     payer: opts.payer ?? null,
     ...(opts.funding ? { funding: opts.funding } : {}),
     title: opts.input.title,

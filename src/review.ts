@@ -420,8 +420,9 @@ export async function reviewPayload(opts: {
   now?: Date;
   id?: string;
   /** "free": the operator paid for this review (the free daily allowance), so there is no payer. "team": the
-   * operator's own team allowance paid for it (no payer either). */
-  funding?: "free" | "team";
+   * operator's own team allowance paid for it (no payer either). "credits": a credit pack bought by card paid for it:
+   * no payer, no account id (receipts are shareable) and no network, since nothing was paid on-chain. */
+  funding?: "free" | "team" | "credits";
 }) {
   const decision = decideReview(opts.commitment.decision_rule, opts.votes.map((v) => v.verdict));
   return {
@@ -430,7 +431,7 @@ export async function reviewPayload(opts: {
     review_id: opts.id,
     tier: opts.tier,
     created_at: (opts.now ?? new Date()).toISOString(),
-    network: opts.network,
+    network: opts.funding === "credits" ? undefined : opts.network,
     payer: opts.payer ?? null,
     ...(opts.funding ? { funding: opts.funding } : {}),
     title: opts.input.title,
