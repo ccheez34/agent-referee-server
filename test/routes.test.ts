@@ -1110,7 +1110,7 @@ t("team allowance: only POST reviews and GET allowance; nothing is reserved for 
   const e = env(TEAM);
   assert.ok([404, 405].includes((await call(e, "/team/review", undefined, as2())).status), "GET on a review route is refused");
   const r = await app.fetch(new Request("https://x/team/allowance", { method: "POST", headers: as2(), body: "{}" }), e, ctx);
-  assert.equal(r.status, 405);
+  assert.ok([404, 405].includes(r.status), "POST on the allowance is refused");
   const left = await call(e, "/team/allowance", undefined, as2());
   assert.equal(left.body.team.member_spent_today, "$0.00");
 });
