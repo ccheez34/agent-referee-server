@@ -1307,7 +1307,7 @@ app.post("/team/proof", teamAuth, async (c: any) => {
   });
 });
 
-app.get("/team/allowance", teamAuth, async (c) => {
+app.get("/team/allowance", teamAuth, async (c: any) => {
   const cfg = teamConfig(c.env);
   const team = c.get("team") as TeamCaller;
   let q: any;
