@@ -54,11 +54,13 @@
     "GATE_SLOTS_ANTHROPIC_CLAUDE_OPUS_5_5": "10",
     // Team allowance for the owner's own AI sessions (/team/*). Off until the TEAM_TOKEN secret is set. The experiment
     // sessions S1, T3, T4, T5 have the default budget; 1.0-5.0 share one $10 pool (core-decisions, one-off) for the experiment's decisions.
-    "TEAM_MEMBERS": "S1,T3,T4,T5,1.0,2.0,3.0,4.0,5.0",
+    // S1Test (daily $0.30, pool $1.00) shows a daily refusal; S1TestPool (daily $1.00, pool $0.30) a pool refusal.
+    // Same rules as S1, scaled down so the test costs $0.40 (ccheez34 asked for S1Test, 19:01).
+    "TEAM_MEMBERS": "S1,T3,T4,T5,1.0,2.0,3.0,4.0,5.0,S1Test:0.30,S1TestPool:1.00",
     "TEAM_MEMBER_DAILY_USD": "25.00",
     "TEAM_DAILY_USD": "110.00",
     // Pools per experiment agent and run (totals, not daily): $25 each for S1, T3, T4, T5 (ccheez34, Oct 29, after the kit review); 1.0-5.0 share $10.
-    "TEAM_GROUPS": "S1-run1=S1:25.00;T3-run1=T3:25.00;T4-run1=T4:25.00;T5-run1=T5:25.00;core-decisions=1.0,2.0,3.0,4.0,5.0:10.00",
+    "TEAM_GROUPS": "S1-run1=S1:25.00;T3-run1=T3:25.00;T4-run1=T4:25.00;T5-run1=T5:25.00;core-decisions=1.0,2.0,3.0,4.0,5.0:10.00;S1Test-run1=S1Test:1.00;S1TestPool-run1=S1TestPool:0.30",
     // Free sealed reviews (the operator pays): 3 single + 1 review-3 per address per UTC day, all inside one
     // daily budget counted at list price ($3.00 = at most 60 single or 15 review-3 a day). "0" turns them off.
     "FREE_REVIEW_DAILY_BUDGET_USD": "3.00",
@@ -109,10 +111,10 @@
         "PANEL_3_MODELS": "claude-opus-5-5,openai/gpt-6-luna,google/gemini-3.7-flash",
         "GATE_SLOTS_ANTHROPIC_CLAUDE_SONNET_5_5": "20",
         "GATE_SLOTS_ANTHROPIC_CLAUDE_OPUS_5_5": "10",
-        "TEAM_MEMBERS": "S1,T3,T4,T5,1.0,2.0,3.0,4.0,5.0",
+        "TEAM_MEMBERS": "S1,T3,T4,T5,1.0,2.0,3.0,4.0,5.0,S1Test:0.30,S1TestPool:1.00",
         "TEAM_MEMBER_DAILY_USD": "25.00",
         "TEAM_DAILY_USD": "110.00",
-        "TEAM_GROUPS": "S1-run1=S1:25.00;T3-run1=T3:25.00;T4-run1=T4:25.00;T5-run1=T5:25.00;core-decisions=1.0,2.0,3.0,4.0,5.0:10.00",
+        "TEAM_GROUPS": "S1-run1=S1:25.00;T3-run1=T3:25.00;T4-run1=T4:25.00;T5-run1=T5:25.00;core-decisions=1.0,2.0,3.0,4.0,5.0:10.00;S1Test-run1=S1Test:1.00;S1TestPool-run1=S1TestPool:0.30",
         "DEMO_PER_IP_LIMIT": "20",
         "FREE_REVIEW_DAILY_BUDGET_USD": "3.00",
         "FREE_REVIEWS_PER_DAY": "3",
