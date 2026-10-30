@@ -109,6 +109,8 @@ export function checkPaidSession(s: any, cfg: Pick<CreditsConfig, "packs" | "liv
   if (typeof pack !== "string" || !cfg.packs.has(pack)) return { ok: false, reason: "unknown_pack" };
   const cents = cfg.packs.get(pack)!;
   if (s.amount_subtotal !== cents) return { ok: false, reason: "wrong_amount" };
+  // Checkout here never allows promotion codes, but if a discount ever appears, a $10 pack must not sell for less.
+  if ((Number.isFinite(s.amount_discount) && s.amount_discount > 0) || (Number.isFinite(s.amount_total) && s.amount_total < cents)) return { ok: false, reason: "discounted" };
   return { ok: true, pack, cents, credits_micro: cents * MICRO_PER_CENT };
 }
 

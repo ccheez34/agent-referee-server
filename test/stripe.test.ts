@@ -6,7 +6,7 @@
 // ROTATION_HEADER and refused the wrong secret and a tampered body. The secrets are fake.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { checkoutSessionIdOk, formEncode, stripeCall, stripeKeyKind, verifyStripeSignature, STRIPE_API_VERSION, STRIPE_TOLERANCE_S } from "../src/stripe.ts";
+import { checkoutSessionIdOk, formEncode, readRawCapped, secretHasWhitespace, stripeCall, stripeKeyKind, verifyStripeSignature, STRIPE_API_VERSION, STRIPE_TOLERANCE_S } from "../src/stripe.ts";
 
 const SECRET = "whsec_agentreferee_fake_test_secret_not_real_0001";
 const OTHER_SECRET = "whsec_agentreferee_fake_rotated_secret_not_real_0002";
@@ -138,4 +138,34 @@ test("REST calls: pinned version, idempotency key, form body; errors name the ca
   const hang = (_u: string, init: RequestInit) =>
     new Promise<Response>((_, rej) => (init.signal as AbortSignal).addEventListener("abort", () => rej(new Error("aborted"))));
   await assert.rejects(stripeCall("rk_test_SECRETVALUE123", "GET", "/x", {}, { fetchFn: hang, timeoutMs: 20 }), /timed out/);
+});
+
+test("signature: a NaN clock or tolerance refuses instead of passing (fresh-agent check, Oct 30)", async () => {
+  assert.equal((await verifyStripeSignature(PAYLOAD, HEADER, SECRET, NaN)).ok, false);
+  assert.equal((await verifyStripeSignature(PAYLOAD, HEADER, SECRET, T, NaN)).ok, false);
+  assert.equal((await verifyStripeSignature(PAYLOAD, HEADER, SECRET, T + 25 * 365 * 86_400)).ok, false);
+  assert.equal(secretHasWhitespace(`${SECRET}\n`), true);
+  assert.equal(secretHasWhitespace(SECRET), false);
+  assert.equal(secretHasWhitespace(undefined), false);
+});
+
+test("the raw body is capped while it's read: a chunked body with no length stops at the cap", async () => {
+  let pulled = 0;
+  const chunk = new Uint8Array(64 * 1024);
+  const endless = new ReadableStream<Uint8Array>({
+    pull(ctl) {
+      pulled++;
+      if (pulled > 1_000) ctl.close(); // a safety stop for the test itself (64 MB)
+      else ctl.enqueue(chunk);
+    },
+  });
+  const big = new Request("https://x/credits/stripe-webhook", { method: "POST", body: endless, duplex: "half" } as any);
+  assert.equal(big.headers.get("content-length"), null);
+  assert.deepEqual(await readRawCapped(big, 1_000_000), { ok: false, reason: "too_big" });
+  assert.ok(pulled <= 20, `stopped after about 1 MB, not after ${pulled} chunks`);
+  const declared = new Request("https://x", { method: "POST", body: "x", headers: { "content-length": "2000000" } });
+  assert.deepEqual(await readRawCapped(declared, 1_000_000), { ok: false, reason: "too_big" });
+  const ok = await readRawCapped(new Request("https://x", { method: "POST", body: PAYLOAD }), 1_000_000);
+  assert.equal(ok.ok, true);
+  assert.equal(new TextDecoder().decode((ok as any).bytes), PAYLOAD, "the exact bytes, unchanged");
 });

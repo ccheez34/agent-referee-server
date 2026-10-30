@@ -74,9 +74,47 @@ export async function verifyStripeSignature(
   let match = false;
   for (const s of v1) if (sameHex(expected, s)) match = true; // every one checked; any may match
   if (!match) return { ok: false, reason: "mismatch" };
-  if (nowS - t > toleranceS) return { ok: false, reason: "too_old" };
-  if (t - nowS > toleranceS) return { ok: false, reason: "too_new" };
+  // Written so that a NaN clock or tolerance refuses instead of passing (found by the fresh-agent check, Oct 30).
+  if (!(Math.abs(nowS - t) <= toleranceS)) return { ok: false, reason: nowS - t > 0 ? "too_old" : "too_new" };
   return { ok: true, timestamp: t };
+}
+
+/** True when the configured secret has whitespace in it (a pasted newline makes every event a plain "mismatch").
+ * Logged as a flag on a mismatch, never the secret itself, as stripe-node hints. */
+export const secretHasWhitespace = (secret: string | undefined) => /\s/.test(String(secret ?? ""));
+
+/**
+ * The raw request body as bytes, refused past maxBytes before it's all held in memory: Content-Length is checked
+ * first, then the bytes are counted while reading, so a chunked body without a length can't get past either.
+ */
+export async function readRawCapped(req: Request, maxBytes: number): Promise<{ ok: true; bytes: Uint8Array } | { ok: false; reason: "too_big" | "unreadable" }> {
+  const declared = Number(req.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > maxBytes) return { ok: false, reason: "too_big" };
+  if (!req.body) return { ok: true, bytes: new Uint8Array(0) };
+  const reader = req.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > maxBytes) {
+        await reader.cancel().catch(() => {});
+        return { ok: false, reason: "too_big" };
+      }
+      chunks.push(value);
+    }
+  } catch {
+    return { ok: false, reason: "unreadable" };
+  }
+  const all = new Uint8Array(size);
+  let at = 0;
+  for (const ch of chunks) {
+    all.set(ch, at);
+    at += ch.byteLength;
+  }
+  return { ok: true, bytes: all };
 }
 
 /** "test" for sk_test_/rk_test_ keys, "live" for sk_live_/rk_live_, otherwise "unknown". */

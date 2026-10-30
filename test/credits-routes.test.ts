@@ -551,3 +551,66 @@ t("admin: the account by id, checkout or payment intent; adjust and freeze with 
   assert.match(made.body.account_id, /^arca_/);
   assert.equal(made.body.balance_micro, 5_000_000);
 });
+
+// ---------- found by the fresh-agent check (CR1 condition 1, Oct 30, 16:58-17:15) ----------
+
+t("webhook: a pretty-printed body with CRLF and non-ASCII text is verified as sent; its re-serialization fails", async () => {
+  const e = env(ON);
+  const obj = { ...checkoutSession("cs_test_routespretty1"), customer_details: { name: "Zoë Ångström 漢字", email: null } };
+  const pretty = JSON.stringify({ id: "evt_test_pretty_0001", object: "event", type: "checkout.session.completed", livemode: false, created: Math.floor(Date.now() / 1000), data: { object: obj } }, null, 2).replace(/\n/g, "\r\n");
+  const sig = await sign(pretty);
+  const compact = JSON.stringify(JSON.parse(pretty));
+  assert.notEqual(compact, pretty);
+  assert.equal((await webhook(e, compact, sig)).status, 400, "the signature covers the bytes Stripe sent, not a re-serialization");
+  const r = await webhook(e, pretty, sig);
+  assert.equal(r.status, 200, r.text);
+  assert.equal((await get(e, "/admin/credits/cs_test_routespretty1", adminH)).body.balance_micro, 10_000_000);
+});
+
+t("webhook: a body past 1 MB is refused while it's read, with or without a Content-Length", async () => {
+  const e = env(ON);
+  let pulled = 0;
+  const endless = new ReadableStream<Uint8Array>({
+    pull(ctl) {
+      pulled++;
+      if (pulled > 200) ctl.close();
+      else ctl.enqueue(new Uint8Array(64 * 1024));
+    },
+  });
+  const res = await app.fetch(new Request("https://x/credits/stripe-webhook", { method: "POST", body: endless, duplex: "half", headers: { "stripe-signature": "t=1,v1=" + "0".repeat(64) } } as any), e, ctx);
+  assert.equal(res.status, 413);
+  assert.ok(pulled <= 20, `read about 1 MB, not ${pulled} chunks`);
+  const declared = await req(e, "POST", "/credits/stripe-webhook", { body: "{}", headers: { "content-length": "5000000" } });
+  assert.equal(declared.status, 413);
+});
+
+t("webhook: events from a connected account are ignored; a completed checkout the ledger can't record raises an alert", async () => {
+  const e = env(ON);
+  const fromConnected = JSON.stringify({ ...JSON.parse(event("checkout.session.completed", checkoutSession("cs_test_routesconn001"))), account: "acct_1ConnectedTest" });
+  const r = await webhook(e, fromConnected);
+  assert.equal(r.status, 200);
+  assert.equal(r.body.ignored, "connected account");
+  assert.equal((await get(e, "/admin/credits/cs_test_routesconn001", adminH)).status, 404, "nothing credited");
+  const e2 = env(ON);
+  const unfinished = await webhook(e2, event("checkout.session.completed", checkoutSession("cs_test_routesconn002", { status: "open" })));
+  assert.equal(unfinished.status, 200);
+  assert.ok((await get(e2, "/health")).body.warnings.includes("credit_pack_alert"), "the operator is told");
+});
+
+t("webhook: a refund for an unknown payment is retried for an hour, then acknowledged with an alert", async () => {
+  const e = env(ON);
+  const now = Math.floor(Date.now() / 1000);
+  const refundAt = (created: number) => JSON.stringify({ id: `evt_${created}`, object: "event", type: "charge.refunded", livemode: false, created, data: { object: { id: "ch_test_unknown01", object: "charge", payment_intent: "pi_routesunknown1", amount: 1000, amount_refunded: 1000 } } });
+  assert.equal((await webhook(e, refundAt(now - 60))).status, 503, "maybe out of order: Stripe retries");
+  const late = await webhook(e, refundAt(now - 3_700));
+  assert.equal(late.status, 200);
+  assert.equal(late.body.ignored, "unknown payment");
+});
+
+t("webhook: a discounted checkout is held, not credited at the full pack", async () => {
+  const e = env(ON);
+  const s = { ...checkoutSession("cs_test_routesdisc001"), amount_total: 500, total_details: { amount_discount: 500 } };
+  assert.equal((await webhook(e, event("checkout.session.completed", s))).status, 200);
+  const v = await get(e, "/admin/credits/cs_test_routesdisc001", adminH);
+  assert.equal(v.status, 404, "held: no account was created or credited");
+});

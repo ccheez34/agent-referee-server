@@ -29,7 +29,7 @@ import {
   MULTI_JUDGE_RECEIPT_FORMAT, MULTI_JUDGE_SYSTEM, MULTI_JUDGE_TIMEOUT_MS, MULTI_JUDGE_TIERS, isMultiJudgeTier, multiJudgePromptSha,
 } from "./multijudge.ts";
 import { creditsConfig, MICRO_PER_USD } from "./credits-ledger.ts";
-import { StripeCallError, checkoutSessionIdOk, stripeCall, stripeKeyKind, verifyStripeSignature } from "./stripe.ts";
+import { StripeCallError, checkoutSessionIdOk, readRawCapped, secretHasWhitespace, stripeCall, stripeKeyKind, verifyStripeSignature } from "./stripe.ts";
 import { NO_STORE, PAGE_HEADERS, buyPage, donePage, keyPage, messagePage, usdFromMicro, type DoneState } from "./credits-pages.ts";
 
 export { MatchRoom, Ledger, Gate, Health };
@@ -1475,8 +1475,9 @@ async function teamBudget(c: any, next: any) {
 //   except to the operator's x-operator-token, for tests.
 // - STRIPE_SECRET_KEY is needed for buying only (a restricted test key, rk_test_, is preferred). A live key without
 //   CREDITS_LIVE, or the reverse, answers 503 and /health says credits: misconfigured.
-// - STRIPE_WEBHOOK_SECRET turns on the webhook, the only path that adds credits. It stays live while CREDITS_ENABLED is
-//   off, so refunds and disputes after a switch-off still freeze and debit.
+// - STRIPE_WEBHOOK_SECRET turns on the webhook, which adds credits (as does /credits/done, from the session it fetches
+//   from Stripe) and applies refunds and disputes. It stays live while CREDITS_ENABLED is off, so refunds and disputes
+//   after a switch-off still freeze and debit.
 // - Receipts say "funding": "credits", with no payer, no network and no account id.
 // Stripe is called with fetch and its signatures checked with WebCrypto (stripe.ts): no stripe-node (CR1).
 
@@ -1578,6 +1579,8 @@ function sessionFields(s: any) {
     payment_status: s.payment_status,
     currency: s.currency,
     amount_subtotal: s.amount_subtotal,
+    amount_total: s.amount_total,
+    amount_discount: s.total_details?.amount_discount ?? 0,
     livemode: s.livemode,
     payment_intent: typeof s.payment_intent === "string" ? s.payment_intent : (s.payment_intent?.id ?? null),
     metadata: { pack: m.pack, account_id: m.account_id, pending_id: m.pending_id, nonce_hash: m.nonce_hash },
@@ -1846,9 +1849,11 @@ app.post("/credits/checkout", async (c) => {
 });
 
 /**
- * Stripe's webhook: the only path that adds credits (spec §5.1). The raw body's signature is checked first (stripe.ts),
- * then the mode. Fulfilment uses the signed event's Checkout Session (a snapshot event), so it needs no Stripe call.
- * Answers 5xx so Stripe retries when the ledger can't answer or a refund or dispute arrives before its purchase.
+ * Stripe's webhook (spec §5.1). With /credits/done (which fetches the session from Stripe with the secret key), one of
+ * the two paths that add credits; both go through the same ledger checks, once per Checkout Session. The raw body is
+ * read with a byte cap, its signature checked first (stripe.ts), then the mode. Fulfilment uses the signed event's
+ * Checkout Session (a snapshot event), so it needs no Stripe call. Answers 5xx so Stripe retries when the ledger can't
+ * answer, or a refund or dispute arrives before its purchase (only while the event is under an hour old).
  */
 app.post("/credits/stripe-webhook", async (c) => {
   const secret = c.env.STRIPE_WEBHOOK_SECRET;
@@ -1859,12 +1864,13 @@ app.post("/credits/stripe-webhook", async (c) => {
     say("misconfigured", { problem: cfg.problem });
     return err(503, "Not handled: the service's Stripe settings need fixing. Retry later.");
   }
-  if (Number(c.req.header("content-length") ?? 0) > 1_000_000) return err(413, "Too large.");
-  const raw = new Uint8Array(await c.req.arrayBuffer());
-  if (raw.length > 1_000_000) return err(413, "Too large.");
+  // Capped while reading (a chunked body has no Content-Length), so an unsigned caller can't fill the Worker's memory.
+  const body = await readRawCapped(c.req.raw, 1_000_000);
+  if (!body.ok) return err(body.reason === "too_big" ? 413 : 400, body.reason === "too_big" ? "Too large." : "Unreadable body.");
+  const raw = body.bytes;
   const sig = await verifyStripeSignature(raw, c.req.header("stripe-signature"), secret, Math.floor(Date.now() / 1000));
   if (!sig.ok) {
-    say("bad_signature", { reason: sig.reason });
+    say("bad_signature", { reason: sig.reason, ...(sig.reason === "mismatch" && secretHasWhitespace(secret) ? { secret_has_whitespace: true } : {}) });
     return err(400, "Bad signature.");
   }
   let event: any;
@@ -1880,16 +1886,28 @@ app.post("/credits/stripe-webhook", async (c) => {
     say("livemode_mismatch", { type, event: event?.id });
     return err(400, "Wrong mode.");
   }
+  // An event about a connected account's payment isn't this service's sale, even if it carries our metadata (it can
+  // only arrive if the endpoint is ever set to receive Connect events).
+  if (event?.account) {
+    say("connected_account_event", { type, event: event?.id });
+    await creditsAlert(c, `webhook ${type} from a connected account ignored (${String(event.account).slice(0, 40)})`);
+    return c.json({ received: true, ignored: "connected account" });
+  }
   const retry = async (what: string, detail: string) => {
     say("retry", { type, event: event?.id, what, detail: detail.slice(0, 200) });
     await creditsAlert(c, `webhook ${type} not handled (${what}): ${detail.slice(0, 120)}`);
     return err(503, "Not handled yet; Stripe will retry.");
   };
+  // event.created is signed. Out-of-order delivery settles within minutes, so after an hour an unknown payment isn't
+  // "not yet": it's acknowledged with one alert instead of being retried for days.
+  const eventAgeS = Number.isFinite(event?.created) ? Math.floor(Date.now() / 1000) - event.created : 0;
   try {
     if (type === "checkout.session.completed") {
       const r = await creditsJson(c.env, "credits-fulfill", { session: sessionFields(obj) }, [400, 409]);
       if (r.__status !== 200) {
+        // A completed checkout the ledger can't record: nothing was credited, so the operator has to look.
         say("fulfill_refused", { session: obj?.id, reason: r.reason ?? r.error });
+        await creditsAlert(c, `checkout ${String(obj?.id ?? "?").slice(0, 80)} completed but not recorded: ${String(r.reason ?? r.error ?? "")}`);
         return c.json({ received: true, ignored: String(r.reason ?? r.error ?? "") });
       }
       if (r.alert) await creditsAlert(c, `${r.alert}: checkout ${obj?.id}${r.reason ? ` (${r.reason})` : ""}`);
@@ -1911,7 +1929,12 @@ app.post("/credits/stripe-webhook", async (c) => {
     }
     const r = await creditsJson(c.env, "credits-debit", { kind, payment_intent: pi, ...(typeof obj?.id === "string" ? { ref: obj.id } : {}), ...(kind === "refund" ? { amount_refunded: obj?.amount_refunded } : {}) }, [400, 404]);
     // Events can arrive out of order: a refund or dispute before its purchase is answered 5xx, and Stripe retries.
-    if (r.__status === 404) return retry("unknown_payment", pi);
+    if (r.__status === 404) {
+      if (eventAgeS < 3_600) return retry("unknown_payment", pi);
+      say("unknown_payment_acknowledged", { type, payment_intent: pi, age_s: eventAgeS });
+      await creditsAlert(c, `${type} for a payment the ledger never saw (${pi}), acknowledged after an hour of retries`);
+      return c.json({ received: true, ignored: "unknown payment" });
+    }
     if (r.__status === 400) {
       say("debit_refused", { type, error: r.error });
       return c.json({ received: true, ignored: String(r.error ?? "") });

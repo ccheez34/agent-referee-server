@@ -2,7 +2,7 @@
 // no network, no keys. Spec v2 §8: reservations, fulfilment, keys, refunds and disputes, caps, config.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { Ledger } from "../src/ledger.ts";
 import { checkPaidSession, creditsConfig, parsePacks, HOLD_MAX_MS, MARKER_KEEP_MS, CLAIM_TTL_MS, MICRO_PER_USD } from "../src/credits-ledger.ts";
 
@@ -127,6 +127,9 @@ test("the paid-session check: every condition in spec §5.2", () => {
   assert.equal(bad({}, { pack: "huge" }), "unknown_pack");
   assert.equal(bad({ livemode: true }), "livemode_mismatch");
   assert.equal(bad({ object: "payment_intent" }), "not_a_checkout_session");
+  assert.equal(bad({ amount_discount: 500, amount_total: 500 }), "discounted", "a promotion code would sell $10 for $5");
+  assert.equal(bad({ amount_total: 999 }), "discounted");
+  assert.equal((checkPaidSession(session("cs_test_x0000001", { amount_total: 1080, amount_discount: 0 }), cfg) as any).ok, true, "tax added on top is fine");
   assert.equal((checkPaidSession(session("cs_test_x0000001", { livemode: true }), creditsConfig({ CREDITS_LIVE: "true" })) as any).ok, true);
 });
 
@@ -433,7 +436,7 @@ test("refunds: after credits were spent, the rest is shortfall and the balance n
 test("disputes: freeze and debit the purchase's credits minus what was refunded; a later refund takes nothing more", async () => {
   const s = setup();
   const id = await newAccount(s, "cs_test_dispute00001");
-  await s.call("credits-fulfill", { session: session("cs_test_dispute00002", { amount_subtotal: 2500 }, { pack: "medium", account_id: id }) });
+  await s.call("credits-fulfill", { session: session("cs_test_dispute00002", { amount_subtotal: 2500, amount_total: 2500 }, { pack: "medium", account_id: id }) });
   const pi = "pi_dispute00001";
   await s.call("credits-debit", { kind: "refund", payment_intent: pi, amount_refunded: 200 });
   const d = await s.call("credits-debit", { kind: "dispute", payment_intent: pi, ref: "dp_test_1" });
@@ -588,8 +591,10 @@ function jsonc(text: string): any {
   return JSON.parse(out.replace(/,(\s*[}\]])/g, "$1"));
 }
 
-test("deploy safety: wrangler.jsonc's top-level vars hold no CREDITS_* setting and no Stripe secret", () => {
-  const cfg = jsonc(readFileSync(new URL("../wrangler.jsonc", import.meta.url), "utf8"));
+// A do-not-deploy test copy has no wrangler.jsonc on purpose (it can't be deployed), so there's nothing to check there.
+const WRANGLER = new URL("../wrangler.jsonc", import.meta.url);
+(existsSync(WRANGLER) ? test : test.skip)("deploy safety: wrangler.jsonc's top-level vars hold no CREDITS_* setting and no Stripe secret", () => {
+  const cfg = jsonc(readFileSync(WRANGLER, "utf8"));
   assert.ok(cfg.vars && typeof cfg.vars === "object", "the top-level vars were found");
   assert.ok("PAY_TO" in cfg.vars, "the real vars, not an empty object");
   const bad = Object.keys(cfg.vars).filter((k) => k.startsWith("CREDITS_") || k.startsWith("STRIPE_"));
