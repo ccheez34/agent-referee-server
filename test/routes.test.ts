@@ -985,6 +985,14 @@ t("team allowance: off without TEAM_TOKEN; a wrong token or an unknown member is
   assert.equal((await call(env(), "/team/review", review, as2())).status, 404);
   const e = env(TEAM);
   assert.equal((await call(e, "/team/review", review, { "x-team-token": "x".repeat(40), "x-team-member": "2.0" })).status, 401);
+  const wrong = await call(e, "/team/allowance", undefined, { authorization: `Bearer ${"y".repeat(40)}`, "x-team-member": "2.0" });
+  assert.equal(wrong.status, 401);
+  assert.match(wrong.body.error, /arrived \(Authorization: Bearer\) but it doesn't match/);
+  assert.ok(!wrong.body.error.includes("y".repeat(40)), "never echoes the value");
+  const none = await call(e, "/team/allowance", undefined, { "x-team-member": "2.0" });
+  assert.match(none.body.error, /^No team token arrived/);
+  const bearer = await call(e, "/team/allowance", undefined, { authorization: `Bearer ${TEAM_TOKEN}`, "x-team-member": "2.0" });
+  assert.equal(bearer.status, 200, "Authorization: Bearer works too");
   assert.equal((await call(e, "/team/review", review, as2("6.0"))).status, 403);
   assert.equal((await call(e, "/team/allowance", undefined, { "x-team-token": "nope" })).status, 401);
   const short = env({ ...TEAM, TEAM_TOKEN: "short" });

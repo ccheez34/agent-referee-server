@@ -1355,7 +1355,16 @@ async function teamAuth(c: any, next: any) {
   // Reviews are POST only and the allowance is GET only, so nothing is reserved for a request that can't be served.
   const want = routePath(c) === "/team/allowance" || c.req.path === "/team/allowance" ? "GET" : "POST";
   if (c.req.method !== want) return err(405, `Use ${want}.`);
-  if (!(await sameToken(c.env.TEAM_TOKEN, c.req.header("x-team-token")))) return err(401, "Wrong or missing team token.");
+  // The token may arrive as x-team-token, or as "Authorization: Bearer <token>" (the default shape of a cloud
+  // environment's network secret). The answer says which arrived, never the value.
+  const viaHeader = c.req.header("x-team-token");
+  const auth = c.req.header("authorization") ?? "";
+  const viaBearer = /^Bearer\s+/i.test(auth) ? auth.replace(/^Bearer\s+/i, "") : undefined;
+  const ok = (await sameToken(c.env.TEAM_TOKEN, viaHeader)) || (await sameToken(c.env.TEAM_TOKEN, viaBearer));
+  if (!ok) {
+    const sent = [viaHeader ? "x-team-token" : "", viaBearer ? "Authorization: Bearer" : auth ? "Authorization (not Bearer)" : ""].filter(Boolean);
+    return err(401, sent.length ? `A team token arrived (${sent.join(" and ")}) but it doesn't match the service's TEAM_TOKEN.` : "No team token arrived: send it as x-team-token or as Authorization: Bearer.");
+  }
   const member = String(c.req.header("x-team-member") ?? "").trim();
   if (!teamConfig(c.env).members.includes(member)) return err(403, "x-team-member must be one of the team's members (TEAM_MEMBERS).");
   c.set("team", { member } as TeamCaller);
