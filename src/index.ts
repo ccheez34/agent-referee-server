@@ -1696,7 +1696,7 @@ async function creditsBudget(c: any, next: any) {
   }
 }
 
-app.get("/credits/account", creditsAuth, async (c) => {
+app.get("/credits/account", creditsAuth, async (c: any) => {
   const cr = c.get("credits") as CreditsCaller;
   let v: any;
   try {
