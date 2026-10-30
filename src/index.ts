@@ -1256,7 +1256,7 @@ app.post("/team/review", (c) => handleReview(c, "review"));
 app.post("/team/review-3", (c) => handleReview(c, "review-3"));
 app.post("/team/review-3x2", (c) => handleMultiReview(c, "review-3x2"));
 app.post("/team/review-3x3", (c) => handleMultiReview(c, "review-3x3"));
-app.get("/team/allowance", teamAuth, async (c) => {
+app.get("/team/allowance", teamAuth, async (c: any) => {
   const cfg = teamConfig(c.env);
   const team = c.get("team") as TeamCaller;
   let q: any;
