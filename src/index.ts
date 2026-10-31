@@ -981,14 +981,15 @@ app.get("/admin/stats", async (c) => {
   let healthStoreError = false;
   const events = await healthEvents(c.env).catch(() => ((healthStoreError = true), []));
   const legal = [...legalDetail(events, regionRulesProblems(c.env as any)), ...(healthStoreError ? [{ code: "health_store_unreachable", from: "error" as const }] : [])];
-  if (!c.env.LEDGER) return c.json({ error: "Stats need the ledger.", legal_now: legal }, 503);
+  const regionDetail = regionRulesWarnings(c.env as any);
+  if (!c.env.LEDGER) return c.json({ error: "Stats need the ledger.", legal_now: legal, region_settings_detail: regionDetail }, 503);
   let s: any;
   try {
     s = await ledgerJson(c.env, undefined, "stats", {});
     if (!Array.isArray(s?.days) || !s.days.length) throw new Error("unexpected answer");
   } catch (e: any) {
     console.error(`admin stats: ${String(e?.message ?? e).slice(0, 200)}`);
-    return c.json({ error: "Stats can't be read right now; try again in a minute.", legal_now: legal }, 503);
+    return c.json({ error: "Stats can't be read right now; try again in a minute.", legal_now: legal, region_settings_detail: regionDetail }, 503);
   }
   const usd = (micro: unknown) => (Number.isFinite(micro) ? Math.round((micro as number) / 10_000) / 100 : 0);
   const pub = freeReviewConfig(c.env);
@@ -1023,7 +1024,7 @@ app.get("/admin/stats", async (c) => {
     ran_out_of_tokens_recent: Array.isArray(s.cutoffs) ? s.cutoffs.slice().reverse() : [],
     // F10: the legal list's detail, which /health shows the public only as "alert", and the region lists' warnings.
     legal_now: legal,
-    region_settings_detail: regionRulesWarnings(c.env as any),
+    region_settings_detail: regionDetail,
     free_budget_today: {
       public: { spent_usd: usd(s.free_spent_micro?.public), budget_usd: usd(pub.budgetMicro) },
       ext: { spent_usd: usd(s.free_spent_micro?.ext), budget_usd: usd(ext.budgetMicro), note: "free reviews from the hosted MCP server (ChatGPT)" },

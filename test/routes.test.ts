@@ -567,6 +567,18 @@ t("alerts (PLAN 0.4): a sanctioned-location refusal is a /health warning, a comp
   assert.equal(stats.status, 200, JSON.stringify(stats.body));
   assert.ok(stats.body.legal_now.some((x: any) => x.code === "region_selftest_failed:CN:openai" && x.from === "settings"), JSON.stringify(stats.body.legal_now));
   assert.ok(stats.body.region_settings_detail.includes("region_list_weakened:openai"), JSON.stringify(stats.body.region_settings_detail));
+  // The legal detail doesn't wait for the ledger, and an unreadable health store is named, never an empty list
+  // (fresh read of 30802a6, #3 and #4; the re-read of e84874b).
+  eo.LEDGER.broken = true;
+  const down = await call(eo, "/admin/stats", undefined, { authorization: `Bearer ${ADMIN}` });
+  assert.equal(down.status, 503, JSON.stringify(down.body));
+  assert.ok(down.body.legal_now.some((x: any) => x.code === "region_selftest_failed:CN:openai"), JSON.stringify(down.body));
+  assert.ok(down.body.region_settings_detail.includes("region_list_weakened:openai"), JSON.stringify(down.body));
+  eo.LEDGER.broken = false;
+  eo.HEALTH.broken = true;
+  const blind = await call(eo, "/admin/stats", undefined, { authorization: `Bearer ${ADMIN}` });
+  assert.ok(blind.body.legal_now.some((x: any) => x.code === "health_store_unreachable" && x.from === "error"), JSON.stringify(blind.body.legal_now));
+  eo.HEALTH.broken = false;
   // The keyword a second monitor watches (review R2): present only when the list isn't empty.
   const raw = await (await app.fetch(new Request("https://x/health"), env({ REGION_BLOCK: "off" }), ctx)).text();
   assert.ok(raw.includes('"legal":["alert"]'), raw);
