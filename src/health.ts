@@ -3,7 +3,7 @@
 // Only rare things are written here, so it never becomes a hot spot: pause state is cached per isolate for 15 s.
 import type { DOState, Env } from "./types.ts";
 
-export type HealthEventKind = "settle_failure" | "facilitator_problem" | "credit_problem" | "ledger_error" | "provider_errors" | "out_of_tokens";
+export type HealthEventKind = "settle_failure" | "facilitator_problem" | "credit_problem" | "ledger_error" | "provider_errors" | "out_of_tokens" | "sanctions_region_attempt" | "provider_account_problem";
 export type HealthEvent = { kind: HealthEventKind; at: number; detail: string };
 /** A wallet whose payment failed to settle after the work was delivered: what it owes, its strikes, and whether it's banned. */
 export type WalletRecord = { owed_micro: number; strikes: number[]; permanent: boolean; history: { at: number; what: string; micro: number; detail: string }[] };
@@ -38,10 +38,15 @@ export class Health {
       return json(200, { paid: false, reviews: false, ...((await st.get<Pause>("pause")) ?? {}) });
     }
     if (action === "event") {
-      const kinds: HealthEventKind[] = ["settle_failure", "facilitator_problem", "credit_problem", "ledger_error", "provider_errors", "out_of_tokens"];
+      const kinds: HealthEventKind[] = ["settle_failure", "facilitator_problem", "credit_problem", "ledger_error", "provider_errors", "out_of_tokens", "sanctions_region_attempt", "provider_account_problem"];
       if (!kinds.includes(body?.kind)) return json(400, { error: "Unknown event kind." });
       const events = (await st.get<HealthEvent[]>("events")) ?? [];
-      events.push({ kind: body.kind, at: this.now(), detail: String(body.detail ?? "").slice(0, 300) });
+      const detail = String(body.detail ?? "").slice(0, 300);
+      // Alert A4 (PLAN 0.4): at most one sanctions-region attempt per code per hour, so a burst can't push the
+      // rarer events out of the list.
+      if (body.kind === "sanctions_region_attempt" && events.some((e) => e.kind === body.kind && e.detail === detail && this.now() - e.at < 3_600_000))
+        return json(200, { ok: true, deduped: true });
+      events.push({ kind: body.kind, at: this.now(), detail });
       await st.put("events", events.slice(-MAX_EVENTS));
       return json(200, { ok: true });
     }
@@ -175,8 +180,10 @@ export async function recordEvent(env: Env, kind: HealthEventKind, detail: strin
   console.error(JSON.stringify({ health_event: kind, detail: detail.slice(0, 300) }));
   if (!env.HEALTH) return;
   const now = Date.now();
-  if (now - (lastEvent.get(kind) ?? 0) < 20_000) return;
-  lastEvent.set(kind, now);
+  // The two alert kinds (PLAN 0.4) are throttled per detail (a code, or a provider account), not per kind.
+  const key = kind === "sanctions_region_attempt" || kind === "provider_account_problem" ? `${kind}:${detail}` : kind;
+  if (now - (lastEvent.get(key) ?? 0) < 20_000) return;
+  lastEvent.set(key, now);
   await healthCall(env, "event", { kind, detail }).catch(() => {});
 }
 
@@ -210,7 +217,7 @@ export const addUnjudged = (env: Env, entry: Omit<UnjudgedEntry, "at">) => (env.
 export const markRefunded = (env: Env, match_id: string) => healthCall(env, "unjudged", { refunded_match_id: match_id });
 
 /** The /health verdict from gate stats, recent events and the ledger check. Pure, so each rule is tested. */
-export function evaluateHealth(input: { gates: Record<string, any>; events: HealthEvent[]; ledger: "ok" | "error" | "off"; now?: number; unjudgedOpen?: number }) {
+export function evaluateHealth(input: { gates: Record<string, any>; events: HealthEvent[]; ledger: "ok" | "error" | "off"; now?: number; unjudgedOpen?: number; regionProblems?: string[] }) {
   const now = input.now ?? Date.now();
   const reasons: string[] = [];
   for (const [pool, s] of Object.entries(input.gates)) {
@@ -230,6 +237,12 @@ export function evaluateHealth(input: { gates: Record<string, any>; events: Heal
   if (input.events.some((e) => e.kind === "out_of_tokens" && now - e.at < 24 * 3_600_000)) warnings.push("out_of_tokens");
   // A paid match that couldn't be judged is waiting for a refund: that needs the operator, so it alerts.
   if ((input.unjudgedOpen ?? 0) > 0) reasons.push(`unjudged_to_refund:${input.unjudgedOpen}`);
+  // PLAN 0.4 alerts (research\legal-risks-2026-10-28\ALERTS-spec.md). A1/A2: the region rules are off or fail their
+  // self-test (computed from the settings on each call). A8: a provider says the account is suspended or restricted.
+  for (const p of input.regionProblems ?? []) reasons.push(p);
+  for (const e of recent) if (e.kind === "provider_account_problem") reasons.push(`provider_account_problem:${e.detail || "unknown"}`);
+  // A4: someone tried from a sanctioned location and was refused. The control worked, so a warning, not a reason.
+  if (input.events.some((e) => e.kind === "sanctions_region_attempt" && now - e.at < 24 * 3_600_000)) warnings.push("sanctions_region_attempt");
   return { degraded: reasons.length > 0, reasons: [...new Set(reasons)], warnings };
 }
 

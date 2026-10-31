@@ -11,7 +11,7 @@
 
 import { sha256Hex } from "./logic.ts";
 import { fakeModelResponse, type FakeAi } from "./fakeai.ts";
-import { ProviderCapError, classifyStatus, rateInfo, type CallObservation } from "./providers.ts";
+import { ProviderCapError, accountOf, classifyStatus, isAccountProblem, rateInfo, type CallObservation } from "./providers.ts";
 export { panelShapeError } from "./logic.ts";
 
 export type JudgeTierName = "judge" | "judge-2" | "judge-3" | "judge-3x2" | "judge-3x3";
@@ -601,6 +601,8 @@ export async function runOneJudge(opts: {
   observe?: (o: CallObservation) => void;
   /** Told when an answer was cut off at the token limit (so the limit can be raised). */
   onCutOff?: (c: { where: "judge"; model: string; max_tokens: number; prompt_chars: number; try_number?: number }) => void;
+  /** PLAN 0.4, alert A8: the provider says the account itself is suspended or restricted. */
+  onAccountProblem?: (account: string) => void;
   /** The multi-part judge tiers: their own message, answer room and time budget (see multijudge.ts). */
   how?: JudgeHow;
   now?: () => number;
@@ -650,6 +652,7 @@ export async function runOneJudge(opts: {
         detail = String(e?.error?.message ?? e?.error?.type ?? "").replace(/\s+/g, " ").slice(0, 200);
       } catch {}
       const kind = classifyStatus(opts.model, res.status, raw);
+      if (isAccountProblem(res.status, raw)) opts.onAccountProblem?.(accountOf(opts.model)); // alert A8
       observe({ kind, status: res.status, rate: rateInfo(res.headers) });
       report({ outcome: "error", status: res.status });
       lastErr = `judge API returned ${res.status}${detail ? `: ${detail}` : ""}`;

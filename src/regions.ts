@@ -101,3 +101,28 @@ export function regionRefusal(block: { code: string; company: string }, suffix: 
 /** Usage-count names for GET /admin/stats: "cc_jp" (requests by country), "rb_cn" / "rb_ua-43" (refused by region). */
 export const countryStat = (where: Where) => `cc_${(where.country ?? "xx").toLowerCase()}`;
 export const blockedStat = (code: string) => `rb_${code.toLowerCase()}`;
+
+/**
+ * PLAN 0.4, alerts A1 and A2 (research\legal-risks-2026-10-28\ALERTS-spec.md): what /health reports about the region
+ * rules themselves. Pure and cheap, so /health can run it on every call. Reporting only: whether routes also refuse
+ * while it isn't empty waits on the spec's open question (2.0's review, R1).
+ * - "region_rules_off" (A1): REGION_BLOCK=off, or a BLOCKED_REGIONS setting that leaves out any BASE_BLOCKED code.
+ * - "region_selftest_failed:<probe>" (A2): the rule itself, run against fixed locations, lets one through. Probes:
+ *   every BASE_BLOCKED code (from the list itself, so it can't fall behind), with no models and with each company's;
+ *   CN, RU and HK with each company that doesn't serve them; and the US, which must stay open.
+ */
+export function regionRulesProblems(env: Record<string, unknown>): string[] {
+  const base = listFrom(env, "BLOCKED_REGIONS", BASE_BLOCKED);
+  if (String(env.REGION_BLOCK ?? "").trim().toLowerCase() === "off" || BASE_BLOCKED.some((c) => !base.includes(c))) return ["region_rules_off"];
+  const at = (code: string): Where => (code.includes("-") ? { country: code.split("-")[0], sub: code } : { country: code });
+  const sample: Record<string, string> = { anthropic: "claude-sonnet-5-5", openai: "openai/gpt-6-luna", google: "google/gemini-4-argon" };
+  const failed: string[] = [];
+  for (const code of BASE_BLOCKED) {
+    if (!regionBlock(env, [], at(code))) failed.push(code);
+    else for (const co of Object.keys(sample)) if (!regionBlock(env, [sample[co]], at(code))) { failed.push(`${code}:${co}`); break; }
+  }
+  for (const code of ["CN", "RU", "HK"])
+    for (const co of Object.keys(sample)) if (COMPANY_BLOCKED[co]?.includes(code) && !regionBlock(env, [sample[co]], at(code))) failed.push(`${code}:${co}`);
+  if (regionBlock(env, Object.values(sample), { country: "US" })) failed.push("US:open");
+  return failed.map((f) => `region_selftest_failed:${f}`);
+}

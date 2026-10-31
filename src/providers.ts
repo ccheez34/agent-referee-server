@@ -30,6 +30,21 @@ export function isSpendCap(model: string, status: number, bodyText: string): boo
   return false;
 }
 
+/**
+ * PLAN 0.4, alert A8: an answer that says the provider account itself is suspended, disabled or restricted, rather
+ * than one request failing. Only 401 and 403 count, and only with account-level wording, so a bad request doesn't alert.
+ */
+export function isAccountProblem(status: number, bodyText: string): boolean {
+  if (status !== 401 && status !== 403) return false;
+  // A moderation refusal (OpenRouter answers 403 when a request's text is flagged) is about the text, not the account,
+  // and anyone can trigger one: it must never degrade /health.
+  if (/flagged|moderation/i.test(bodyText)) return false;
+  return /suspend|disabled|deactivat|banned|terminated|violat|terms of (use|service)|usage polic|not (available|supported) in your (country|region)|unsupported_country|region_not_supported/i.test(bodyText);
+}
+
+/** Whose account an alert is about: Claude models are called on Anthropic's account; every other model through OpenRouter. */
+export const accountOf = (model: string) => (model.startsWith("claude") ? "anthropic" : "openrouter");
+
 export function classifyStatus(model: string, status: number, bodyText = ""): CallKind {
   if (status >= 200 && status < 300) return "ok";
   if (isSpendCap(model, status, bodyText)) return "cap";

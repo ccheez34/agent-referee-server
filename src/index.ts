@@ -19,7 +19,7 @@ import { acquireSlots, gateStats, gatesOn, poolsOfProvider, quickBusy, resetPool
 import { classifyPaidResponse, plausiblePayment, priceMicro, reviewBudget, reviewLimitRefusal } from "./paywatch.ts";
 import { fakeAiConfig } from "./fakeai.ts";
 import { recordCutOff } from "./cutoffs.ts";
-import { blockedStat, countryStat, judgeRegionBlock, regionBlock, regionRefusal, whereFrom } from "./regions.ts";
+import { blockedStat, countryStat, judgeRegionBlock, regionBlock, regionRefusal, regionRulesProblems, whereFrom } from "./regions.ts";
 import {
   MULTI_BUDGET_MS, MULTI_CALL_TIMEOUT_MS, MULTI_FORMAT_VERSION, MULTI_LEASE_MS, MULTI_LIMITS, MULTI_MAX_ISSUES, MULTI_MESSAGE_FORMAT, MULTI_PIECES, MULTI_RECEIPT_FORMAT, MULTI_SYSTEM,
   MultiClosedError, TOO_BIG, boundaryToken, multiCommitment, multiExcluded, multiMaxTokens, multiModels, MULTI_DEFAULT_PRICES, multiReviewPayload, multiReviewerHow, readJsonCapped, validateMultiReview, type MultiTier,
@@ -328,6 +328,9 @@ function regionCheck(c: any, models: string[], suffix: string, count = false, ju
   if (!block) return null;
   stat(c, "region_blocked");
   stat(c, blockedStat(block.code));
+  // PLAN 0.4, alert A4: someone tried from a sanctioned location and was refused (the control worked). A warning on
+  // /health for 24 h, at most one event per code per hour (the Health store keeps the rest out).
+  if (block.company === "all") void inBackground(c, recordEvent(c.env, "sanctions_region_attempt", block.code));
   return regionRefusal(block, suffix);
 }
 
@@ -810,7 +813,7 @@ app.get("/health", async (c) => {
   const gates = pools.length ? await gateStats(env, pools) : {};
   const events = await healthEvents(env).catch(() => []);
   const unjudged = await listUnjudged(env).catch(() => []);
-  const verdict = evaluateHealth({ gates, events, ledger: records, unjudgedOpen: unjudged.filter((u) => !u.refunded).length });
+  const verdict = evaluateHealth({ gates, events, ledger: records, unjudgedOpen: unjudged.filter((u) => !u.refunded).length, regionProblems: regionRulesProblems(env as any) });
   const pause = await pauseState(env);
   if (pause.auto) verdict.reasons.push(`auto_paused: ${pause.auto}`), (verdict.degraded = true);
   const paused = paidPaused(env) || pause.paid;
@@ -1104,7 +1107,7 @@ function runReviewers(c: any, commitment: any, input: any, lease: SlotLease, bud
   const fake = fakeAiConfig(c.env, { mix: c.req.header("x-test-fake-mix"), delay: c.req.header("x-test-fake-delay") });
   const keys = { ANTHROPIC_API_KEY: c.env.ANTHROPIC_API_KEY, OPENROUTER_API_KEY: c.env.OPENROUTER_API_KEY, fake };
   return Promise.allSettled(
-    commitment.models.map((m: string, i: number) => runOneReviewer(keys, m, i + 1, input, undefined, { budgetMs, observe: (o) => lease.observe(i, o), onCutOff: (cut) => void inBackground(c, recordCutOff(c.env, cut)) })),
+    commitment.models.map((m: string, i: number) => runOneReviewer(keys, m, i + 1, input, undefined, { budgetMs, observe: (o) => lease.observe(i, o), onCutOff: (cut) => void inBackground(c, recordCutOff(c.env, cut)), onAccountProblem: (who) => void inBackground(c, recordEvent(c.env, "provider_account_problem", who)) })),
   );
 }
 
@@ -1253,6 +1256,7 @@ async function handleMultiReview(c: any, tier: MultiTier) {
             how: multiReviewerHow(m, input, token, c.env),
             observe: (o) => lease.observe(i, o),
             onCutOff: (cut) => void inBackground(c, recordCutOff(c.env, cut)),
+            onAccountProblem: (who) => void inBackground(c, recordEvent(c.env, "provider_account_problem", who)),
             onCall: (call) => {
               calls.push(call);
               console.log(JSON.stringify({ multi_call: { tier, ...call } }));

@@ -66,7 +66,7 @@ import type { RecordUpdate } from "./ledger.ts";
 import type { DOState, Env } from "./types.ts";
 import { acquireSlots } from "./gateclient.ts";
 import { fakeAiConfig } from "./fakeai.ts";
-import { addUnjudged } from "./health.ts";
+import { addUnjudged, recordEvent } from "./health.ts";
 import { recordCutOff } from "./cutoffs.ts";
 import { GATE_MAX_WAIT_MS } from "./gate.ts";
 
@@ -291,6 +291,7 @@ export class MatchRoom {
             onCall: result.pieces ? (c) => calls.push(c) : undefined,
             observe: (o) => slots.lease.observe(i, o),
             onCutOff: (cut) => notes.push(recordCutOff(this.env, cut)),
+            onAccountProblem: (who) => notes.push(recordEvent(this.env, "provider_account_problem", who)),
           }),
         ),
       );

@@ -537,6 +537,25 @@ t("region rules: sanctioned locations can't create matches or take paid seats, w
   assert.equal((await call(env({ STAGING: "false", FAKE_AI: undefined }), "/matches", { tier: "rps", seats: ["a", "b"] }, { "x-test-country": "IR" })).status, 201);
 });
 
+t("alerts (PLAN 0.4): a sanctioned-location refusal is a /health warning, a company's own list isn't, and weakened rules degrade /health", async () => {
+  const e = env();
+  assert.equal((await call(e, "/matches", { tier: "rps", seats: ["a", "b"] }, from("SY"))).status, 451);
+  assert.equal((await call(e, "/matches", { tier: "rps", seats: ["a", "b"] }, from("SY", "198.51.100.60"))).status, 451);
+  assert.equal((await call(e, "/review", review, from("CN"))).status, 451, "Anthropic's own list, not the sanctions list");
+  await new Promise((r) => setTimeout(r, 20)); // the event is written in the background
+  const events: any[] = await (await e.HEALTH.get("global").fetch("https://health/events")).json();
+  assert.deepEqual(events.filter((x) => x.kind === "sanctions_region_attempt").map((x) => x.detail), ["SY"], "one per code, none for CN");
+  const h = await call(e, "/health");
+  assert.equal(h.body.status, "ok", "the control worked: a warning, not a reason");
+  assert.ok(h.body.warnings.includes("sanctions_region_attempt"), JSON.stringify(h.body));
+  const off = await call(env({ REGION_BLOCK: "off" }), "/health");
+  assert.equal(off.body.status, "degraded");
+  assert.ok(off.body.reasons.includes("region_rules_off"), JSON.stringify(off.body));
+  const open = await call(env({ BLOCKED_REGIONS_OPENAI: "none" }), "/health");
+  assert.equal(open.body.status, "degraded");
+  assert.ok(open.body.reasons.includes("region_selftest_failed:CN:openai"), JSON.stringify(open.body));
+});
+
 t("region rules: judge seats check the match's judges' companies", async () => {
   const e = env();
   const m = await call(e, "/matches", { tier: "judge", seats: ["alpha", "beta"], rules: "Pick the cheaper plan." }, from("US"));
