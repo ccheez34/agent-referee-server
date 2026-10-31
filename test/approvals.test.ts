@@ -121,10 +121,17 @@ test("the key is made inside the store, once, and never leaves it; every record 
   assert.equal((await go(e, "/pubkey")).body.public_key, k1.body.public_key, "the same key later");
   // The store signs; nothing it answers carries the private key (part A review 1).
   const ask = async (action: string, body?: unknown) => (await store.fetch(new Request(`https://store/${action}`, body === undefined ? {} : { method: "POST", body: JSON.stringify(body) }))).json() as Promise<any>;
-  const signed = await ask("sign", { payload: { a: 1 } });
-  assert.equal(await verifyRecord(signed.record, k1.body.public_key), true);
-  for (const out of [signed, await ask("pubkey"), await ask("key"), await ask("list")]) assert.ok(!/"d":/.test(JSON.stringify(out)), "no private key in any answer");
+  const made = await ask("approve", { ...deploy, request_id: "store-0001-abcd" });
+  assert.equal(await verifyRecord(made.approval, k1.body.public_key), true);
+  for (const out of [made, await ask("pubkey"), await ask("key"), await ask("list")]) assert.ok(!/"d":/.test(JSON.stringify(out)), "no private key in any answer");
   assert.equal((await ask("key")).error, "Unknown action.");
+  // It signs nothing it's handed: there's no "sign" or "add", and it builds every approval itself, within the limits
+  // (fresh read of 1091ea5, #3: a handed-in payload got a year-long, 20-use approval signed).
+  for (const a of ["sign", "add", "find-request"]) assert.equal((await ask(a, { payload: { a: 1 } })).error, "Unknown action.");
+  const store400 = async (body: unknown) => (await store.fetch(new Request("https://store/approve", { method: "POST", body: JSON.stringify(body) }))).status;
+  assert.equal(await store400({ ...deploy, expires_in_hours: 8760 }), 400);
+  assert.equal(await store400({ ...deploy, max_uses: 21 }), 400);
+  assert.equal(await store400({ ...deploy, action: "anything" }), 400);
 });
 
 test("an approval is exactly the gate's record: the exact action and target, and it expires", async () => {
@@ -160,6 +167,72 @@ test("a double tap gives the first approval back, not a second one (fresh read o
   assert.equal((await go(e, "/approve", { ...body, request_id: "tap-0002-abcd" }, OWNER)).body.approval.payload.nonce === a.body.approval.payload.nonce, false, "a new request id is a new approval");
   // The same id with different fields is refused, not answered with the old approval (part A review 1).
   assert.equal((await go(e, "/approve", { ...body, target: "agent-referee-server:staging" }, OWNER)).status, 409);
+  // ...and so is a different length, a newer policy version, a revoked or an expired first approval (fresh read of
+  // 1091ea5, #1): a same-id call never hands back an approval other than the one asked for, or one that no longer counts.
+  const shorter = await go(e, "/approve", { ...body, expires_in_hours: 0.25 }, OWNER);
+  assert.deepEqual([shorter.status, shorter.body.approval], [409, undefined]);
+  await go(e, "/policy", { version: "2026-11-01.2" }, OWNER);
+  assert.equal((await go(e, "/approve", body, OWNER)).status, 409, "another policy version");
+  await go(e, "/policy", { version: POLICY }, OWNER);
+  assert.equal((await go(e, "/approve", body, OWNER)).body.repeat, true, "back under the same version, it's the same approval");
+  await go(e, "/revoke", { nonce: a.body.approval.payload.nonce }, OWNER);
+  const afterRevoke = await go(e, "/approve", body, OWNER);
+  assert.deepEqual([afterRevoke.status, /revoked or has expired/.test(afterRevoke.body.error)], [409, true]);
+});
+
+test("an expired first approval isn't handed back for its request id", async () => {
+  const { e, store } = await env();
+  await go(e, "/policy", { version: POLICY }, OWNER);
+  const body = { ...deploy, expires_in_hours: 0.25, request_id: "tap-0003-abcd" };
+  assert.equal((await go(e, "/approve", body, OWNER)).status, 200);
+  store.now = () => Date.now() + 20 * 60_000; // 20 minutes later: it expired after 15
+  assert.equal((await go(e, "/approve", body, OWNER)).status, 409);
+});
+
+test("revoke-all signs and stores every revocation in one turn and one write; a store failure answers, never throws", async () => {
+  const state = (() => {
+    const d = new Map<string, unknown>();
+    let chain: Promise<unknown> = Promise.resolve();
+    const s = {
+      puts: 0,
+      failPut: false,
+      storage: {
+        async get(k: string) { return structuredClone(d.get(k)); },
+        async put(k: string, v: unknown) {
+          if (s.failPut && k === "records") throw new Error("storage unavailable");
+          if (k === "records") s.puts++;
+          d.set(k, structuredClone(v));
+        },
+      },
+      blockConcurrencyWhile<T>(f: () => Promise<T>): Promise<T> {
+        const run = chain.then(f);
+        chain = run.catch(() => {});
+        return run;
+      },
+    };
+    return s;
+  })();
+  const store = new ApprovalStore(state);
+  const e = { OWNER_TOKEN: OWNER, APPROVALS: { idFromName: (x: string) => x, get: () => ({ fetch: (u: string, i?: RequestInit) => store.fetch(new Request(u, i)) }) } } as any;
+  await go(e, "/policy", { version: POLICY }, OWNER);
+  for (const t of ["npm:a@1.0.0", "npm:b@1.0.0", "npm:c@1.0.0"]) await go(e, "/approve", { ...deploy, action: "publish", target: t }, OWNER);
+  // An approval sent during revoke-all lands wholly before it (and is revoked) or wholly after it (and stays live).
+  const before = state.puts;
+  const [all, late] = await Promise.all([go(e, "/revoke", { all: true }, OWNER), go(e, "/approve", { ...deploy, target: "npm:d@1.0.0" }, OWNER)]);
+  assert.equal(late.status, 200);
+  assert.equal(state.puts - before, 2, "one write for all the revocations, one for the late approval");
+  const live = (await go(e, "/status", {}, OWNER)).body.live.map((r: any) => r.payload.target);
+  assert.ok((all.body.revoked === 3 && live.join() === "npm:d@1.0.0") || (all.body.revoked === 4 && live.length === 0), JSON.stringify([all.body.revoked, live]));
+  await go(e, "/approve", { ...deploy, target: "npm:e@1.0.0" }, OWNER);
+  const liveNow = (await go(e, "/status", {}, OWNER)).body.live.length;
+  state.failPut = true;
+  const failed = await go(e, "/revoke", { all: true }, OWNER);
+  assert.deepEqual([failed.status, /Nothing was revoked/.test(failed.body.error)], [503, true]);
+  const failedApprove = await go(e, "/approve", deploy, OWNER);
+  assert.deepEqual([failedApprove.status, /Nothing was approved/.test(failedApprove.body.error)], [503, true]);
+  state.failPut = false;
+  assert.equal((await go(e, "/status", {}, OWNER)).body.live.length, liveNow, "the failed calls stored nothing");
+  assert.equal((await go(e, "/revoke", { all: true }, OWNER)).body.revoked, liveNow, "the store still works afterwards");
 });
 
 test("revocations name the approval's nonce; revoke-all; the list is open to anyone, as the gate reads it", async () => {
@@ -201,9 +274,9 @@ test("freeze: the list answers 503 so every gate refuses, nothing new is signed,
   assert.equal((await go(e, "/approve", deploy, OWNER)).status, 409);
   assert.equal((await go(e, "/revoke", { nonce: a.payload.nonce }, OWNER)).status, 200);
   assert.equal((await go(e, "/status", {}, OWNER)).body.frozen, true);
-  // A freeze that lands after the Worker's own check still stops the new approval in the store (part A review 1).
-  const late = await (await store.fetch(new Request("https://store/add", { method: "POST", body: JSON.stringify({ record: { payload: { type: "approval", nonce: "e".repeat(32), expires_at: new Date(Date.now() + 3_600_000).toISOString() } } }) }))).json();
-  assert.deepEqual(late, { frozen: true });
+  // The freeze is checked inside the store, in the same turn that would sign (part A review 1; fresh read of 1091ea5).
+  const late = await store.fetch(new Request("https://store/approve", { method: "POST", body: JSON.stringify(deploy) }));
+  assert.deepEqual([late.status, ((await late.json()) as any).error], [409, "Approvals are frozen. Unfreeze them first. Nothing was approved."]);
   await go(e, "/freeze", { on: false }, OWNER);
   assert.equal((await go(e, "/approvals")).status, 200);
   assert.equal((await go(e, "/approvals")).body.approvals.length, 2, "the late approval wasn't stored");

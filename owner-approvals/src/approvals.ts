@@ -6,8 +6,7 @@
 // Deploying it, and setting its token, is the owner's (installing a server is on his owner-only list).
 
 export const APPROVAL_FORMAT = "agent-referee-owner-approval-v1";
-// The gate policy's owner-only actions. Whether publishing stays owner-only is the owner's call; approving one only adds
-// a way to say yes.
+// The gate policy's owner-only actions. Publishing is on his list (his "2. A", Oct 31, 12:16).
 export const ACTIONS = ["deploy", "publish", "payment", "delete", "secret", "install", "rule_change"] as const;
 export type Action = (typeof ACTIONS)[number];
 const HEX64 = /^[0-9a-f]{64}$/;
@@ -139,48 +138,107 @@ export class ApprovalStore {
     const action = new URL(req.url).pathname.slice(1);
     const st = this.state.storage;
     const body: any = req.method === "POST" ? await req.json().catch(() => ({})) : {};
-    const now = this.now();
-    const fresh = (list: Envelope[]) =>
+    const fresh = (list: Envelope[], now: number) =>
       list.filter((r) => (r.payload.type === "revocation" ? Date.parse(String(r.payload.issued_at)) > now - KEEP_REVOCATION_MS : Date.parse(String(r.payload.expires_at)) > now - KEEP_MS));
     if (action === "pubkey") return json(200, { public_key: (await storeKey(this.state)).publicKey });
-    // Signs a payload the Worker built, checks it with the same key, and hands back only the envelope.
-    if (action === "sign") {
-      try {
-        return json(200, { record: await signRecord(body.payload, await storeKey(this.state)) });
-      } catch (e: any) {
-        return json(503, { error: String(e?.message ?? e) });
-      }
-    }
-    if (action === "find-request") {
-      const rids: Record<string, { nonce: string; at: number }> = (await st.get("rids")) ?? {};
-      const hit = rids[body.request_id];
-      const record = hit && now - hit.at < REQUEST_ID_MS ? fresh((await st.get("records")) ?? []).find((r) => r.payload.type === "approval" && r.payload.nonce === hit.nonce) : undefined;
-      return json(200, { record: record ?? null });
-    }
-    if (action === "add") {
-      // One add at a time (blockConcurrencyWhile), so a repeated request id always finds the first record, and a freeze
-      // that lands after the Worker's own check still stops a new approval (part A review 1, Luna and Sonnet).
+    // The store builds and signs every record itself: it never signs a payload it's handed, so no caller can get an
+    // approval past the limits, the freeze or the policy version (fresh read of 1091ea5, #3). Each action runs as one
+    // turn (blockConcurrencyWhile), so approvals, revocations and the freeze never interleave (#2). The key is fetched
+    // first, because storeKey takes a turn of its own. Nothing throws out of a turn: an error there would reset the store.
+    if (action === "approve") {
+      const parsed = parseApproval(body);
+      if (!parsed.ok) return json(400, { error: parsed.error });
+      const v = parsed.value;
+      const signer = await storeKey(this.state);
       const out = await this.state.blockConcurrencyWhile(async () => {
-        const list: Envelope[] = fresh((await st.get("records")) ?? []);
-        const isApproval = body.record?.payload?.type === "approval";
-        if (isApproval && (await st.get("frozen"))) return { frozen: true };
-        const rid: string | undefined = body.request_id;
-        let rids: Record<string, { nonce: string; at: number }> = {};
-        if (rid) {
-          rids = Object.fromEntries(Object.entries((await st.get("rids")) ?? {}).filter(([, v]: any) => now - v.at < REQUEST_ID_MS)) as any;
-          const first = rids[rid] && list.find((r) => r.payload.type === "approval" && r.payload.nonce === rids[rid].nonce);
-          if (first) return { ok: true, existing: first };
+        try {
+          if (await st.get("frozen")) return { status: 409, body: { error: "Approvals are frozen. Unfreeze them first. Nothing was approved." } };
+          const policy_version: string | undefined = await st.get("policy_version");
+          if (!policy_version) return { status: 409, body: { error: "Set the policy version first: POST /policy with the gate policy's version." } };
+          const now = this.now();
+          const list = fresh((await st.get("records")) ?? [], now);
+          const rids: Record<string, { nonce: string; at: number }> = Object.fromEntries(Object.entries((await st.get("rids")) ?? {}).filter(([, x]: any) => now - x.at < REQUEST_ID_MS)) as any;
+          const hit = v.request_id ? rids[v.request_id] : undefined;
+          const first = hit && list.find((r) => r.payload.type === "approval" && r.payload.nonce === hit.nonce);
+          if (first) {
+            // The same request again (a double tap) gets the first approval back, but only if every field, the length
+            // and the policy version match, and it's still live; otherwise nothing is approved (fresh read of 1091ea5, #1).
+            const p = first.payload;
+            const same = p.action === v.action && p.target === v.target && p.target_sha256 === v.target_sha256 && p.max_uses === v.max_uses && Date.parse(String(p.expires_at)) - Date.parse(String(p.issued_at)) === Math.round(v.hours * 3_600_000) && p.policy_version === policy_version;
+            if (!same) return { status: 409, body: { error: "This request id was already used for a different approval, or under another policy version. Nothing new was approved." } };
+            const revoked = list.some((r) => r.payload.type === "revocation" && r.payload.nonce === p.nonce);
+            if (revoked || Date.parse(String(p.expires_at)) <= now) return { status: 409, body: { error: "This request id's approval was revoked or has expired. Send a new request id. Nothing new was approved." } };
+            return { status: 200, body: { approval: first, repeat: true } };
+          }
+          const payload = {
+            format: APPROVAL_FORMAT,
+            type: "approval",
+            action: v.action,
+            target: v.target,
+            target_sha256: v.target_sha256,
+            policy_version,
+            issued_at: new Date(now).toISOString(),
+            expires_at: new Date(now + Math.round(v.hours * 3_600_000)).toISOString(),
+            nonce: hex(16),
+            max_uses: v.max_uses,
+          };
+          const record = await signRecord(payload, signer);
+          list.push(record);
+          await st.put("records", list.slice(-MAX_RECORDS));
+          if (v.request_id) await st.put("rids", { ...rids, [v.request_id]: { nonce: payload.nonce, at: now } });
+          return { status: 200, body: { approval: record } };
+        } catch (e: any) {
+          return { status: 503, body: { error: `Couldn't sign or store the approval: ${String(e?.message ?? e).slice(0, 200)}. Nothing was approved.` } };
         }
-        list.push(body.record);
-        await st.put("records", list.slice(-MAX_RECORDS));
-        if (rid) await st.put("rids", { ...rids, [rid]: { nonce: String(body.record.payload.nonce), at: now } });
-        return { ok: true };
       });
-      return json(200, out);
+      return json(out.status, out.body);
+    }
+    // One nonce, or every live approval, revoked in one turn and stored in one write. An already-revoked approval gets
+    // its earlier revocation back (part A review 1). If signing fails partway, what was signed is kept and counted.
+    if (action === "revoke") {
+      const all = body?.all === true;
+      const one = typeof body?.nonce === "string" ? body.nonce.trim().toLowerCase() : "";
+      if (!all && !NONCE.test(one)) return json(400, { error: 'Send {"nonce": "<the approval\'s nonce>"} or {"all": true}.' });
+      const signer = await storeKey(this.state);
+      const out = await this.state.blockConcurrencyWhile(async () => {
+        try {
+          const now = this.now();
+          const list = fresh((await st.get("records")) ?? [], now);
+          if (!all && !list.some((r) => r.payload.type === "approval" && r.payload.nonce === one))
+            return { status: 404, body: { error: "No approval with that nonce is on file here. Nothing was revoked." } };
+          const nonces = all ? live(list, now).map((r) => String(r.payload.nonce)) : [one];
+          const done = new Map(list.filter((r) => r.payload.type === "revocation").map((r) => [r.payload.nonce, r]));
+          const revocations: Envelope[] = [];
+          let added = 0;
+          let failed = "";
+          for (const nonce of nonces) {
+            const earlier = done.get(nonce);
+            if (earlier) {
+              revocations.push(earlier);
+              continue;
+            }
+            try {
+              const r = await signRecord({ format: APPROVAL_FORMAT, type: "revocation", nonce, issued_at: new Date(now).toISOString() }, signer);
+              list.push(r);
+              revocations.push(r);
+              added++;
+            } catch (e: any) {
+              failed = String(e?.message ?? e).slice(0, 200);
+              break;
+            }
+          }
+          if (added) await st.put("records", list.slice(-MAX_RECORDS));
+          if (failed) return { status: 503, body: { error: `Couldn't sign: ${failed}. ${revocations.length} of ${nonces.length} revoked.`, revocations } };
+          return { status: 200, body: all ? { revoked: revocations.length, revocations } : { revocation: revocations[0] } };
+        } catch (e: any) {
+          return { status: 503, body: { error: `Couldn't store the revocations: ${String(e?.message ?? e).slice(0, 200)}. Nothing was revoked.` } };
+        }
+      });
+      return json(out.status, out.body);
     }
     // The gate reads {"approvals": [...]} and tells approvals and revocations apart by `type`.
     if (action === "list")
-      return json(200, { approvals: fresh((await st.get("records")) ?? []), policy_version: (await st.get("policy_version")) ?? null, frozen: !!(await st.get("frozen")) });
+      return json(200, { approvals: fresh((await st.get("records")) ?? [], this.now()), policy_version: (await st.get("policy_version")) ?? null, frozen: !!(await st.get("frozen")) });
     if (action === "set-policy") {
       await st.put("policy_version", body.version);
       return json(200, { ok: true });
@@ -196,6 +254,11 @@ export class ApprovalStore {
 const store = (env: Env) => env.APPROVALS.get(env.APPROVALS.idFromName("global"));
 const call = async (env: Env, action: string, body?: unknown) =>
   (await store(env).fetch(`https://store/${action}`, body === undefined ? undefined : { method: "POST", body: JSON.stringify(body) })).json() as Promise<any>;
+// The store's own answer, status and all (approve and revoke decide everything inside the store).
+const pass = async (env: Env, action: string, body: unknown) => {
+  const r = await store(env).fetch(`https://store/${action}`, { method: "POST", body: JSON.stringify(body) });
+  return json(r.status, await r.json());
+};
 
 const live = (records: Envelope[], now: number) => {
   const revoked = new Set(records.filter((r) => r.payload.type === "revocation").map((r) => r.payload.nonce));
@@ -239,65 +302,7 @@ export async function handle(req: Request, env: Env, page: () => Response): Prom
     await call(env, "set-policy", { version });
     return json(200, { ok: true, policy_version: version });
   }
-  if (path === "/revoke") {
-    const { approvals } = await call(env, "list");
-    let nonces: string[];
-    if (body?.all === true) nonces = live(approvals, now).map((r) => String(r.payload.nonce));
-    else {
-      const nonce = typeof body?.nonce === "string" ? body.nonce.trim().toLowerCase() : "";
-      if (!NONCE.test(nonce)) return json(400, { error: 'Send {"nonce": "<the approval\'s nonce>"} or {"all": true}.' });
-      // A mistyped nonce would revoke nothing, so say so instead of signing it.
-      if (!approvals.some((r: Envelope) => r.payload.type === "approval" && r.payload.nonce === nonce))
-        return json(404, { error: "No approval with that nonce is on file here. Nothing was revoked." });
-      nonces = [nonce];
-    }
-    // An approval that's already revoked gets its revocation back, not another one (part A review 1, Sonnet).
-    const done = new Map(approvals.filter((r: Envelope) => r.payload.type === "revocation").map((r: Envelope) => [r.payload.nonce, r]));
-    const revocations: Envelope[] = [];
-    for (const nonce of nonces) {
-      const earlier = done.get(nonce);
-      if (earlier) {
-        revocations.push(earlier as Envelope);
-        continue;
-      }
-      const signed = await call(env, "sign", { payload: { format: APPROVAL_FORMAT, type: "revocation", nonce, issued_at: new Date(now).toISOString() } });
-      if (!signed.record) return json(503, { error: `Couldn't sign: ${signed.error ?? "unknown"}. ${revocations.length} of ${nonces.length} revoked.`, revocations });
-      await call(env, "add", { record: signed.record });
-      revocations.push(signed.record);
-    }
-    return json(200, body?.all === true ? { revoked: revocations.length, revocations } : { revocation: revocations[0] });
-  }
-  const parsed = parseApproval(body);
-  if (!parsed.ok) return json(400, { error: parsed.error });
-  const v = parsed.value;
-  const l = await call(env, "list");
-  if (l.frozen) return json(409, { error: "Approvals are frozen. Unfreeze them first. Nothing was approved." });
-  if (!l.policy_version) return json(409, { error: "Set the policy version first: POST /policy with the gate policy's version." });
-  // The same request sent twice (a double tap) gives the first approval back, not a second one (fresh read, #3). The
-  // same id with different fields is refused, not answered with the old approval (part A review 1, Sonnet).
-  const same = (r: Envelope) => r.payload.action === v.action && r.payload.target === v.target && r.payload.target_sha256 === v.target_sha256 && r.payload.max_uses === v.max_uses;
-  const repeat = (r: Envelope) => (same(r) ? json(200, { approval: r, repeat: true }) : json(409, { error: "This request id was already used for a different approval. Nothing new was approved." }));
-  if (v.request_id) {
-    const earlier = (await call(env, "find-request", { request_id: v.request_id })).record;
-    if (earlier) return repeat(earlier);
-  }
-  const payload = {
-    format: APPROVAL_FORMAT,
-    type: "approval",
-    action: v.action,
-    target: v.target,
-    target_sha256: v.target_sha256,
-    policy_version: l.policy_version,
-    issued_at: new Date(now).toISOString(),
-    expires_at: new Date(now + Math.round(v.hours * 3_600_000)).toISOString(),
-    nonce: hex(16),
-    max_uses: v.max_uses,
-  };
-  const signed = await call(env, "sign", { payload });
-  if (!signed.record) return json(503, { error: `Couldn't sign: ${signed.error ?? "unknown"}. Nothing was approved.` });
-  const record: Envelope = signed.record;
-  const added = await call(env, "add", { record, ...(v.request_id ? { request_id: v.request_id } : {}) });
-  if (added.frozen) return json(409, { error: "Approvals are frozen. Unfreeze them first. Nothing was approved." });
-  if (added.existing) return repeat(added.existing);
-  return json(200, { approval: record });
+  // Revoking and approving are decided inside the store, in one turn each (fresh read of 1091ea5, #2 and #3).
+  if (path === "/revoke") return pass(env, "revoke", body);
+  return pass(env, "approve", body);
 }

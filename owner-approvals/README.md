@@ -14,13 +14,14 @@ A small Cloudflare Worker, separate from Agent Referee, with its own Ed25519 key
   - `action`: one of the gate policy's owner-only actions (deploy, publish, payment, delete, secret, install, rule_change).
   - `target` (plain printable characters, at most 200) and `target_sha256` (64 hex, or null) are compared exactly by the gate, so the exact version goes in one of them: for example `agent-referee-server:production@<40-hex commit>`, or a bundle's sha256.
   - `max_uses` 1 to 20; it expires 0.25 to 24 hours after it's made.
-  - An optional `request_id`: the same id within a day gives the first approval back.
-- `POST /revoke` (owner's token): `{"nonce": ...}` signs `{format, type: "revocation", nonce, issued_at}`, where `nonce` is the approval's. A nonce with no approval on file is refused, so a typo can't look like a revocation. `{"all": true}` revokes every live approval.
+  - An optional `request_id`: the same id within a day gives the first approval back, only if every field, the length and the policy version match and it's still live. Otherwise it's refused (409) and nothing is approved.
+- `POST /revoke` (owner's token): `{"nonce": ...}` signs `{format, type: "revocation", nonce, issued_at}`, where `nonce` is the approval's. A nonce with no approval on file is refused, so a typo can't look like a revocation. `{"all": true}` revokes every live approval, in one step: an approval made at the same moment lands wholly before it (revoked) or after it (live). In an emergency, freeze first.
 - `POST /freeze` (owner's token): `{"on": true}` makes `GET /approvals` answer 503, so every gate refuses every owner-only step until `{"on": false}`. Revoking still works while frozen; approving doesn't.
 - `POST /status` (owner's token): the live approvals, the policy version and whether it's frozen. The page's "Show them" uses it.
 - `POST /policy` (owner's token): the policy version that approvals carry: the gate policy's `version`.
 - `GET /approvals`: open to anyone, as the design says; the signatures are what count. It returns `{"approvals": [...]}`, approvals and revocations in one list. Approvals are kept 7 days past expiry, revocations 8 days past issue, so a revocation always outlives its approval.
 - `GET /pubkey`: open to anyone. The key is made inside the Worker's own store the first time it's needed, so the private key exists nowhere else, and the key records are signed with can't drift from the one served.
+- **The store builds and signs every record itself,** in one step each, with its own clock and nonce: approvals only within the limits, under the current policy version and never while frozen. It signs nothing it's handed. The private key never leaves the store. Code deployed with the store's binding can still ask it for an approval within those limits, so deploying is the trust boundary (Setup, step 1).
 - There's no lockout on wrong tokens: a token of 32 or more random characters can't be guessed, and a lockout would let anyone stop the owner from revoking.
 
 ## Setup (for the owner, when he says yes)
