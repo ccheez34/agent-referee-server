@@ -77,7 +77,9 @@ export async function observeGithub(
   const doFetch = opts.fetch ?? fetch;
   const token = opts.token?.trim();
   const headers: Record<string, string> = { accept: "application/vnd.github+json", "user-agent": "agent-referee-proof", "x-github-api-version": "2022-11-28", ...(token ? { authorization: `Bearer ${token}` } : {}) };
-  const get = async (path: string): Promise<{ ok: true; data: any } | { ok: false; status: number; error: string }> => {
+  // A failure keeps GitHub's own status as `upstream` where the caller needs it; a success says whether GitHub's Link
+  // header offers another page (`more`).
+  const get = async (path: string): Promise<{ ok: true; data: any; more: boolean } | { ok: false; status: number; error: string; upstream?: number }> => {
     let res: Response;
     try {
       res = await doFetch(`https://api.github.com${path}`, { headers, redirect: "manual", signal: AbortSignal.timeout(10_000) });
@@ -92,11 +94,12 @@ export async function observeGithub(
     } catch (e: any) {
       return fail(503, `couldn't observe: GitHub didn't answer (${e?.name === "TimeoutError" ? "timed out" : "network"})`);
     }
-    if (res.status === 404 || res.status === 422) return fail(404, "not found: the repository is private or doesn't exist, or the commit isn't in it");
-    if (res.status === 403 || res.status === 429) return fail(503, "couldn't observe: GitHub's rate limit; try again later");
+    if (res.status === 404 || res.status === 422) return { ...fail(404, "not found: the repository is private or doesn't exist, or the commit isn't in it"), upstream: res.status };
+    // 403 is usually the rate limit, but not always (code review 2): either way nothing is observed.
+    if (res.status === 403 || res.status === 429) return fail(503, `couldn't observe: GitHub refused the request (${res.status}, usually its rate limit); try again later`);
     if (!res.ok) return fail(502, `couldn't observe: GitHub answered ${res.status}`);
     const data = await res.json().catch(() => null);
-    return data && typeof data === "object" ? { ok: true, data } : fail(502, "couldn't observe: GitHub's answer couldn't be read");
+    return data && typeof data === "object" ? { ok: true, data, more: /rel="next"/.test(res.headers.get("link") ?? "") } : fail(502, "couldn't observe: GitHub's answer couldn't be read");
   };
   // The repository: public only (fresh read #5), and its default branch.
   const info = await get(`/repos/${repo}`);
@@ -123,8 +126,11 @@ export async function observeGithub(
       onDefault = contained;
     }
   }
-  const heads = await get(`${base}/branches-where-head`);
-  if (!heads.ok && heads.status !== 404) return heads;
+  // GitHub documents this list as every branch whose head is the commit, with no pages. per_page and the Link header
+  // cover it if it ever pages (code review 2). A 404 means no branch lists it. Anything else, including its 422
+  // ("validation failed, or the endpoint has been spammed"), gives no receipt rather than an empty list.
+  const heads = await get(`${base}/branches-where-head?per_page=100`);
+  if (!heads.ok && heads.upstream !== 404) return heads.upstream === 422 ? fail(503, "couldn't observe: GitHub didn't list the branches for this commit; try again later") : heads;
   const headList: any[] = heads.ok ? heads.data : [];
   if (!Array.isArray(headList)) return fail(502, "couldn't observe: GitHub's answer about branches couldn't be read");
   if (headList.some((b: any) => String(b?.commit?.sha ?? "").toLowerCase() !== sha)) return fail(502, "couldn't observe: GitHub answered about a different commit");
@@ -132,7 +138,7 @@ export async function observeGithub(
     default_branch: defaultBranch || null,
     on_default_branch: onDefault,
     branch_heads: headList.slice(0, 100).map((b: any) => String(b?.name ?? "")),
-    ...(headList.length > 100 ? { branch_heads_truncated: true } : {}),
+    ...(headList.length > 100 || (heads.ok && heads.more) ? { branch_heads_truncated: true } : {}),
   };
   let observed: Record<string, unknown>;
   if (check === "github_commit") {

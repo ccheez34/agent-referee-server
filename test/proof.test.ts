@@ -90,6 +90,20 @@ test("L1: the comparison and the branch list must be about the commit asked for,
   const many = fakeGithub({ "/branches-where-head": () => Response.json(Array.from({ length: 101 }, (_, i) => ({ name: `b${i}`, commit: { sha: SHA } }))) });
   const m: any = await observeGithub("github_commit", "o/r", SHA, { fetch: many.f });
   assert.deepEqual([m.observed.branch_heads.length, m.observed.branch_heads_truncated], [100, true]);
+  // Asked with per_page=100, and flagged when GitHub's Link header offers another page (code review 2).
+  assert.ok(many.calls.some((x) => x.url.endsWith("/branches-where-head?per_page=100")));
+  _clearProofCache();
+  const paged = fakeGithub({ "/branches-where-head": () => Response.json([{ name: "a", commit: { sha: SHA } }], { headers: { link: '<https://api.github.com/x?page=2>; rel="next"' } }) });
+  const pg: any = await observeGithub("github_commit", "o/r", SHA, { fetch: paged.f });
+  assert.deepEqual([pg.observed.branch_heads, pg.observed.branch_heads_truncated], [["a"], true]);
+  // 404: no branch lists it. 422 ("validation failed, or the endpoint has been spammed"): no receipt, not an empty list.
+  _clearProofCache();
+  const none: any = await observeGithub("github_commit", "o/r", SHA, { fetch: fakeGithub({ "/branches-where-head": () => new Response("{}", { status: 404 }) }).f });
+  assert.deepEqual([none.ok, none.observed?.branch_heads, "branch_heads_truncated" in (none.observed ?? {})], [true, [], false]);
+  _clearProofCache();
+  const spam: any = await observeGithub("github_commit", "o/r", SHA, { fetch: fakeGithub({ "/branches-where-head": () => new Response("{}", { status: 422 }) }).f });
+  assert.deepEqual([spam.ok, spam.status], [false, 503]);
+  assert.match(spam.error, /didn't list the branches/);
 });
 
 test("L1 github_checks: every run and status with who posted it, in-progress runs never shown as passed; cached 10 minutes as a copy", async () => {
