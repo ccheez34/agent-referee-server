@@ -560,11 +560,13 @@ t("alerts (PLAN 0.4): a sanctioned-location refusal is a /health warning, a comp
   assert.equal(open.body.status, "degraded");
   assert.deepEqual(open.body.legal, ["alert"], JSON.stringify(open.body));
   // F10 (ALERTS-spec v2): the public page never names the rule, the probe or the provider; the admin stats do.
-  assert.ok(!/region_selftest_failed|region_rules_off|provider_account_problem/.test(JSON.stringify(open.body)), JSON.stringify(open.body));
+  assert.ok(!/region_selftest_failed|region_rules_off|provider_account_problem|region_list_/.test(JSON.stringify(open.body)), JSON.stringify(open.body));
+  assert.ok(open.body.warnings.includes("region_settings"), JSON.stringify(open.body.warnings));
   const eo = env({ BLOCKED_REGIONS_OPENAI: "none" });
   const stats = await call(eo, "/admin/stats", undefined, { authorization: `Bearer ${ADMIN}` });
   assert.equal(stats.status, 200, JSON.stringify(stats.body));
   assert.ok(stats.body.legal_now.some((x: any) => x.code === "region_selftest_failed:CN:openai" && x.from === "settings"), JSON.stringify(stats.body.legal_now));
+  assert.ok(stats.body.region_settings_detail.includes("region_list_weakened:openai"), JSON.stringify(stats.body.region_settings_detail));
   // The keyword a second monitor watches (review R2): present only when the list isn't empty.
   const raw = await (await app.fetch(new Request("https://x/health"), env({ REGION_BLOCK: "off" }), ctx)).text();
   assert.ok(raw.includes('"legal":["alert"]'), raw);

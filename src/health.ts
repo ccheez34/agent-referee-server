@@ -9,6 +9,9 @@ export type HealthEvent = { kind: HealthEventKind; at: number; detail: string; f
  * can never push other events out of the list (fresh read, F3). */
 const ALERT_KINDS: HealthEventKind[] = ["sanctions_region_attempt", "provider_account_problem", "provider_auth_failed", "provider_region_refused"];
 const ALERT_REFRESH_MS = 10 * 60_000;
+// A recurrence after this long is a new episode: its first_at starts again (fresh read of 30802a6, #2), so /admin/stats'
+// "since" never reaches back to an alert that had lapsed.
+const ALERT_EPISODE_MS = 24 * 3_600_000;
 /** A wallet whose payment failed to settle after the work was delivered: what it owes, its strikes, and whether it's banned. */
 export type WalletRecord = { owed_micro: number; strikes: number[]; permanent: boolean; history: { at: number; what: string; micro: number; detail: string }[] };
 /** Two strikes within this window (180 days) ban a wallet for good. */
@@ -58,7 +61,7 @@ export class Health {
       if (ALERT_KINDS.includes(body.kind)) {
         const old = events.find((e) => e.kind === body.kind && e.detail === detail);
         if (old && now - old.at < ALERT_REFRESH_MS) return json(200, { ok: true, deduped: true });
-        if (old) (first_at = old.first_at ?? old.at), (events = events.filter((e) => e !== old));
+        if (old) (first_at = now - old.at < ALERT_EPISODE_MS ? old.first_at ?? old.at : undefined), (events = events.filter((e) => e !== old));
       }
       events.push({ kind: body.kind, at: now, detail, ...(first_at ? { first_at } : {}) });
       await st.put("events", keepEvents(events));
@@ -242,9 +245,19 @@ export const markRefunded = (env: Env, match_id: string) => healthCall(env, "unj
  */
 export const publicLegal = (legal: string[]): string[] => (legal.length ? ["alert"] : []);
 
+/**
+ * The same for the region-list warnings (fresh read of 30802a6, #1): "region_list_weakened:openai" would tell anyone
+ * which company's region rules are weaker. The public sees one "region_settings" warning; /admin/stats has the detail.
+ * The other warnings stay as they are (A4's sanctions_region_attempt says the control worked).
+ */
+export const publicWarnings = (warnings: string[]): string[] => {
+  const out = warnings.filter((w) => !/^region_list_(weakened|invalid):/.test(w));
+  return out.length === warnings.length ? warnings : [...out, "region_settings"];
+};
+
 /** The legal list's detail, for the admin token only: each code, where it comes from, and for an event, since when. */
 export function legalDetail(events: HealthEvent[], regionProblems: string[], now = Date.now()) {
-  const out: { code: string; from: "settings" | "event"; since?: string; last_seen?: string }[] = regionProblems.map((code) => ({ code, from: "settings" }));
+  const out: { code: string; from: "settings" | "event" | "error"; since?: string; last_seen?: string }[] = regionProblems.map((code) => ({ code, from: "settings" }));
   for (const e of events)
     if (e.kind === "provider_account_problem" && now - e.at < 24 * 3_600_000)
       out.push({ code: `provider_account_problem:${e.detail || "unknown"}`, from: "event", since: new Date(e.first_at ?? e.at).toISOString(), last_seen: new Date(e.at).toISOString() });
