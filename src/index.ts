@@ -425,7 +425,7 @@ async function reviewGuard(c: any, next: any) {
   }
   // A failed review isn't charged, so failed reviews are capped per address per day: nobody gets free AI calls in bulk.
   // Team and credits callers are counted by member and by account.
-  const caller = team ? `team:${team.member}` : credits ? `credits:${credits.account_id}` : await callerHash(c);
+  const caller = team ? `team:${team.member}` : credits ? await creditsCallerHash(c, credits.account_id) : await callerHash(c);
   const failLimit = Number(c.env.REVIEW_FAIL_LIMIT || 10);
   // Only a payment that at least claims to pay us the right amount takes slots before verification; anything else
   // goes straight to the paywall (which refuses it), and if the facilitator accepts it anyway the handler takes its
@@ -538,7 +538,7 @@ async function multiGuard(c: any, next: any) {
     c.set("review", { tier, input: v.value, commitment, t0 });
     return next();
   }
-  const caller = team ? `team:${team.member}` : credits ? `credits:${credits.account_id}` : await callerHash(c);
+  const caller = team ? `team:${team.member}` : credits ? await creditsCallerHash(c, credits.account_id) : await callerHash(c);
   const failLimit = Number(c.env.REVIEW_FAIL_LIMIT || 10);
   const price = priceMicro(multiPrices(c.env)[tier]);
   const plausible = c.env.PAYMENTS_ENABLED === "false" || !!team || !!credits || plausiblePayment(c.req.header("x-payment"), { payTo: c.env.PAY_TO, network: c.env.NETWORK, minMicro: price });
@@ -1058,6 +1058,14 @@ async function callerHash(c: any): Promise<string | undefined> {
   if (ip && ip.includes(":")) ip = ipv6Prefix64(ip);
   const day = new Date().toISOString().slice(0, 10);
   return ip ? (await sha256Hex(`${c.env.SIGNING_KEY || "demo"}|${day}|${ip}`)).slice(0, 20) : undefined;
+}
+
+/** A credits account's id for the daily failure counters, hashed like an address (daily salt, one way), so accounts
+ * spread over the 16 ledger shards as addresses do. With a "credits:" prefix every account shared shard-12 and its
+ * slice of the global ceiling, with the addresses whose hash starts with "c" (second fresh-agent check, Oct 30). */
+async function creditsCallerHash(c: any, accountId: string): Promise<string> {
+  const day = new Date().toISOString().slice(0, 10);
+  return (await sha256Hex(`${c.env.SIGNING_KEY || "demo"}|${day}|credits|${accountId}`)).slice(0, 20);
 }
 
 /** Runs every committed reviewer in parallel, so no reviewer sees another's verdict. All are waited for before the
@@ -1617,7 +1625,7 @@ async function creditsAuth(c: any, next: any) {
     return err(503, CREDITS_DOWN);
   }
   if (a.__status === 401) return err(401, "Unknown credits key, or it was replaced. Nothing was used.");
-  if (a.frozen && want === "POST") return jsonNoStore(403, { error: `This credits account is frozen. Nothing was used. Contact ${CREDITS_CONTACT}.`, credits: creditsSpendView(a.balance_micro) });
+  if (a.frozen && want === "POST") return jsonNoStore(403, { error: `This credits account is frozen. Nothing was used. Contact ${CREDITS_CONTACT}.`, reason: "frozen", credits: creditsSpendView(a.balance_micro) });
   c.set("credits", { account_id: a.account_id, key_hash: keyHash } as CreditsCaller);
   return next();
 }
@@ -1656,9 +1664,10 @@ async function creditsBudget(c: any, next: any) {
   if (q.__status === 429) {
     // 429, not 402: x402 clients read a 402 as a request for payment.
     stat(c, "credits_refused");
-    return jsonNoStore(429, { error: `Not enough credits: this ${g.tier} costs ${usdFromMicro(cost)} and the balance is ${usdFromMicro(q.balance_micro)}. Nothing was used. Top up at ${new URL(c.req.url).origin}/credits.`, credits: creditsSpendView(q.balance_micro) });
+    // The reason tells it apart from the review guard's own 429s (busy, too many failures): only this one means "top up".
+    return jsonNoStore(429, { error: `Not enough credits: this ${g.tier} costs ${usdFromMicro(cost)} and the balance is ${usdFromMicro(q.balance_micro)}. Nothing was used. Top up at ${new URL(c.req.url).origin}/credits.`, reason: "out_of_credits", credits: creditsSpendView(q.balance_micro) });
   }
-  if (q.__status === 403) return jsonNoStore(403, { error: `This credits account is frozen. Nothing was used. Contact ${CREDITS_CONTACT}.` });
+  if (q.__status === 403) return jsonNoStore(403, { error: `This credits account is frozen. Nothing was used. Contact ${CREDITS_CONTACT}.`, reason: "frozen" });
   if (q.__status === 401) return err(401, "Unknown credits key, or it was replaced. Nothing was used.");
   // Fail closed: nothing held means the review doesn't run. (409: a token already used; it never happens with a fresh one.)
   if (q.__status !== 200 || q.ok !== true) return err(503, CREDITS_DOWN);
@@ -1803,8 +1812,11 @@ app.post("/credits/checkout", async (c) => {
     return creditsRefusal(c, p.__status, "Can't start the checkout", `${why} Nothing was charged.`);
   }
   // 4. A new account's key is revealed only in the browser that started the checkout: a random nonce in a cookie,
-  //    its hash in the session's metadata. A top-up never issues a key, so it gets neither.
-  const nonce = topUp ? undefined : randomToken(32);
+  //    its hash in the session's metadata. A top-up never issues a key, so it gets neither. A browser that already has
+  //    a nonce keeps it, so a second checkout doesn't lock the first one's key out of this browser (second fresh-agent
+  //    check, Oct 30); each key is still revealed once.
+  const prior = cookieOf(c, NONCE_COOKIE);
+  const nonce = topUp ? undefined : prior && /^[0-9a-f]{64}$/.test(prior) ? prior : randomToken(32);
   const origin = new URL(c.req.url).origin;
   // 5. The Checkout Session, priced from CREDITS_PACKS (the one source of truth: no Stripe price ids).
   let session: any;
@@ -1831,7 +1843,8 @@ app.post("/credits/checkout", async (c) => {
     return creditsRefusal(c, 502, "Try again", "Checkout couldn't be started. Nothing was charged; try again in a minute.");
   }
   stat(c, "credits_checkout");
-  const cookie: Record<string, string> = nonce ? { "set-cookie": `${NONCE_COOKIE}=${nonce}; Path=/credits/done; Max-Age=86400; HttpOnly; Secure; SameSite=Lax` } : {};
+  // Path=/credits, so the next checkout from this browser sees it too.
+  const cookie: Record<string, string> = nonce ? { "set-cookie": `${NONCE_COOKIE}=${nonce}; Path=/credits; Max-Age=86400; HttpOnly; Secure; SameSite=Lax` } : {};
   if (wantsPage(c)) return new Response(null, { status: 303, headers: { location: session.url, ...NO_STORE, ...cookie } });
   return jsonNoStore(
     200,
@@ -1984,7 +1997,6 @@ app.post("/credits/done/reveal", async (c) => {
   const cfg = creditsConfig(c.env);
   const body = await creditsBody(c);
   const sid = body.session_id;
-  const clear = { "set-cookie": `${NONCE_COOKIE}=; Path=/credits/done; Max-Age=0; HttpOnly; Secure; SameSite=Lax` };
   const show = (status: number, o: { key: string; balance_micro?: number } | { problem: string }, extra: Record<string, string> = {}) =>
     wantsPage(c) ? creditsPage(status, keyPage(o), extra) : jsonNoStore(status, "key" in o ? { key: o.key, ...(o.balance_micro !== undefined ? { balance: usdFromMicro(o.balance_micro) } : {}) } : { error: o.problem }, extra);
   if (!checkoutSessionIdOk(sid, cfg.live)) return show(404, { problem: "There's no checkout here." });
@@ -1996,9 +2008,12 @@ app.post("/credits/done/reveal", async (c) => {
   try {
     r = await creditsJson(c.env, "credits-issue-key", { session_id: sid, nonce_hash: await sha256Hex(nonce), key_hash: await sha256Hex(key) }, [403, 409]);
   } catch {
-    return show(503, { problem: "The key can't be shown right now. Nothing is lost: go back and try again in a minute." });
+    // The ledger may have stored the key before the answer was lost; then a retry says "already shown". The credits
+    // are safe either way, and a lost key is replaced with a claim code (second fresh-agent check, Oct 30).
+    return show(503, { problem: `The key can't be shown right now. Your credits are safe. Go back and try again in a minute; if the page then says the key was already shown, email ${CREDITS_CONTACT} with your Stripe receipt for a one-time claim code.` });
   }
-  if (r.__status === 200) return show(200, { key, balance_micro: r.balance_micro }, clear);
+  // The cookie stays (another checkout from this browser may still need it); it expires after a day.
+  if (r.__status === 200) return show(200, { key, balance_micro: r.balance_micro });
   const problem =
     r.reason === "already_shown"
       ? `This key has already been shown. If you lost it, email ${CREDITS_CONTACT} with your Stripe receipt.`
@@ -2020,7 +2035,7 @@ app.post("/credits/claim", async (c) => {
   try {
     r = await creditsJson(c.env, "credits-claim", { code_hash: await sha256Hex(code), key_hash: await sha256Hex(key) }, [404, 409, 410]);
   } catch {
-    return show(503, { problem: "The claim can't be checked right now. The code still works: try again in a minute." });
+    return show(503, { problem: `The claim can't be checked right now. Your credits are safe. Try again in a minute; if the code then doesn't work, email ${CREDITS_CONTACT} for a new one.` });
   }
   if (r.__status === 200) return show(200, { key, balance_micro: r.balance_micro });
   return show(r.__status, { problem: r.reason === "expired" ? "This claim code has expired (they last 24 hours). Ask for a new one." : "This claim code doesn't work (it may have been used already)." });
@@ -2038,26 +2053,40 @@ function csvCell(v: unknown): string {
 app.get("/admin/credits/export", async (c) => {
   const denied = await admin(c);
   if (denied) return denied;
+  // Up to 200,000 lines per download (CREDITS_EXPORT_MAX_ROWS can lower it). A longer log says so, never silently: the
+  // x-credits-export-next header gives the ?after= value that continues it (second fresh-agent check, Oct 30).
+  const from = Number(c.req.query("after") ?? 0);
+  if (!Number.isSafeInteger(from) || from < 0) return err(400, "after must be a log sequence number (0 or more).");
+  const capSetting = Number(c.env.CREDITS_EXPORT_MAX_ROWS);
+  const cap = Number.isSafeInteger(capSetting) && capSetting >= 1 && capSetting <= 200_000 ? capSetting : 200_000;
   const rows: Record<string, unknown>[] = [];
-  let after = 0;
-  for (let n = 0; n < 200; n++) {
+  let after = from;
+  let more: number | null = null;
+  for (let n = 0; rows.length < cap; n++) {
     let r: any;
     try {
-      r = await creditsJson(c.env, "credits-export", { after, limit: 1_000, ...(n === 0 ? { log_admin: true } : {}) });
+      r = await creditsJson(c.env, "credits-export", { after, limit: Math.min(1_000, cap - rows.length), ...(n === 0 ? { log_admin: true } : {}) });
     } catch {
       return err(503, "The credits log can't be read right now; try again in a minute.");
     }
     rows.push(...r.entries);
-    if (r.next === null || r.next === undefined) break;
-    after = r.next;
+    more = typeof r.next === "number" ? r.next : null;
+    if (more === null) break;
+    after = more;
   }
   const lines = [[...CSV_COLS, "other"].join(",")];
   for (const row of rows) {
     const other = Object.fromEntries(Object.entries(row).filter(([k]) => !CSV_COLS.includes(k)));
     lines.push([...CSV_COLS.map((k) => csvCell(row[k])), csvCell(Object.keys(other).length ? other : undefined)].join(","));
   }
+  const part = from || more !== null ? `-after-${from}` : "";
   return new Response(lines.join("\r\n") + "\r\n", {
-    headers: { "content-type": "text/csv; charset=utf-8", "content-disposition": `attachment; filename="agent-referee-credits-${new Date().toISOString().slice(0, 10)}.csv"`, ...NO_STORE },
+    headers: {
+      "content-type": "text/csv; charset=utf-8",
+      "content-disposition": `attachment; filename="agent-referee-credits-${new Date().toISOString().slice(0, 10)}${part}.csv"`,
+      ...(more !== null ? { "x-credits-export-next": String(more) } : {}),
+      ...NO_STORE,
+    },
   });
 });
 

@@ -27,7 +27,7 @@ const mem = () => {
     d,
     storage: {
       async get(k: string) { return structuredClone(d.get(k)); },
-      async put(k: string, v: unknown) { d.set(k, structuredClone(v)); },
+      async put(k: any, v?: unknown) { for (const [x, y] of typeof k === "string" ? [[k, v]] : Object.entries(k)) d.set(x as string, structuredClone(y)); },
       async delete(k: any) { for (const x of [k].flat()) d.delete(x); return true; },
       async list(o: { prefix?: string; start?: string; limit?: number } = {}) {
         const ks = [...d.keys()].filter((k) => k.startsWith(o.prefix ?? "") && (!o.start || k >= o.start)).sort().slice(0, o.limit ?? Infinity);
@@ -271,7 +271,7 @@ t("checkout: a Checkout Session priced from CREDITS_PACKS, pinned API version, i
     const exp = Number(f.get("expires_at")) * 1000 - Date.now();
     assert.ok(exp > 30 * 60_000 && exp <= 31 * 60_000, "just over Stripe's 30-minute minimum");
     const cookie = r.headers.get("set-cookie")!;
-    assert.match(cookie, /^ar_credits_nonce=[0-9a-f]{64}; Path=\/credits\/done; Max-Age=86400; HttpOnly; Secure; SameSite=Lax$/);
+    assert.match(cookie, /^ar_credits_nonce=[0-9a-f]{64}; Path=\/credits; Max-Age=86400; HttpOnly; Secure; SameSite=Lax$/);
     assert.equal(f.get("metadata[nonce_hash]"), await hex(cookie.split(";")[0].split("=")[1]));
     assert.equal(r.headers.get("cache-control"), "no-store");
     assert.equal(r.headers.get("access-control-allow-origin"), null, "no CORS on /credits");
@@ -379,7 +379,7 @@ t("keys: revealed only with the nonce cookie, once; two reveals at once give one
   const both = await Promise.all([1, 2].map(() => post(e, "/credits/done/reveal", { session_id: sid }, { cookie: `ar_credits_nonce=${NONCE}` })));
   assert.deepEqual(both.map((r) => r.status).sort(), [200, 409]);
   const winner = both.find((r) => r.status === 200)!;
-  assert.match(winner.headers.get("set-cookie")!, /Max-Age=0/, "the cookie is cleared");
+  assert.equal(winner.headers.get("set-cookie"), null, "the cookie stays: another checkout from this browser may need it");
   assert.equal(winner.headers.get("cache-control"), "no-store");
   assert.equal((await get(e, "/credits/account", withKey(winner.body.key))).status, 200);
   const page = await req(e, "POST", "/credits/done/reveal", { body: `session_id=${sid}`, headers: { "content-type": "application/x-www-form-urlencoded", cookie: `ar_credits_nonce=${NONCE}` } });
@@ -457,6 +457,7 @@ t("spending: not enough credits is 429 with nothing used (not 402); wrong method
   const r = await post(e, "/credits/review", review, withKey(key));
   assert.equal(r.status, 429);
   assert.match(r.body.error, /Nothing was used/);
+  assert.equal(r.body.reason, "out_of_credits", "told apart from the guard's own 429s");
   assert.equal(r.body.credits.balance_micro, 30_000);
   assert.equal((await get(e, "/credits/review", withKey(key))).status, 405);
   assert.equal((await post(e, "/credits/review", review)).status, 401);
@@ -613,4 +614,92 @@ t("webhook: a discounted checkout is held, not credited at the full pack", async
   assert.equal((await webhook(e, event("checkout.session.completed", s))).status, 200);
   const v = await get(e, "/admin/credits/cs_test_routesdisc001", adminH);
   assert.equal(v.status, 404, "held: no account was created or credited");
+});
+
+// ---------- found by the second fresh-agent check (the money path, Oct 30, 17:28-17:51) ----------
+
+t("spending: a credits account is counted on the shard of its hashed id, like an address, not all on shard-12 (finding #3)", async () => {
+  const e = env(ON);
+  const key = await buyKey(e);
+  const acct = (await get(e, "/credits/account", withKey(key))).body.credits.account_id;
+  assert.equal((await post(e, "/credits/review", review, withKey(key))).status, 200);
+  const day = new Date().toISOString().slice(0, 10);
+  const caller = (await hex(`${keys.SIGNING_KEY}|${day}|credits|${acct}`)).slice(0, 20);
+  const keysOf = (l: any) => [...l.state.d.keys()] as string[];
+  const counted = [...e.LEDGER.objs].filter(([, l]: any) => keysOf(l).some((k) => k.startsWith("ro:") && k.endsWith(`:${caller}`))).map(([n]: any) => n);
+  assert.deepEqual(counted, [`shard-${parseInt(caller[0], 16)}`]);
+  const shards = [...e.LEDGER.objs].filter(([n]: any) => n !== "credits").map(([, l]: any) => l);
+  assert.ok(!shards.some((l: any) => keysOf(l).some((k) => k.includes("credits:") || k.includes(acct))), "no counter is keyed by the account id");
+});
+
+t("spending: a review whose handler throws after the hold (here: the receipt can't be signed) uses nothing", async () => {
+  const e = env(ON);
+  const key = await buyKey(e);
+  const subtle = crypto.subtle as any;
+  const sign = subtle.sign;
+  subtle.sign = async (alg: any, ...rest: any[]) => {
+    if ((alg?.name ?? alg) === "Ed25519") throw new Error("signing failed (test)");
+    return sign.call(subtle, alg, ...rest);
+  };
+  try {
+    const r = await post(e, "/credits/review", review, withKey(key));
+    assert.ok(r.status >= 500, `${r.status} ${r.text.slice(0, 200)}`);
+  } finally {
+    subtle.sign = sign;
+  }
+  assert.equal(await balanceOf(e, key), 10_000_000, "the hold came back");
+  assert.equal((await get(e, "/credits/account", withKey(key))).body.credits.held, "$0.00");
+});
+
+t("checkout: a second checkout from the same browser keeps its nonce, so both keys can be revealed there (finding #6)", async () => {
+  const e = env(ON);
+  const s = fakeStripe();
+  try {
+    const first = await post(e, "/credits/checkout", { pack: "small" });
+    const cookie = first.headers.get("set-cookie")!.split(";")[0];
+    const second = await post(e, "/credits/checkout", { pack: "small" }, { cookie });
+    assert.equal(second.headers.get("set-cookie")!.split(";")[0], cookie, "the same nonce");
+    const nonceHash = s.calls[0].form.get("metadata[nonce_hash]")!;
+    assert.equal(s.calls[1].form.get("metadata[nonce_hash]"), nonceHash);
+    for (const [i, sid] of ["cs_test_twotabs00001", "cs_test_twotabs00002"].entries()) {
+      await webhook(e, event("checkout.session.completed", checkoutSession(sid, { nonce_hash: nonceHash, pending_id: s.calls[i].form.get("metadata[pending_id]")! })));
+      const r = await post(e, "/credits/done/reveal", { session_id: sid }, { cookie });
+      assert.equal(r.status, 200, r.text);
+    }
+    // A cookie that isn't a nonce is replaced with a new one.
+    const bad = await post(e, "/credits/checkout", { pack: "small" }, { cookie: "ar_credits_nonce=xyz" });
+    assert.match(bad.headers.get("set-cookie")!, /^ar_credits_nonce=[0-9a-f]{64};/);
+  } finally {
+    s.restore();
+  }
+});
+
+t("admin: a CSV export past its cap says so in a header and continues with ?after= (finding #7)", async () => {
+  const e = env({ ...ON, CREDITS_EXPORT_MAX_ROWS: "4" });
+  const key = await buyKey(e, "cs_test_routesexport1");
+  assert.equal((await post(e, "/credits/review", review, withKey(key))).status, 200); // log: purchase, key_issued, reserve, commit
+  const first = await get(e, "/admin/credits/export", adminH);
+  assert.equal(first.status, 200);
+  assert.deepEqual(first.text.trim().split("\r\n").slice(1).map((l) => l.split(",")[0]), ["1", "2", "3", "4"]);
+  assert.equal(first.headers.get("x-credits-export-next"), "4");
+  assert.match(first.headers.get("content-disposition")!, /-after-0\.csv"$/);
+  const rest = await get(e, "/admin/credits/export?after=4", adminH);
+  assert.deepEqual(rest.text.trim().split("\r\n").slice(1).map((l) => l.split(",")[2]), ["admin_export", "admin_export"]);
+  assert.equal(rest.headers.get("x-credits-export-next"), null, "the end");
+  assert.equal((await get(e, "/admin/credits/export?after=-1", adminH)).status, 400);
+});
+
+t("keys: a reveal or claim that can't reach the ledger says the credits are safe and how to get a new key, not 'nothing is lost'", async () => {
+  const e = env(ON);
+  const sid = "cs_test_routestimeout";
+  await webhook(e, event("checkout.session.completed", checkoutSession(sid, { nonce_hash: await hex(NONCE) })));
+  e.LEDGER.broken = true;
+  const r = await post(e, "/credits/done/reveal", { session_id: sid }, { cookie: `ar_credits_nonce=${NONCE}` });
+  assert.equal(r.status, 503);
+  assert.doesNotMatch(r.body.error, /Nothing is lost/);
+  assert.match(r.body.error, /credits are safe/);
+  assert.match(r.body.error, /claim code/);
+  const c = await post(e, "/credits/claim", { code: `arcc_${"A".repeat(24)}` });
+  assert.equal(c.status, 503);
+  assert.doesNotMatch(c.body.error, /still works/);
 });

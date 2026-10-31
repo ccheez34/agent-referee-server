@@ -6,22 +6,31 @@ import { existsSync, readFileSync } from "node:fs";
 import { Ledger } from "../src/ledger.ts";
 import { checkPaidSession, creditsConfig, parsePacks, HOLD_MAX_MS, MARKER_KEEP_MS, CLAIM_TTL_MS, MICRO_PER_USD } from "../src/credits-ledger.ts";
 
-/** In-memory Durable Object storage with list (prefix, inclusive start, limit), delete and a recorded alarm. */
+/** In-memory Durable Object storage with put (one key, or many at once), list (prefix, inclusive start, limit),
+ * delete and a recorded alarm. `puts` records the keys of each put call; `onGet` and `lists` are for the tests that
+ * break a read or watch what the alarm lists. */
 function mem() {
   const d = new Map<string, unknown>();
   const alarms: number[] = [];
+  const puts: string[][] = [];
+  const lists: string[] = [];
+  const hooks: { onGet?: (k: string) => Promise<void> | void } = {};
   const storage = {
     async get<T>(k: string) {
+      await hooks.onGet?.(k);
       return structuredClone(d.get(k)) as T | undefined;
     },
-    async put(k: string, v: unknown) {
-      d.set(k, structuredClone(v));
+    async put(k: string | Record<string, unknown>, v?: unknown) {
+      const entries = typeof k === "string" ? [[k, v] as const] : Object.entries(k);
+      puts.push(entries.map(([x]) => x));
+      for (const [x, y] of entries) d.set(x, structuredClone(y));
     },
     async delete(k: string | string[]) {
       for (const x of [k].flat()) d.delete(x);
       return true;
     },
     async list<T>(o: { prefix?: string; start?: string; limit?: number } = {}) {
+      lists.push(o.prefix ?? "");
       const keys = [...d.keys()].filter((k) => k.startsWith(o.prefix ?? "") && (!o.start || k >= o.start)).sort().slice(0, o.limit ?? Infinity);
       return new Map(keys.map((k) => [k, structuredClone(d.get(k)) as T]));
     },
@@ -32,7 +41,7 @@ function mem() {
       alarms.push(t);
     },
   };
-  return { storage, d, alarms };
+  return { storage, d, alarms, puts, lists, hooks };
 }
 
 const T0 = Date.parse("2026-10-30T22:00:00Z");
@@ -569,6 +578,122 @@ test("bad input is refused before anything is read or written", async () => {
     assert.equal(r.status, 400, `${action} ${JSON.stringify(body)}`);
   }
   assert.equal((await s.call("credits-nope", {})).status, 404);
+});
+
+// ---------- the second fresh-agent check's findings (Oct 30, 17:28-17:51) ----------
+
+test("the alarm: more than 2,000 young markers don't hide a hold that's due (finding #1)", async () => {
+  const s = setup();
+  const id = await newAccount(s);
+  for (let i = 0; i < 2_100; i++) {
+    const t = token();
+    await s.call("credits-reserve", { account_id: id, key_hash: KEY1, amount_micro: 1, token: t });
+    await s.call("credits-commit", { token: t });
+  }
+  // The hold's token sorts after every marker's, where a sweep through the cr: keys from the start never got to.
+  const last = token();
+  await s.call("credits-reserve", { account_id: id, key_hash: KEY1, amount_micro: 500_000, token: last });
+  s.tick(HOLD_MAX_MS);
+  await s.l.alarm();
+  const v = await s.call("credits-view", { account_id: id });
+  assert.equal(v.body.held_micro, 0, "released by the first run");
+  assert.equal(v.body.balance_micro, 10_000_000 - 2_100);
+  assert.equal(s.m.alarms.at(-1), T0 + MARKER_KEEP_MS, "next: when the first markers turn an hour old");
+});
+
+test("the alarm: more than 2,000 due entries are settled over runs a second apart, then it stops", async () => {
+  const s = setup();
+  for (let i = 0; i < 2_100; i++) await s.call("credits-release", { token: token() }); // tombstones
+  s.tick(MARKER_KEEP_MS);
+  await s.l.alarm();
+  assert.equal(s.m.alarms.at(-1), s.now() + 1_000, "a second run, a second later");
+  assert.equal([...s.m.d.keys()].filter((k) => k.startsWith("cr:")).length, 100);
+  await s.l.alarm();
+  assert.equal([...s.m.d.keys()].filter((k) => k.startsWith("cr:") || k.startsWith("cx:")).length, 0);
+  assert.equal(s.m.d.has("c_alarm"), false, "nothing left to watch");
+});
+
+test("an action's writes land in one multi-key put: the balance, the hold, its log line and the alarm's work list (finding #2)", async () => {
+  const s = setup();
+  const id = await newAccount(s);
+  const before = s.m.puts.length;
+  const t = token();
+  await s.call("credits-reserve", { account_id: id, key_hash: KEY1, amount_micro: 1_000, token: t });
+  const batches = s.m.puts.slice(before);
+  assert.equal(batches.length, 1, "one put call");
+  for (const k of [`ca:${id}`, `cr:${t}`, "c_seq"]) assert.ok(batches[0].includes(k), k);
+  assert.ok(batches[0].some((k) => k.startsWith("cl:")), "the log line");
+  assert.ok(batches[0].some((k) => k.startsWith("cx:") && k.endsWith(`:h:${t}`)), "the hold's place in the work list");
+});
+
+test("a read that fails part-way through an action writes nothing: no balance change without its hold and log line", async () => {
+  const s = setup();
+  const id = await newAccount(s);
+  const lines = (await entries(s)).length;
+  const t = token();
+  // The log's sequence number is read after the balance is changed in memory: fail exactly there.
+  s.m.hooks.onGet = (k) => {
+    if (k === "c_seq") throw new Error("storage read failed");
+  };
+  await assert.rejects(s.call("credits-reserve", { account_id: id, key_hash: KEY1, amount_micro: 1_000_000, token: t }));
+  s.m.hooks.onGet = undefined;
+  const v = await s.call("credits-view", { account_id: id });
+  assert.equal(v.body.balance_micro, 10_000_000);
+  assert.equal(v.body.held_micro, 0);
+  assert.equal(s.m.d.has(`cr:${t}`), false);
+  assert.equal((await entries(s)).length, lines);
+  // The token wasn't used up: the Worker's retry (or a release) works normally.
+  assert.equal((await s.call("credits-reserve", { account_id: id, key_hash: KEY1, amount_micro: 1_000_000, token: t })).status, 200);
+});
+
+test("two reserves for the last of the balance at once: one holds it, the other is refused with nothing used", async () => {
+  const s = setup();
+  const id = await newAccount(s);
+  const both = await Promise.all([token(), token()].map((t) => s.call("credits-reserve", { account_id: id, key_hash: KEY1, amount_micro: 6_000_000, token: t })));
+  assert.deepEqual(both.map((r) => r.status).sort(), [200, 429]);
+  const v = await s.call("credits-view", { account_id: id });
+  assert.equal(v.body.balance_micro, 4_000_000);
+  assert.equal(v.body.held_micro, 6_000_000);
+});
+
+test("the alarm's sweep waits behind a request in progress: it runs in the same serialized chain", async () => {
+  const s = setup();
+  const id = await newAccount(s);
+  await s.call("credits-reserve", { account_id: id, key_hash: KEY1, amount_micro: 1_000, token: token() });
+  s.tick(HOLD_MAX_MS);
+  let open!: () => void;
+  const gate = new Promise<void>((r) => (open = r));
+  s.m.hooks.onGet = (k) => (k.startsWith("ca:") ? gate : undefined);
+  const busy = s.call("credits-view", { account_id: id }); // stops at its account read
+  await new Promise((r) => setTimeout(r, 5));
+  s.m.lists.length = 0;
+  const alarm = s.l.alarm();
+  await new Promise((r) => setTimeout(r, 20));
+  // (The day-counter cleanup lists outside the chain by design; none of its prefixes starts with "c".)
+  const credits = () => s.m.lists.filter((p) => p.startsWith("c"));
+  assert.deepEqual(credits(), [], "the credits sweep hasn't started while the request is in progress");
+  s.m.hooks.onGet = undefined;
+  open();
+  await busy;
+  await alarm;
+  assert.ok(credits().length > 0, "then it runs");
+  assert.equal((await s.call("credits-view", { account_id: id })).body.held_micro, 0);
+});
+
+test("refunds: a refund of more than the pack's price takes no more than the pack gave (finding #4)", async () => {
+  const s = setup();
+  // Charged $11 for the $10 pack (a tax, say): the subtotal is the pack's price, the total is more.
+  const f = await s.call("credits-fulfill", { session: session("cs_test_overrefund01", { amount_total: 1100 }) });
+  assert.equal(f.body.fulfilled, true);
+  const pi = "pi_overrefund01";
+  const r1 = await s.call("credits-debit", { kind: "refund", payment_intent: pi, amount_refunded: 600 });
+  assert.equal(r1.body.debit_micro, 6_000_000);
+  const r2 = await s.call("credits-debit", { kind: "refund", payment_intent: pi, amount_refunded: 1100 });
+  assert.equal(r2.body.debit_micro, 4_000_000, "the rest of the pack, not $5 of credits");
+  assert.equal(r2.body.shortfall_micro, 0, "no shortfall made up by the tax");
+  const d = await s.call("credits-debit", { kind: "dispute", payment_intent: pi });
+  assert.equal(d.body.debit_micro, 0);
+  assert.equal(d.body.shortfall_micro, 0);
 });
 
 // ---------- deploy safety ----------

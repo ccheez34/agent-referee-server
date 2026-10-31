@@ -22,8 +22,8 @@ export const MARKER_KEEP_MS = 60 * 60_000;
 export const CLAIM_TTL_MS = 24 * 60 * 60_000;
 /** Open checkouts are cleared this long after Stripe's own expiry (clock differences). */
 const PENDING_GRACE_MS = 60_000;
-/** Most entries one alarm run looks at per key type; more makes it run again a second later. */
-const SWEEP_LIMIT = 2_000;
+/** Most due entries one alarm run settles; more makes it run again a second later. */
+export const SWEEP_LIMIT = 2_000;
 
 // ---------- configuration (read from the Ledger's env, never from a request) ----------
 
@@ -208,6 +208,83 @@ type R = { status: number; body: Record<string, unknown> };
 const ok = (body: Record<string, unknown>): R => ({ status: 200, body });
 const no = (status: number, body: Record<string, unknown>): R => ({ status, body });
 
+/**
+ * One action's writes, applied together, so a balance never changes without its hold, session or log line (found by
+ * the second fresh-agent check, Oct 30: with awaits between puts, a crash could keep some writes and lose others).
+ * Reads see the action's own earlier writes. At the end, every put goes in one multi-key put, with the deletes and the
+ * alarm issued right after it and nothing awaited in between: Durable Objects apply such writes as one atomic batch
+ * (a multi-key put takes up to 128 keys; no action here writes more than about 12). If the action throws, nothing is
+ * written.
+ */
+function txn(st: DOStorage) {
+  const puts = new Map<string, unknown>();
+  const dels = new Set<string>();
+  let alarm: number | undefined;
+  const view: DOStorage = {
+    async get<T>(k: string): Promise<T | undefined> {
+      if (dels.has(k)) return undefined;
+      if (puts.has(k)) return structuredClone(puts.get(k)) as T;
+      return st.get<T>(k);
+    },
+    async put(k: string | Record<string, unknown>, v?: unknown) {
+      for (const [x, y] of typeof k === "string" ? [[k, v] as const] : Object.entries(k)) {
+        dels.delete(x);
+        puts.set(x, structuredClone(y));
+      }
+    },
+    async delete(k: string | string[]) {
+      for (const x of [k].flat()) {
+        puts.delete(x);
+        dels.add(x);
+      }
+      return true;
+    },
+    async deleteAll() {
+      throw new Error("not in a credits action");
+    },
+    async setAlarm(t: number) {
+      alarm = t; // as on a real object, a later call replaces an earlier one
+    },
+    ...(st.list
+      ? {
+          // Storage's page, with this action's own writes merged in (the export lists the log after logging itself).
+          async list<T>(o: { prefix?: string; start?: string; limit?: number } = {}) {
+            const found = await st.list!<T>(o);
+            if (!puts.size && !dels.size) return found;
+            const all = new Map<string, T>();
+            for (const [k, v] of found) if (!dels.has(k)) all.set(k, v);
+            for (const [k, v] of puts) if (k.startsWith(o.prefix ?? "") && (!o.start || k >= o.start)) all.set(k, structuredClone(v) as T);
+            return new Map([...all.keys()].sort().slice(0, o.limit ?? Infinity).map((k) => [k, all.get(k)!] as [string, T]));
+          },
+        }
+      : {}),
+  };
+  const commit = async () => {
+    const keys = [...puts.keys()];
+    const ops: Promise<unknown>[] = [];
+    for (let i = 0; i < keys.length; i += 128) ops.push(st.put(Object.fromEntries(keys.slice(i, i + 128).map((k) => [k, puts.get(k)]))));
+    if (dels.size) ops.push(st.delete ? st.delete([...dels]) : Promise.all([...dels].map((k) => st.put(k, null))));
+    if (alarm !== undefined) ops.push(st.setAlarm(alarm));
+    await Promise.all(ops);
+  };
+  return { view, commit };
+}
+
+/**
+ * The alarm's work list, in due order: cx:<13-digit ms>:<kind>:<id>, where h is a hold to release at 10 minutes, m a
+ * marker to delete after an hour, p an open checkout to clear, and c a claim code to expire. A commit, a release, a
+ * fulfilment or a claim takes its entry off the list in the same write; anything else left there is checked when it's
+ * due. The sweep reads only the entries that are due, oldest first. (It used to page through every cr: key from the
+ * start each run, so more than 2,000 young markers could hide a due hold: the second fresh-agent check's finding #1.)
+ */
+type DueKind = "h" | "m" | "p" | "c";
+const DUE_KEY = /^cx:(\d{13}):([hmpc]):([0-9a-f]{32,64})$/;
+const dueKey = (at: number, kind: DueKind, id: string) => `cx:${String(Math.max(0, Math.ceil(at))).padStart(13, "0")}:${kind}:${id}`;
+async function watch(st: DOStorage, nowMs: number, at: number, kind: DueKind, id: string) {
+  await st.put(dueKey(at, kind, id), 1);
+  await alarmBy(st, nowMs, at);
+}
+
 async function del(st: DOStorage, key: string) {
   if (st.delete) await st.delete(key);
   else await st.put(key, null);
@@ -256,7 +333,8 @@ async function releaseHold(st: DOStorage, token: string, h: Hold, why: string, n
   }
   await st.put(`cr:${token}`, { released: true, at: nowMs } satisfies Marker);
   await log(st, nowMs, { type: "release", why, account_id: h.account_id, amount_micro: h.amount_micro, ...(paid ? { shortfall_paid_micro: paid } : {}), token, balance_micro: a?.balance_micro ?? null });
-  await alarmBy(st, nowMs, nowMs + MARKER_KEEP_MS);
+  await del(st, dueKey(h.at + HOLD_MAX_MS, "h", token)); // settled: off the work list
+  await watch(st, nowMs, nowMs + MARKER_KEEP_MS, "m", token);
   return { balance_micro: a?.balance_micro ?? 0, shortfall_paid_micro: paid };
 }
 
@@ -265,6 +343,7 @@ async function clearPending(st: DOStorage, pendingId: string) {
   const p = await st.get<Pending>(`cp:${pendingId}`);
   if (!p) return false;
   await del(st, `cp:${pendingId}`);
+  await del(st, dueKey(p.expires_at + PENDING_GRACE_MS, "p", pendingId)); // off the work list
   const a = await account(st, p.account_id);
   if (a) {
     a.pending_micro = Math.max(0, a.pending_micro - p.credits_micro);
@@ -317,7 +396,15 @@ function purchaseView(id: string, s: CreditsSession, a: CreditsAccount | undefin
 
 // ---------- the actions (called only through Ledger.fetch, one at a time) ----------
 
+/** One credits action, its writes applied together at the end (txn above); nothing is written if it throws. */
 export async function creditsAction(st: DOStorage, action: string, b: any, cfg: CreditsConfig, nowMs: number): Promise<R> {
+  const t = txn(st);
+  const r = await act(t.view, action, b, cfg, nowMs);
+  await t.commit();
+  return r;
+}
+
+async function act(st: DOStorage, action: string, b: any, cfg: CreditsConfig, nowMs: number): Promise<R> {
   const nowIso = new Date(nowMs).toISOString();
   if (!(await st.get<boolean>("c_active"))) await st.put("c_active", true); // the alarm sweeps credits only where there are any
 
@@ -350,7 +437,7 @@ export async function creditsAction(st: DOStorage, action: string, b: any, cfg: 
     await st.put(`ca:${id}`, a);
     await st.put(`cr:${token}`, { account_id: id, amount_micro: amount, at: nowMs } satisfies Hold);
     await log(st, nowMs, { type: "reserve", account_id: id, amount_micro: amount, token, balance_micro: a.balance_micro });
-    await alarmBy(st, nowMs, nowMs + HOLD_MAX_MS);
+    await watch(st, nowMs, nowMs + HOLD_MAX_MS, "h", token);
     return ok({ ok: true, ...accountView(id, a) });
   }
 
@@ -374,7 +461,8 @@ export async function creditsAction(st: DOStorage, action: string, b: any, cfg: 
     }
     await st.put(`cr:${token}`, { committed: true, at: nowMs, account_id: r.account_id, amount_micro: r.amount_micro } satisfies Marker);
     await log(st, nowMs, { type: "commit", account_id: r.account_id, amount_micro: r.amount_micro, token, ...(reviewId ? { review_id: reviewId } : {}), balance_micro: a?.balance_micro ?? null });
-    await alarmBy(st, nowMs, nowMs + MARKER_KEEP_MS);
+    await del(st, dueKey(r.at + HOLD_MAX_MS, "h", token)); // settled: off the work list
+    await watch(st, nowMs, nowMs + MARKER_KEEP_MS, "m", token);
     return ok({ committed: true, ...(a ? accountView(r.account_id, a) : {}) });
   }
 
@@ -388,7 +476,7 @@ export async function creditsAction(st: DOStorage, action: string, b: any, cfg: 
     if (!r) {
       await st.put(`cr:${token}`, { released: true, at: nowMs } satisfies Marker);
       await log(st, nowMs, { type: "tombstone", why, token });
-      await alarmBy(st, nowMs, nowMs + MARKER_KEEP_MS);
+      await watch(st, nowMs, nowMs + MARKER_KEEP_MS, "m", token);
       return ok({ released: false, tombstone: true });
     }
     if ("released" in r) return ok({ released: true, already: true });
@@ -431,7 +519,7 @@ export async function creditsAction(st: DOStorage, action: string, b: any, cfg: 
     }
     await st.put(`cp:${pid}`, { account_id: id, credits_micro: credits, expires_at: exp, ip, pack, at: nowMs } satisfies Pending);
     if (ip) await st.put(`cq:${ip}`, [...open, { id: pid, exp }]);
-    await alarmBy(st, nowMs, exp + PENDING_GRACE_MS);
+    await watch(st, nowMs, exp + PENDING_GRACE_MS, "p", pid);
     return ok({ ok: true, credits_micro: credits });
   }
 
@@ -558,6 +646,7 @@ export async function creditsAction(st: DOStorage, action: string, b: any, cfg: 
     await st.put(`ck:${kh}`, c.account_id);
     await st.put(`ca:${c.account_id}`, a);
     await del(st, `cc:${ch}`);
+    await del(st, dueKey(c.expires_at, "c", ch)); // off the work list
     await log(st, nowMs, { type: "claim", account_id: c.account_id });
     return ok({ ok: true, balance_micro: a.balance_micro });
   }
@@ -581,8 +670,11 @@ export async function creditsAction(st: DOStorage, action: string, b: any, cfg: 
       if (!Number.isSafeInteger(total) || total < 0) return no(400, { error: "Bad refund amount." });
       const fresh = total - s.refunded_cents; // charge.amount_refunded is cumulative
       if (fresh <= 0) return ok({ applied: false, reason: "already" });
-      // After a dispute, that purchase's remaining credits were already taken: a refund takes nothing more.
-      const { debit, short } = take(a, s.disputed ? 0 : credited(fresh));
+      // The credits for what's newly refunded, counted cumulatively and capped at the pack's price, so a refund of a
+      // charge above the subtotal (tax or a fee, if Checkout ever adds one) never takes more than the pack gave. After a
+      // dispute, that purchase's remaining credits were already taken: a refund takes nothing more.
+      const due = credited(Math.min(total, s.paid_cents)) - credited(Math.min(s.refunded_cents, s.paid_cents));
+      const { debit, short } = take(a, s.disputed ? 0 : due);
       s.refunded_cents = total;
       await st.put(`cs:${sid}`, s);
       if (a) await st.put(`ca:${s.account_id}`, a);
@@ -596,7 +688,7 @@ export async function creditsAction(st: DOStorage, action: string, b: any, cfg: 
         a.frozen = true;
         a.frozen_reason = `dispute${ref ? ` ${ref}` : ""}`;
       }
-      const { debit, short } = take(a, Math.max(0, s.credits_micro - credited(s.refunded_cents)));
+      const { debit, short } = take(a, Math.max(0, s.credits_micro - credited(Math.min(s.refunded_cents, s.paid_cents))));
       await st.put(`cs:${sid}`, s);
       if (a) await st.put(`ca:${s.account_id}`, a);
       await log(st, nowMs, { type: "dispute", account_id: s.account_id, session_id: sid, payment_intent: pi, amount_micro: debit, ...(short ? { shortfall_micro: short } : {}), ...(ref ? { ref } : {}), balance_micro: a?.balance_micro ?? null });
@@ -693,7 +785,7 @@ export async function creditsAction(st: DOStorage, action: string, b: any, cfg: 
     await st.put(`cc:${ch}`, { account_id: id, expires_at: expires } satisfies Claim);
     await st.put(`ca:${id}`, a);
     await log(st, nowMs, { type: "rotate", account_id: id, reason });
-    await alarmBy(st, nowMs, expires + PENDING_GRACE_MS);
+    await watch(st, nowMs, expires, "c", ch);
     return ok({ ok: true, expires_at: new Date(expires).toISOString() });
   }
 
@@ -712,62 +804,67 @@ export async function creditsAction(st: DOStorage, action: string, b: any, cfg: 
   return no(404, { error: "Unknown credits action." });
 }
 
+/** One due entry of the work list. Anything already settled (committed, released, fulfilled, claimed) is skipped. */
+async function settleDue(st: DOStorage, kind: DueKind, id: string, nowMs: number) {
+  if (kind === "h" || kind === "m") {
+    const r = await st.get<Hold | Marker>(`cr:${id}`);
+    if (!r) return;
+    if ("released" in r || "committed" in r) {
+      // A marker has its own "m" entry, written with it; an "h" entry finding one has nothing to do.
+      if (r.at + MARKER_KEEP_MS <= nowMs) await del(st, `cr:${id}`);
+      else if (kind === "m") await watch(st, nowMs, r.at + MARKER_KEEP_MS, "m", id);
+      return;
+    }
+    if (r.at + HOLD_MAX_MS <= nowMs) await releaseHold(st, id, r, "alarm", nowMs);
+    else await watch(st, nowMs, r.at + HOLD_MAX_MS, "h", id);
+    return;
+  }
+  if (kind === "p") {
+    const p = await st.get<Pending>(`cp:${id}`);
+    if (!p) return;
+    if (p.expires_at + PENDING_GRACE_MS <= nowMs) await clearPending(st, id);
+    else await watch(st, nowMs, p.expires_at + PENDING_GRACE_MS, "p", id);
+    return;
+  }
+  const c = await st.get<Claim>(`cc:${id}`);
+  if (!c) return;
+  if (c.expires_at > nowMs) return watch(st, nowMs, c.expires_at, "c", id);
+  await del(st, `cc:${id}`);
+  const a = await account(st, c.account_id);
+  if (a && a.claim_hash === id) {
+    a.claim_hash = null;
+    await st.put(`ca:${c.account_id}`, a);
+  }
+  await log(st, nowMs, { type: "claim_expired", account_id: c.account_id });
+}
+
 /**
- * The alarm's credits sweep: releases holds older than 10 minutes (and logs it), deletes markers older than an hour,
- * clears expired open checkouts and claim codes. Returns when it needs to run next (null: nothing left to watch).
+ * The alarm's credits sweep, through the work list in due order: releases holds older than 10 minutes (and logs it),
+ * deletes markers older than an hour, clears expired open checkouts and claim codes. Each entry is settled as one
+ * atomic write, together with the deletion of its work-list entry. Stops at the first entry that isn't due and
+ * returns its time; after SWEEP_LIMIT entries it returns a second from now; null when the list is empty. New entries
+ * written while it runs (a released hold's marker) are due later, so they end the run when it reaches them.
  */
 export async function creditsSweep(st: DOStorage, nowMs: number): Promise<number | null> {
   if (!st.list) return null;
-  let next = Infinity;
-  const each = async <T>(prefix: string, fn: (key: string, v: T) => Promise<void>) => {
-    let start: string | undefined;
-    let seen = 0;
-    for (;;) {
-      const page = await st.list!<T>({ prefix, ...(start ? { start } : {}), limit: 500 });
-      let last: string | undefined;
-      for (const [k, v] of page) {
-        if (start && k <= start.slice(0, -1)) continue; // "start" is inclusive: skip the previous page's last key
-        last = k;
-        seen++;
-        await fn(k, v);
-      }
-      if (page.size < 500 || !last) break;
-      if (seen >= SWEEP_LIMIT) {
-        next = Math.min(next, nowMs + 1_000); // more than one run's worth: come back in a second
-        break;
-      }
-      start = `${last}\u0000`;
+  let start: string | undefined;
+  let done = 0;
+  for (;;) {
+    const page = await st.list<unknown>({ prefix: "cx:", ...(start ? { start } : {}), limit: 500 });
+    if (!page.size) return null;
+    let last = "";
+    for (const k of page.keys()) {
+      last = k;
+      const m = DUE_KEY.exec(k);
+      const at = m ? Number(m[1]) : -1; // a malformed entry is due at once, and deleted
+      if (at > nowMs) return at;
+      if (done >= SWEEP_LIMIT) return nowMs + 1_000; // more than one run's worth: come back in a second
+      const t = txn(st);
+      await del(t.view, k);
+      if (m) await settleDue(t.view, m[2] as DueKind, m[3], nowMs);
+      await t.commit();
+      done++;
     }
-  };
-  await each<Hold | Marker | null>("cr:", async (k, r) => {
-    const token = k.slice(3);
-    if (!r) return del(st, k);
-    if ("released" in r || "committed" in r) {
-      if (r.at + MARKER_KEEP_MS <= nowMs) await del(st, k);
-      else next = Math.min(next, r.at + MARKER_KEEP_MS);
-    } else if (r.at + HOLD_MAX_MS <= nowMs) {
-      await releaseHold(st, token, r, "alarm", nowMs);
-      next = Math.min(next, nowMs + MARKER_KEEP_MS);
-    } else next = Math.min(next, r.at + HOLD_MAX_MS);
-  });
-  await each<Pending | null>("cp:", async (k, p) => {
-    if (!p) return del(st, k);
-    if (p.expires_at + PENDING_GRACE_MS <= nowMs) await clearPending(st, k.slice(3));
-    else next = Math.min(next, p.expires_at + PENDING_GRACE_MS);
-  });
-  await each<Claim | null>("cc:", async (k, c) => {
-    if (!c) return del(st, k);
-    if (c.expires_at > nowMs) {
-      next = Math.min(next, c.expires_at);
-      return;
-    }
-    await del(st, k);
-    const a = await account(st, c.account_id);
-    if (a && a.claim_hash === k.slice(3)) {
-      a.claim_hash = null;
-      await st.put(`ca:${c.account_id}`, a);
-    }
-    await log(st, nowMs, { type: "claim_expired", account_id: c.account_id });
-  });
-  return next === Infinity ? null : Math.max(next, nowMs + 1_000);
+    start = `${last}\u0000`; // "start" is inclusive
+  }
 }

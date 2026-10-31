@@ -26,6 +26,7 @@ export interface Env {
   CREDITS_PACKS?: string; // "small=10,medium=25,large=100" (USD): the one source of pack prices and credits
   CREDITS_MAX_BALANCE_USD?: string; // per account: balance + held + open checkouts (default 500)
   CREDITS_MAX_DAILY_USD?: string; // per account per UTC day: bought + open checkouts (default 500)
+  CREDITS_EXPORT_MAX_ROWS?: string; // lines per GET /admin/credits/export download (default and most 200000; more: ?after=)
   INTERNAL_TOKEN?: string; // secret shared with the hosted MCP server (ChatGPT); enables /internal/free/*
   EXT_FREE_DAILY_BUDGET_USD?: string; // daily budget for free reviews sent by the hosted MCP server (off when unset)
   EXT_FREE_REVIEWS_PER_DAY?: string; // per hosted-server user per UTC day (default 3)
@@ -95,7 +96,8 @@ export interface Env {
 // Minimal structural types so the Durable Object can also run under Node in tests.
 export interface DOStorage {
   get<T = unknown>(key: string): Promise<T | undefined>;
-  put(key: string, value: unknown): Promise<void>;
+  // put(key, value), or put({ key: value, ... }): up to 128 keys written atomically (the credits ledger's actions).
+  put(key: string | Record<string, unknown>, value?: unknown): Promise<void>;
   deleteAll(): Promise<void>;
   setAlarm(time: number): Promise<void>;
   // Present on real Durable Objects; optional so simple test mocks still fit.
