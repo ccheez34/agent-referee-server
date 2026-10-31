@@ -1,6 +1,7 @@
 // The owner's one-page form (his phone). No outside scripts, styles or fonts; the token is never stored by the page.
 // Answers are shown as plain text (textContent), never as HTML. While a request is out every button is off, and a
-// repeated "Sign" sends the same request id, so a double tap can't make a second approval (fresh read of c3b0b64, #3).
+// repeated "Sign" sends the same request id, so a double tap can't make a second approval (fresh read of c3b0b64, #3);
+// changing any field makes a new id (part A review 1).
 export const PAGE = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Owner approvals</title><style>
 :root{color-scheme:light dark}body{font:16px/1.4 system-ui,sans-serif;max-width:34rem;margin:1rem auto;padding:0 1rem}
@@ -29,6 +30,7 @@ function lock(on){busy=on;for(const b of document.querySelectorAll("button"))b.d
 async function send(path,body){if(busy)return null;lock(true);$("out").textContent="...";try{const r=await fetch(path,{method:"POST",headers:{"content-type":"application/json",authorization:"Bearer "+$("t").value},body:JSON.stringify(body)});const j=await r.json();$("out").textContent=r.status+"\\n"+JSON.stringify(j,null,2);return {status:r.status,body:j}}catch(e){$("out").textContent=String(e);return null}finally{lock(false)}}
 function row(rec){const p=rec.payload;const d=document.createElement("div");d.className="row";const t=document.createElement("div");t.textContent=p.action+" | "+p.target+(p.target_sha256?" | sha256 "+p.target_sha256.slice(0,12)+"...":"")+" | uses "+p.max_uses+" | until "+p.expires_at+" | nonce "+p.nonce;const b=document.createElement("button");b.textContent="Revoke";b.onclick=async()=>{await send("/revoke",{nonce:p.nonce});await show()};d.append(t,b);return d}
 async function show(){const r=await send("/status",{});const l=$("list");l.replaceChildren();if(!r||r.status!==200)return;const s=document.createElement("p");s.textContent=(r.body.frozen?"FROZEN. ":"")+"Policy version: "+(r.body.policy_version||"not set")+". Live approvals: "+r.body.live.length+".";l.append(s);for(const rec of r.body.live)l.append(row(rec))}
+for(const i of ["a","g","v","u","h"])$(i).addEventListener("input",()=>{rid=crypto.randomUUID()});
 $("go").onclick=async()=>{const r=await send("/approve",{action:$("a").value,target:$("g").value,target_sha256:$("v").value||null,max_uses:Number($("u").value),expires_in_hours:Number($("h").value),request_id:rid});if(r&&r.status===200)rid=crypto.randomUUID()};
 $("ls").onclick=show;
 $("ra").onclick=async()=>{await send("/revoke",{all:true});await show()};

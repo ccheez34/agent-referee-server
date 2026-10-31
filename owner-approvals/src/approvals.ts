@@ -58,12 +58,20 @@ const json = (status: number, body: unknown, extra: Record<string, string> = {})
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", "cache-control": "no-store", ...extra } });
 
 /**
- * The approvals key: made inside this Worker's own store the first time it's needed, so the private key exists nowhere
- * else. No key file, no secret to paste, and the public key it signs with can't drift from the one it serves (fresh
- * read of c3b0b64, #2 and #4).
+ * The approvals key lives only in the store (one Durable Object), made there the first time it's needed: no key file,
+ * no secret to paste, and the public key it signs with can't drift from the one it serves (fresh read of c3b0b64, #2
+ * and #4). The store signs; the private key never leaves it, not even to the Worker (part A review 1, Sonnet and Luna).
  */
-async function signer(env: Env): Promise<Signer> {
-  const { jwk } = await call(env, "key");
+async function storeKey(state: any): Promise<Signer> {
+  const jwk = await state.blockConcurrencyWhile(async () => {
+    let k = await state.storage.get("key");
+    if (!k) {
+      const kp = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"])) as CryptoKeyPair;
+      k = await crypto.subtle.exportKey("jwk", kp.privateKey);
+      await state.storage.put("key", k);
+    }
+    return k;
+  });
   const key = await crypto.subtle.importKey("jwk", jwk, { name: "Ed25519" }, false, ["sign"]);
   return { key, publicKey: b64(unb64url(String(jwk.x))) };
 }
@@ -134,18 +142,14 @@ export class ApprovalStore {
     const now = this.now();
     const fresh = (list: Envelope[]) =>
       list.filter((r) => (r.payload.type === "revocation" ? Date.parse(String(r.payload.issued_at)) > now - KEEP_REVOCATION_MS : Date.parse(String(r.payload.expires_at)) > now - KEEP_MS));
-    if (action === "key") {
-      // Made once, with no other request in between, so two first calls can't make two keys.
-      const jwk = await this.state.blockConcurrencyWhile(async () => {
-        let k = await st.get("key");
-        if (!k) {
-          const kp = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"])) as CryptoKeyPair;
-          k = await crypto.subtle.exportKey("jwk", kp.privateKey);
-          await st.put("key", k);
-        }
-        return k;
-      });
-      return json(200, { jwk });
+    if (action === "pubkey") return json(200, { public_key: (await storeKey(this.state)).publicKey });
+    // Signs a payload the Worker built, checks it with the same key, and hands back only the envelope.
+    if (action === "sign") {
+      try {
+        return json(200, { record: await signRecord(body.payload, await storeKey(this.state)) });
+      } catch (e: any) {
+        return json(503, { error: String(e?.message ?? e) });
+      }
     }
     if (action === "find-request") {
       const rids: Record<string, { nonce: string; at: number }> = (await st.get("rids")) ?? {};
@@ -154,19 +158,25 @@ export class ApprovalStore {
       return json(200, { record: record ?? null });
     }
     if (action === "add") {
-      // Storage calls only, so nothing else runs in between: a repeated request id finds the first record here.
-      const list: Envelope[] = fresh((await st.get("records")) ?? []);
-      const rid: string | undefined = body.request_id;
-      let rids: Record<string, { nonce: string; at: number }> = {};
-      if (rid) {
-        rids = Object.fromEntries(Object.entries((await st.get("rids")) ?? {}).filter(([, v]: any) => now - v.at < REQUEST_ID_MS)) as any;
-        const first = rids[rid] && list.find((r) => r.payload.type === "approval" && r.payload.nonce === rids[rid].nonce);
-        if (first) return json(200, { ok: true, existing: first });
-      }
-      list.push(body.record);
-      await st.put("records", list.slice(-MAX_RECORDS));
-      if (rid) await st.put("rids", { ...rids, [rid]: { nonce: String(body.record.payload.nonce), at: now } });
-      return json(200, { ok: true });
+      // One add at a time (blockConcurrencyWhile), so a repeated request id always finds the first record, and a freeze
+      // that lands after the Worker's own check still stops a new approval (part A review 1, Luna and Sonnet).
+      const out = await this.state.blockConcurrencyWhile(async () => {
+        const list: Envelope[] = fresh((await st.get("records")) ?? []);
+        const isApproval = body.record?.payload?.type === "approval";
+        if (isApproval && (await st.get("frozen"))) return { frozen: true };
+        const rid: string | undefined = body.request_id;
+        let rids: Record<string, { nonce: string; at: number }> = {};
+        if (rid) {
+          rids = Object.fromEntries(Object.entries((await st.get("rids")) ?? {}).filter(([, v]: any) => now - v.at < REQUEST_ID_MS)) as any;
+          const first = rids[rid] && list.find((r) => r.payload.type === "approval" && r.payload.nonce === rids[rid].nonce);
+          if (first) return { ok: true, existing: first };
+        }
+        list.push(body.record);
+        await st.put("records", list.slice(-MAX_RECORDS));
+        if (rid) await st.put("rids", { ...rids, [rid]: { nonce: String(body.record.payload.nonce), at: now } });
+        return { ok: true };
+      });
+      return json(200, out);
     }
     // The gate reads {"approvals": [...]} and tells approvals and revocations apart by `type`.
     if (action === "list")
@@ -197,8 +207,8 @@ export async function handle(req: Request, env: Env, page: () => Response): Prom
   const path = url.pathname;
   if (req.method === "GET" && path === "/") return page();
   if (req.method === "GET" && path === "/pubkey") {
-    const s = await signer(env);
-    return json(200, { public_key: s.publicKey, key_id: await keyIdOf(s.publicKey), algorithm: "Ed25519" }, { "access-control-allow-origin": "*" });
+    const { public_key } = await call(env, "pubkey");
+    return json(200, { public_key, key_id: await keyIdOf(public_key), algorithm: "Ed25519" }, { "access-control-allow-origin": "*" });
   }
   // Anyone can read the records (DESIGN §3A): their signatures are what count, and gates send no token. While he has
   // frozen approvals, this answers 503, so every gate refuses every owner-only step (they fail closed).
@@ -241,16 +251,19 @@ export async function handle(req: Request, env: Env, page: () => Response): Prom
         return json(404, { error: "No approval with that nonce is on file here. Nothing was revoked." });
       nonces = [nonce];
     }
+    // An approval that's already revoked gets its revocation back, not another one (part A review 1, Sonnet).
+    const done = new Map(approvals.filter((r: Envelope) => r.payload.type === "revocation").map((r: Envelope) => [r.payload.nonce, r]));
     const revocations: Envelope[] = [];
-    try {
-      const s = await signer(env);
-      for (const nonce of nonces) {
-        const record = await signRecord({ format: APPROVAL_FORMAT, type: "revocation", nonce, issued_at: new Date(now).toISOString() }, s);
-        await call(env, "add", { record });
-        revocations.push(record);
+    for (const nonce of nonces) {
+      const earlier = done.get(nonce);
+      if (earlier) {
+        revocations.push(earlier as Envelope);
+        continue;
       }
-    } catch (e: any) {
-      return json(503, { error: `Couldn't sign: ${String(e?.message ?? e)}. ${revocations.length} of ${nonces.length} revoked.`, revocations });
+      const signed = await call(env, "sign", { payload: { format: APPROVAL_FORMAT, type: "revocation", nonce, issued_at: new Date(now).toISOString() } });
+      if (!signed.record) return json(503, { error: `Couldn't sign: ${signed.error ?? "unknown"}. ${revocations.length} of ${nonces.length} revoked.`, revocations });
+      await call(env, "add", { record: signed.record });
+      revocations.push(signed.record);
     }
     return json(200, body?.all === true ? { revoked: revocations.length, revocations } : { revocation: revocations[0] });
   }
@@ -260,10 +273,13 @@ export async function handle(req: Request, env: Env, page: () => Response): Prom
   const l = await call(env, "list");
   if (l.frozen) return json(409, { error: "Approvals are frozen. Unfreeze them first. Nothing was approved." });
   if (!l.policy_version) return json(409, { error: "Set the policy version first: POST /policy with the gate policy's version." });
-  // The same request sent twice (a double tap) gives the first approval back, not a second one (fresh read, #3).
+  // The same request sent twice (a double tap) gives the first approval back, not a second one (fresh read, #3). The
+  // same id with different fields is refused, not answered with the old approval (part A review 1, Sonnet).
+  const same = (r: Envelope) => r.payload.action === v.action && r.payload.target === v.target && r.payload.target_sha256 === v.target_sha256 && r.payload.max_uses === v.max_uses;
+  const repeat = (r: Envelope) => (same(r) ? json(200, { approval: r, repeat: true }) : json(409, { error: "This request id was already used for a different approval. Nothing new was approved." }));
   if (v.request_id) {
     const earlier = (await call(env, "find-request", { request_id: v.request_id })).record;
-    if (earlier) return json(200, { approval: earlier, repeat: true });
+    if (earlier) return repeat(earlier);
   }
   const payload = {
     format: APPROVAL_FORMAT,
@@ -277,13 +293,11 @@ export async function handle(req: Request, env: Env, page: () => Response): Prom
     nonce: hex(16),
     max_uses: v.max_uses,
   };
-  let record: Envelope;
-  try {
-    record = await signRecord(payload, await signer(env));
-  } catch (e: any) {
-    return json(503, { error: `Couldn't sign: ${String(e?.message ?? e)}. Nothing was approved.` });
-  }
+  const signed = await call(env, "sign", { payload });
+  if (!signed.record) return json(503, { error: `Couldn't sign: ${signed.error ?? "unknown"}. Nothing was approved.` });
+  const record: Envelope = signed.record;
   const added = await call(env, "add", { record, ...(v.request_id ? { request_id: v.request_id } : {}) });
-  if (added.existing) return json(200, { approval: added.existing, repeat: true });
+  if (added.frozen) return json(409, { error: "Approvals are frozen. Unfreeze them first. Nothing was approved." });
+  if (added.existing) return repeat(added.existing);
   return json(200, { approval: record });
 }
