@@ -1,14 +1,11 @@
 // The owner-approvals Worker: apart from Agent Referee, with its own key and the owner's own token.
-// Secrets (set by the owner, never in this file): OWNER_TOKEN, APPROVALS_SIGNING_KEY.
+// One secret, set by the owner from his phone (Cloudflare's dashboard), never in this file: OWNER_TOKEN.
+// The signing key is made inside the Worker's own store the first time it's needed; GET /pubkey shows its public half.
 // Deploying it is the owner's (installing a server is on his owner-only list).
 {
   "name": "owner-approvals",
   "main": "src/index.ts",
   "compatibility_date": "2026-10-01",
   "durable_objects": { "bindings": [{ "name": "APPROVALS", "class_name": "ApprovalStore" }] },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ApprovalStore"] }],
-  "vars": {
-    // The public half of the approvals key (scripts/gen-keys.mjs prints it). Gates pin this value.
-    "APPROVALS_PUBLIC_KEY": ""
-  }
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ApprovalStore"] }]
 }
