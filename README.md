@@ -83,6 +83,7 @@ You'll need a [Cloudflare](https://dash.cloudflare.com/sign-up) account (the Wor
   5. update the advisory docs and the privacy notes if judges' inputs go to Anthropic again
   6. deploy, with the usual checks
 - **Self-hosters upgrading:** review-3's default panel now comes from `REVIEW_3_MODELS` (code default: Opus, GPT-6 Luna, Gemini 3.7 Flash), no longer from `PANEL_3_MODELS`.
+- **Self-hosters, judge settings:** the code's own judge defaults are Claude models, so with no settings (and `CLAUDE_JUDGES_ENABLED` off) every judge tier answers 503, "closed for now". That's on purpose: it fails closed. Set `JUDGE_MODEL`, `JUDGE_MODEL_POOL`, `PANEL_2_MODELS` and `PANEL_3_MODELS` as `wrangler.jsonc` does, including in any test service you run from this code.
 - **Pause without the token:** `npx wrangler secret put PAID_PAUSED` (all paid routes) or `REVIEWS_PAUSED` (reviews only), value `true`; delete the secret to resume.
 - **Monitoring:** `GET /health` answers `"status":"ok"`, `"paused"`, `"degraded"` (with `reasons`) or `"down"`. A keyword monitor on `"status":"ok"` catches all of them.
 - **Staging:** `npx wrangler deploy --env staging` makes `agent-referee-staging` with its own storage, no payments and fake AI answers (`FAKE_AI_DELAY_MS`, `FAKE_AI_MIX`). Staging also reads `x-test-country` (e.g. `HK`, `UA-43`) to test the region rules. Give it its own secrets, including a new signing key pair.
