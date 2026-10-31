@@ -317,10 +317,29 @@ async function walletBlockedRefusal(c: any, wallet: string) {
 }
 
 /**
+ * PLAN 0.4, review R1 (agreed by 4.0, 0934): while the region rules are off or fail their self-test (alerts A1, A2),
+ * every route that applies them refuses, wherever the request comes from, before anything is charged or used: a 503
+ * with code legal_pause. It needs no /health poll. /health reports the same problems under `legal`. Free reviews,
+ * the hosted connector's included, are refused too: sanctions rules cover providing a service, not only payments.
+ */
+function legalPause(c: any): Response | null {
+  const problems = regionRulesProblems(c.env);
+  if (!problems.length) return null;
+  stat(c, "legal_paused");
+  console.error(JSON.stringify({ legal_pause: problems, path: routePath(c) }));
+  return new Response(
+    JSON.stringify({ error: "legal_pause: this service is paused while a legal check is fixed. Nothing was charged or used; try again later.", code: "legal_pause" }),
+    { status: 503, headers: { "content-type": "application/json", "retry-after": "600" } },
+  );
+}
+
+/**
  * Region rule for a request that may reach these models (see regions.ts): null when it may go ahead, otherwise a 451
  * refusal (counted). `count`: also add one to today's count for the request's country (counts only, never who).
  */
 function regionCheck(c: any, models: string[], suffix: string, count = false, judges = false): Response | null {
+  const legal = legalPause(c);
+  if (legal) return legal;
   const where = whereOf(c);
   if (count) stat(c, countryStat(where));
   // Judge seats keep Anthropic's list while Claude judges are off (regions.ts, judgeRegionBlock).
@@ -825,6 +844,7 @@ app.get("/health", async (c) => {
     ok,
     status,
     reasons: [...verdict.reasons, ...(allJudges ? [] : ["judge_key_missing"]), ...(badlyClosed ? ["judge_closed"] : [])],
+    legal: verdict.legal,
     warnings: verdict.warnings,
     checks: {
       receipts_signing: signing ? "ok" : "missing key",
@@ -1563,10 +1583,14 @@ async function handleFreeReview(c: any, tier: ReviewTier, ext?: { caller: string
     return err(400, `${String(e?.message ?? e)} Your free review wasn't used.`);
   }
   if (missingReviewKey(c.env, commitment.models)) return err(503, "Sealed review is temporarily unavailable. Your free review wasn't used.");
-  // Not for ext: those requests come from the hosted MCP server's own location, not the person's.
+  // Not for ext: those requests come from the hosted MCP server's own location, not the person's. A legal pause
+  // (PLAN 0.4, R1) applies to them all the same.
   if (!ext) {
     const region = regionCheck(c, commitment.models, "Your free review wasn't used.", true);
     if (region) return region;
+  } else {
+    const legal = legalPause(c);
+    if (legal) return legal;
   }
   const caller = ext ? ext.caller : await callerHash(c);
   if (!caller || !c.env.LEDGER) return err(503, "Free reviews aren't available from here. " + FREE_PAID_HINT);

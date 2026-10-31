@@ -56,12 +56,16 @@ test("A8: only account-level 401/403 answers count, and they're filed under the 
   assert.equal(accountOf("mistralai/mistral-large-4-0"), "openrouter");
 });
 
-test("/health: A1/A2 and A8 are reasons; A4 is a 24-hour warning, not a reason", () => {
+test("/health: A1/A2 and A8 go in their own legal list (plus the reason \"legal\"); A4 is a 24-hour warning, not a reason", () => {
   const now = Date.parse("2026-10-31T16:00:00Z");
   const base = { gates: {}, ledger: "ok" as const, now };
-  assert.deepEqual(evaluateHealth({ ...base, events: [], regionProblems: ["region_rules_off"] }).reasons, ["region_rules_off"]);
-  const acct = evaluateHealth({ ...base, events: [{ kind: "provider_account_problem", at: now - 60_000, detail: "openrouter" }] });
-  assert.deepEqual(acct.reasons, ["provider_account_problem:openrouter"]);
+  assert.deepEqual(evaluateHealth({ ...base, events: [] }), { degraded: false, reasons: [], warnings: [], legal: [] });
+  const off = evaluateHealth({ ...base, events: [], regionProblems: ["region_rules_off"] });
+  assert.deepEqual([off.degraded, off.reasons, off.legal], [true, ["legal"], ["region_rules_off"]]);
+  const acct = evaluateHealth({ ...base, events: [{ kind: "provider_account_problem", at: now - 60_000, detail: "openrouter" }, { kind: "provider_account_problem", at: now - 30_000, detail: "openrouter" }] });
+  assert.deepEqual([acct.reasons, acct.legal], [["legal"], ["provider_account_problem:openrouter"]], "listed once");
+  const both = evaluateHealth({ ...base, events: [{ kind: "provider_account_problem", at: now, detail: "anthropic" }], regionProblems: ["region_selftest_failed:CN:openai"], unjudgedOpen: 1 });
+  assert.deepEqual([both.reasons, both.legal], [["unjudged_to_refund:1", "legal"], ["region_selftest_failed:CN:openai", "provider_account_problem:anthropic"]]);
   assert.equal(evaluateHealth({ ...base, events: [{ kind: "provider_account_problem", at: now - 20 * 60_000, detail: "openrouter" }] }).degraded, false, "after 15 minutes without another one");
   const tried = evaluateHealth({ ...base, events: [{ kind: "sanctions_region_attempt", at: now - 23 * 3_600_000, detail: "IR" }] });
   assert.equal(tried.degraded, false);

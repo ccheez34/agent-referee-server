@@ -237,13 +237,17 @@ export function evaluateHealth(input: { gates: Record<string, any>; events: Heal
   if (input.events.some((e) => e.kind === "out_of_tokens" && now - e.at < 24 * 3_600_000)) warnings.push("out_of_tokens");
   // A paid match that couldn't be judged is waiting for a refund: that needs the operator, so it alerts.
   if ((input.unjudgedOpen ?? 0) > 0) reasons.push(`unjudged_to_refund:${input.unjudgedOpen}`);
-  // PLAN 0.4 alerts (research\legal-risks-2026-10-28\ALERTS-spec.md). A1/A2: the region rules are off or fail their
-  // self-test (computed from the settings on each call). A8: a provider says the account is suspended or restricted.
-  for (const p of input.regionProblems ?? []) reasons.push(p);
-  for (const e of recent) if (e.kind === "provider_account_problem") reasons.push(`provider_account_problem:${e.detail || "unknown"}`);
+  // PLAN 0.4 alerts (research\legal-risks-2026-10-28\ALERTS-spec.md). They go in their own `legal` list (review R2,
+  // agreed by 4.0): a legal trigger must never look like an ordinary "degraded", so a separate keyword monitor can
+  // watch `"legal":["` at high priority. A1/A2: the region rules are off or fail their self-test (computed from the
+  // settings on each call). A8: a provider says the account is suspended or restricted. Any of them also adds the
+  // reason "legal", so the existing status monitor still alerts.
+  const legal = [...(input.regionProblems ?? [])];
+  for (const e of recent) if (e.kind === "provider_account_problem") legal.push(`provider_account_problem:${e.detail || "unknown"}`);
+  if (legal.length) reasons.push("legal");
   // A4: someone tried from a sanctioned location and was refused. The control worked, so a warning, not a reason.
   if (input.events.some((e) => e.kind === "sanctions_region_attempt" && now - e.at < 24 * 3_600_000)) warnings.push("sanctions_region_attempt");
-  return { degraded: reasons.length > 0, reasons: [...new Set(reasons)], warnings };
+  return { degraded: reasons.length > 0, reasons: [...new Set(reasons)], warnings, legal: [...new Set(legal)] };
 }
 
 /** Constant-time check of the admin token (sent as "Authorization: Bearer <token>"). No token configured = no admin. */
