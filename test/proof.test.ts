@@ -96,14 +96,24 @@ test("L1: the comparison and the branch list must be about the commit asked for,
   const paged = fakeGithub({ "/branches-where-head": () => Response.json([{ name: "a", commit: { sha: SHA } }], { headers: { link: '<https://api.github.com/x?page=2>; rel="next"' } }) });
   const pg: any = await observeGithub("github_commit", "o/r", SHA, { fetch: paged.f });
   assert.deepEqual([pg.observed.branch_heads, pg.observed.branch_heads_truncated], [["a"], true]);
-  // 404: no branch lists it. 422 ("validation failed, or the endpoint has been spammed"): no receipt, not an empty list.
+  // A Link header for another page that isn't the next one doesn't count (fresh read of a6bb530).
   _clearProofCache();
-  const none: any = await observeGithub("github_commit", "o/r", SHA, { fetch: fakeGithub({ "/branches-where-head": () => new Response("{}", { status: 404 }) }).f });
-  assert.deepEqual([none.ok, none.observed?.branch_heads, "branch_heads_truncated" in (none.observed ?? {})], [true, [], false]);
+  const last = fakeGithub({ "/branches-where-head": () => Response.json([{ name: "a", commit: { sha: SHA } }], { headers: { link: '<https://api.github.com/x?page=1>; rel="prev", <https://api.github.com/x?page=1>; rel="first"' } }) });
+  const ls: any = await observeGithub("github_commit", "o/r", SHA, { fetch: last.f });
+  assert.deepEqual([ls.observed.branch_heads, "branch_heads_truncated" in ls.observed], [["a"], false]);
+  // "No branch" is a 200 with an empty list. A 404, or the 422 for "validation failed, or the endpoint has been
+  // spammed", means GitHub didn't say: branch_heads is null (unknown), never an empty list (fresh read of a6bb530).
   _clearProofCache();
-  const spam: any = await observeGithub("github_commit", "o/r", SHA, { fetch: fakeGithub({ "/branches-where-head": () => new Response("{}", { status: 422 }) }).f });
-  assert.deepEqual([spam.ok, spam.status], [false, 503]);
-  assert.match(spam.error, /didn't list the branches/);
+  const empty: any = await observeGithub("github_commit", "o/r", SHA, { fetch: fakeGithub({ "/branches-where-head": () => Response.json([]) }).f });
+  assert.deepEqual([empty.ok, empty.observed.branch_heads], [true, []]);
+  for (const status of [404, 422]) {
+    _clearProofCache();
+    const o: any = await observeGithub("github_commit", "o/r", SHA, { fetch: fakeGithub({ "/branches-where-head": () => new Response("{}", { status }) }).f });
+    assert.deepEqual([o.ok, o.observed?.branch_heads, "branch_heads_truncated" in (o.observed ?? {})], [true, null, false], String(status));
+  }
+  _clearProofCache();
+  const other: any = await observeGithub("github_commit", "o/r", SHA, { fetch: fakeGithub({ "/branches-where-head": () => new Response("{}", { status: 409 }) }).f });
+  assert.deepEqual([other.ok, other.status], [false, 502]);
 });
 
 test("L1 github_checks: every run and status with who posted it, in-progress runs never shown as passed; cached 10 minutes as a copy", async () => {
@@ -132,8 +142,8 @@ test("L1 failures give no receipt: private, not found, rate limit, redirects off
   const cases: [Record<string, () => Response>, string, number, RegExp][] = [
     [{ "/repos/o/r?": () => Response.json({}), }, "github_commit", 404, /isn't public/],
     [{ [`/commits/${SHA}`]: () => new Response("{}", { status: 404 }) }, "github_commit", 404, /not found/],
-    [{ [`/commits/${SHA}`]: () => new Response("{}", { status: 403 }) }, "github_commit", 503, /rate limit/],
-    [{ [`/commits/${SHA}`]: () => new Response("{}", { status: 429 }) }, "github_commit", 503, /rate limit/],
+    [{ [`/commits/${SHA}`]: () => new Response("{}", { status: 403 }) }, "github_commit", 503, /refused the request \(403, usually its rate limit\)/],
+    [{ [`/commits/${SHA}`]: () => new Response("{}", { status: 429 }) }, "github_commit", 503, /refused the request \(429, usually its rate limit\)/],
     [{ [`/commits/${SHA}`]: () => new Response(null, { status: 301, headers: { location: "https://evil.example/x" } }) }, "github_commit", 502, /outside/],
     [{ [`/commits/${SHA}`]: () => new Response(null, { status: 302, headers: { location: "/" } }) }, "github_commit", 502, /outside/],
     [{ [`/commits/${SHA}`]: () => Response.json({ sha: "e".repeat(40), html_url: "" }) }, "github_commit", 404, /different commit/],

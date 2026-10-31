@@ -126,19 +126,20 @@ export async function observeGithub(
       onDefault = contained;
     }
   }
-  // GitHub documents this list as every branch whose head is the commit, with no pages. per_page and the Link header
-  // cover it if it ever pages (code review 2). A 404 means no branch lists it. Anything else, including its 422
-  // ("validation failed, or the endpoint has been spammed"), gives no receipt rather than an empty list.
+  // GitHub documents this list as every branch whose head is the commit, with no pages; "none" is a 200 with an empty
+  // list (seen live, Oct 31). per_page and the Link header cover it if it ever pages (code review 2). A 404 or its 422
+  // ("validation failed, or the endpoint has been spammed") means GitHub didn't say: branch_heads is then null, meaning
+  // unknown, never an empty list (fresh read of a6bb530). Anything else gives no receipt.
   const heads = await get(`${base}/branches-where-head?per_page=100`);
-  if (!heads.ok && heads.upstream !== 404) return heads.upstream === 422 ? fail(503, "couldn't observe: GitHub didn't list the branches for this commit; try again later") : heads;
-  const headList: any[] = heads.ok ? heads.data : [];
-  if (!Array.isArray(headList)) return fail(502, "couldn't observe: GitHub's answer about branches couldn't be read");
-  if (headList.some((b: any) => String(b?.commit?.sha ?? "").toLowerCase() !== sha)) return fail(502, "couldn't observe: GitHub answered about a different commit");
+  if (!heads.ok && heads.upstream !== 404 && heads.upstream !== 422) return heads;
+  const headList: any[] | null = heads.ok ? heads.data : null;
+  if (headList !== null && !Array.isArray(headList)) return fail(502, "couldn't observe: GitHub's answer about branches couldn't be read");
+  if (headList?.some((b: any) => String(b?.commit?.sha ?? "").toLowerCase() !== sha)) return fail(502, "couldn't observe: GitHub answered about a different commit");
   const where = {
     default_branch: defaultBranch || null,
     on_default_branch: onDefault,
-    branch_heads: headList.slice(0, 100).map((b: any) => String(b?.name ?? "")),
-    ...(headList.length > 100 || (heads.ok && heads.more) ? { branch_heads_truncated: true } : {}),
+    branch_heads: headList === null ? null : headList.slice(0, 100).map((b: any) => String(b?.name ?? "")),
+    ...(headList !== null && (headList.length > 100 || (heads.ok && heads.more)) ? { branch_heads_truncated: true } : {}),
   };
   let observed: Record<string, unknown>;
   if (check === "github_commit") {
