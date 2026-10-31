@@ -341,11 +341,11 @@ async function matchJudgeModels(c: any, id: string, judgeTier: boolean): Promise
 /** matchJudgeModels, plus whether the models are the match's own (false: the fail-closed list). */
 async function matchJudgeInfo(c: any, id: string, judgeTier: boolean): Promise<{ models: string[]; own: boolean; failed?: boolean }> {
   let status: any = null;
-  let failed = false; // the read itself failed (an error or a 5xx), as opposed to a match that doesn't exist (404)
+  let failed = false; // the read itself failed (an error, or any answer but OK), as opposed to a match that doesn't exist (404)
   try {
     const res = await forward(c.env, id, "status");
     if (res.ok) status = await res.json();
-    else if (res.status >= 500) failed = true;
+    else if (res.status !== 404) failed = true; // a 429 or 408 is a failed read too (re-read R1)
   } catch {
     failed = true;
   }
@@ -356,7 +356,8 @@ async function matchJudgeInfo(c: any, id: string, judgeTier: boolean): Promise<{
   return readable ? { models: models as string[], own: true } : { models: allowedModels(c.env), own: false, failed };
 }
 
-const CANT_CHECK_MATCH = "Can't check this match's judges right now. Nothing was charged; try again in a moment.";
+/** A match whose judges can't be read right now: temporary, so it's a "busy" 503 with Retry-After (re-read R2). */
+const cantCheckMatch = () => busy(5, "can't check this match's judges right now.");
 const CLAUDE_MATCH_CLOSED = "This match's judges are no longer offered (Claude judges are off for now). Nothing was charged.";
 
 /** Region rule for a guest joining an invite match: its judges' companies (no judges: the sanctions list only). */
@@ -588,7 +589,7 @@ async function judgeJoinGuard(c: any, next: any) {
   // A match committed to a Claude judge before Claude judges were switched off is never judged (match.ts,
   // startJudging), so nobody new pays to join it (judge-tier spec v2.1, §7). If its status can't be read right now,
   // nobody pays either (review 1, finding 6); a match that doesn't exist goes on to the handler's own 404.
-  if (failed) return err(503, CANT_CHECK_MATCH);
+  if (failed) return cantCheckMatch();
   if (own && commitsClaudeWhileOff(c.env, models)) return err(503, CLAUDE_MATCH_CLOSED);
   if (!gatesOn(c.env)) return next();
   const b = models.length ? await quickBusy(c.env, models) : null;
@@ -677,8 +678,11 @@ function docPrices(env: Env): Record<string, string> {
     free_reviews: freeReviewsLabel(env),
     ...(multiOnForAll(env) ? { ...multiPrices(env), multi_reviews: "on" } : {}),
     ...(multiJudgeOnForAll(env) ? { multi_judges: "on" } : {}),
-    // judge-3's default panel closed (waiting for a third company, or Claude judges off): the docs say so.
-    ...(judgeTierClosed(env, "judge-3") ? { judge3_closed: `${judgeTierClosed(env, "judge-3")} Agents can still name three companies themselves (GET /judge).` } : {}),
+    // judge-3's default panel closed (waiting for a third company, or Claude judges off): the docs say so, once. The
+    // wait's own reason already says agents can name a company (re-read R3).
+    ...(judgeTierClosed(env, "judge-3")
+      ? { judge3_closed: judgeTierWaitsForCompany(env, "judge-3") ? judgeTierClosed(env, "judge-3")! : `${judgeTierClosed(env, "judge-3")} Agents can still name three companies themselves (GET /judge).` }
+      : {}),
   };
 }
 
@@ -1009,8 +1013,9 @@ app.get("/judge", async (c) => {
   const closed = (t: "judge" | "judge-2" | "judge-3") => judgeTierClosed(c.env, t);
   const single = closed("judge");
   // The prompt fields stay even when the single judge is closed, so a match's prompt_sha256 can always be checked here.
+  // `model` stays the configured id (a string, as on main), with `closed` beside it (re-read R4).
   const commit = single
-    ? { ...(await judgeCommitment(c.env.JUDGE_MODEL || "claude-haiku-5-5")), model: null, closed: single }
+    ? { ...(await judgeCommitment(c.env.JUDGE_MODEL || "claude-haiku-5-5")), closed: single }
     : await judgeCommitment(c.env.JUDGE_MODEL || "claude-haiku-5-5");
   const panel = async (t: "judge-2" | "judge-3") => {
     const why = closed(t);
@@ -1850,6 +1855,7 @@ app.post("/invite/join", async (c) => {
   if (region) return region;
   // The guest's seat is free, but the host's payment is waiting on it: the same refusal as a paid judge seat (finding 7).
   const info = await matchJudgeInfo(c, body.match_id, false);
+  if (info.failed) return cantCheckMatch();
   if (info.own && commitsClaudeWhileOff(c.env, info.models)) return err(503, CLAUDE_MATCH_CLOSED);
   return forward(c.env, body.match_id, "join", { role: "guest", invite_token: body.invite_token, seat: body.seat });
 });

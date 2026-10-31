@@ -8,7 +8,7 @@ import { Health, _resetHealthCaches } from "../src/health.ts";
 import { Gate } from "../src/gate.ts";
 import { Ledger } from "../src/ledger.ts";
 import { _clearSnapshots } from "../src/gateclient.ts";
-import { randomToken } from "../src/logic.ts";
+import { commitmentOf, randomToken } from "../src/logic.ts";
 import { verifyReceipt } from "../src/receipt.ts";
 import { CLAUDE_JUDGES_OFF, JUDGE_ADVISORY, choosePanel, claudeJudgesOn, companyOf, defaultJudgeModels, judgeAllowed, judgePool, judgeTierClosed, PanelShortError, tierCommitment } from "../src/judge.ts";
 import { reviewModels } from "../src/review.ts";
@@ -529,7 +529,13 @@ test("§10 item 6: reviews' commitments and prompt hash are main's, and review-3
   assert.deepEqual(three.models, [OPUS, LUNA, FLASH]);
   assert.equal(one.prompt_sha256, PROMPT);
   assert.equal(three.prompt_sha256, PROMPT);
-  assert.deepEqual((await reviewCommitment("review-3", {} as any)).models, DEFAULT_REVIEW_3_MODELS.split(","), "an unconfigured server");
+  // Literals, not the constants (re-read R5): main 2aa89f2 shipped review-3 as PANEL_3_MODELS = Opus, Luna, Flash. Main's
+  // unconfigured fallback was three Claude sizes; the fixed list is by design (spec v2.1 §3 rule 5, 2.0-D304).
+  assert.deepEqual(DEFAULT_REVIEW_3_MODELS.split(","), [OPUS, LUNA, FLASH]);
+  assert.deepEqual((await reviewCommitment("review-3", {} as any)).models, [OPUS, LUNA, FLASH], "an unconfigured server");
+  const vars = await shippedVars();
+  assert.deepEqual((await reviewCommitment("review-3", vars)).models, [OPUS, LUNA, FLASH], "wrangler.jsonc's own setting");
+  for (const [k, v] of Object.entries(SHIPPED)) assert.equal(vars[k], v, `this file's SHIPPED.${k} matches wrangler.jsonc`);
   for (let i = 0; i < 40; i++) {
     const r = await reviewCommitment("review-3", env, "rotate");
     if (r.models.some((m) => companyOf(m) === "anthropic")) return; // review rotate can still draw Claude
@@ -542,6 +548,12 @@ test("§10 item 7: a receipt from before the build still verifies, and the regen
   const old = mr.cases.find((c: any) => c.expect.ok);
   assert.equal(await verifyReceipt(old.receipt, mr.public_key), true, "a pre-build (review) receipt");
   assert.equal(old.receipt.payload.advisory, undefined, "a review receipt has no advisory");
+  // A real judge receipt signed before the build (re-read R5): it still verifies, and the build added nothing to it.
+  const pre = JSON.parse(await readFile(new URL("./fixtures/judge-receipt-prebuild.json", import.meta.url), "utf8"));
+  assert.equal(await verifyReceipt(pre.receipt, pre.public_key), true, "a pre-build judge receipt");
+  assert.equal(pre.receipt.payload.advisory, undefined);
+  assert.equal(pre.receipt.payload.human_review, undefined);
+  assert.ok(pre.receipt.payload.outcome.votes.some((v: any) => companyOf(v.model) === "anthropic"), "it is from before: a Claude judge voted");
   const mj = JSON.parse(await readFile(new URL("./fixtures/multi-judge-vectors.json", import.meta.url), "utf8"));
   for (const c of mj.cases) {
     const p = c.receipt.payload;
@@ -568,6 +580,19 @@ routeTest("finding 6: a match whose status can't be read is refused before payme
   const r = await http(e, "/join/judge-3", { match_id: "a".repeat(24), seat: "alpha" }, { "cf-ipcountry": "US" });
   assert.equal(r.status, 503, JSON.stringify(r.body));
   assert.match(r.body.error, /Nothing was charged/);
+  assert.equal(r.body.busy, true, "temporary: a busy 503 (re-read R2)");
+  assert.equal(r.body.retry_after_s, 5);
+  // Any answer but OK or 404 is a failed read too (re-read R1), on the paid seat and the free invite seat (R2).
+  for (const code of [429, 408, 400]) {
+    const f = appEnv();
+    f.MATCHES = { idFromName: (x: string) => x, get: () => ({ fetch: async () => new Response("{}", { status: code }) }) };
+    const j = await http(f, "/join/judge-3", { match_id: "c".repeat(24), seat: "alpha" }, { "cf-ipcountry": "US" });
+    assert.equal(j.status, 503, `${code}: ${JSON.stringify(j.body)}`);
+    assert.equal(j.body.busy, true, String(code));
+    const g = await http(f, "/invite/join", { match_id: "c".repeat(24), invite_token: "t".repeat(20) }, { "cf-ipcountry": "US" });
+    assert.equal(g.status, 503, `invite, ${code}: ${JSON.stringify(g.body)}`);
+    assert.equal(g.body.busy, true);
+  }
   const missing = await http(appEnv(), "/join/judge-3", { match_id: "b".repeat(24), seat: "alpha" }, { "cf-ipcountry": "US" });
   assert.equal(missing.status, 404, JSON.stringify(missing.body));
 });
@@ -588,7 +613,7 @@ routeTest("finding 11 and 13: GET /judge keeps its prompt fields when the single
   assert.match(j.body.closed, /closed for now/);
   assert.match(j.body.prompt_sha256, /^[0-9a-f]{64}$/);
   assert.ok(j.body.format_version);
-  assert.equal(j.body.model, null);
+  assert.equal(j.body.model, HAIKU, "model stays a string, the configured id (re-read R4)");
   const r = await http(appEnv(), "/reviewers");
   assert.notEqual(j.body.opt_in_note, r.body.opt_in_note, "the reviewers' note stays as it was; the judges' differs");
   assert.ok(!j.body.opt_in_models.includes(MISTRAL), "Mistral is in the judges' own pool, not an opt-in there");
@@ -605,9 +630,70 @@ routeTest("§10 item 8: every judge join route's 402 carries the advisory, /host
       assert.ok(JSON.stringify(r.body).includes(JUDGE_ADVISORY), `${route}: the advisory`);
     }
   }
-  const root = await http(appEnv({ PANEL_3_MODELS: [LUNA, FLASH].join(",") }), "/");
-  assert.match(JSON.stringify(root.body), /judge-3 is closed for now/);
+  // The multi-part judge tiers' 402 (re-read R5): closed while Claude judges are off, so with the switch on.
+  const multi = appEnv({ PAYMENTS_ENABLED: "true", MULTI_JUDGE_ENABLED: "true", CLAUDE_JUDGES_ENABLED: "true", JUDGE_MODEL_POOL: undefined });
+  const m3 = await http(multi, "/matches", { tier: "judge-3x2", seats: ["alpha", "beta"], rules: RULES });
+  assert.equal(m3.status, 201, JSON.stringify(m3.body).slice(0, 300));
+  const r3 = await http(multi, "/join/judge-3x2", { match_id: m3.body.match_id, seat: "alpha" });
+  assert.equal(r3.status, 402, JSON.stringify(r3.body).slice(0, 300));
+  assert.ok(JSON.stringify(r3.body).includes(JUDGE_ADVISORY), "judge-3x2's 402: the advisory");
 });
+
+routeTest("re-read R3: llms.txt gives judge-3's closed reason once", async () => {
+  const txt = async (e: any) => (await app.fetch(new Request("https://x/llms.txt"), e, ctx)).text();
+  const line = (t: string) => t.split("\n").find((l) => l.startsWith("- judge-3 ")) ?? "";
+  const wait = line(await txt(appEnv({ PANEL_3_MODELS: [LUNA, FLASH].join(",") })));
+  assert.match(wait, /judge-3 is closed for now: judge-3 needs a third AI company; agents can name one themselves \(GET \/judge\)\.$/, wait);
+  assert.doesNotMatch(wait, /name three/);
+  const off = line(await txt(appEnv({ PANEL_3_MODELS: [LUNA, FLASH, OPUS].join(",") })));
+  assert.match(off, /Claude judges are off for now\. Agents can still name three companies themselves \(GET \/judge\)\.$/, off);
+  assert.doesNotMatch(line(await txt(appEnv())), /closed/, "open with the shipped settings");
+});
+
+routeTest("re-read R5: GET /reviewers is byte for byte main 2aa89f2's, each with its own wrangler.jsonc settings", async () => {
+  const snap = await readFile(new URL("./fixtures/reviewers-main-2aa89f2.json", import.meta.url), "utf8");
+  const res = await app.fetch(new Request("https://x/reviewers"), { ...(await shippedVars()) }, ctx);
+  // A deliberate change to reviews or their settings must regenerate the snapshot (and say why).
+  assert.equal(await res.text(), snap);
+});
+
+test("re-read R5: a luck-tier receipt has no advisory and no human-review marker", async () => {
+  const w = world();
+  const c = await create(w, { tier: "rps", rules: undefined });
+  assert.equal(c.status, 201, JSON.stringify(c.body));
+  const t: Record<string, string> = {};
+  for (const s of ["alpha", "beta"]) t[s] = (await w.call(c.id, "join", { seat: s, tier: "rps", role: "party", paid: true })).body.seat_token;
+  const values: Record<string, string> = { alpha: "paper", beta: "rock" };
+  const nonces: Record<string, string> = {};
+  for (const s of ["alpha", "beta"]) {
+    nonces[s] = randomToken(16);
+    assert.equal((await w.call(c.id, "commit", { seat: s, seat_token: t[s], commitment: await commitmentOf(values[s], nonces[s]) })).status, 200);
+  }
+  let last: any;
+  for (const s of ["alpha", "beta"]) last = await w.call(c.id, "reveal", { seat: s, seat_token: t[s], value: values[s], nonce: nonces[s] });
+  const m = last.body.match;
+  assert.equal(m.phase, "done", JSON.stringify(m).slice(0, 300));
+  assert.equal(m.result.winner, "alpha");
+  assert.equal(await verifyReceipt(m.receipt, keys.PUBLIC_KEY), true);
+  assert.equal(m.receipt.payload.advisory, undefined);
+  assert.equal(m.receipt.payload.human_review, undefined);
+  assert.equal(m.advisory, undefined);
+});
+
+/** wrangler.jsonc's top-level vars: comments outside strings and trailing commas removed. */
+async function shippedVars(): Promise<Record<string, string>> {
+  const t = await readFile(new URL("../wrangler.jsonc", import.meta.url), "utf8");
+  let out = "", inStr = false;
+  for (let i = 0; i < t.length; i++) {
+    const ch = t[i], nx = t[i + 1];
+    if (inStr) { out += ch; if (ch === "\\") out += t[++i]; else if (ch === '"') inStr = false; continue; }
+    if (ch === '"') { inStr = true; out += ch; continue; }
+    if (ch === "/" && nx === "/") { while (i < t.length && t[i] !== "\n") i++; out += "\n"; continue; }
+    if (ch === "/" && nx === "*") { i = t.indexOf("*/", i + 2) + 1; continue; }
+    out += ch;
+  }
+  return JSON.parse(out.replace(/,(\s*[}\]])/g, "$1")).vars;
+}
 
 routeTest("§10 item 10: /host/join and judge-2 seats are region-checked too, and VE's 451 for the single judge has the judges' text", async () => {
   const e = appEnv();

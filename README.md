@@ -79,7 +79,7 @@ You'll need a [Cloudflare](https://dash.cloudflare.com/sign-up) account (the Wor
   1. set `CLAUDE_JUDGES_ENABLED` to `"true"`, live and staging
   2. add the Claude models wanted to `JUDGE_MODEL_POOL`, and to `JUDGE_MODEL` or `PANEL_*_MODELS` if they should be defaults
   3. check that every default panel still has as many companies as seats (with the switch on, the "closed" rules don't apply)
-  4. leave the judge routes' region rule alone (below) unless you decide to open those places
+  4. leave the judge routes' region rule alone (above) unless you decide to open those places
   5. update the advisory docs and the privacy notes if judges' inputs go to Anthropic again
   6. deploy, with the usual checks
 - **Self-hosters upgrading:** review-3's default panel now comes from `REVIEW_3_MODELS` (code default: Opus, GPT-6 Luna, Gemini 3.7 Flash), no longer from `PANEL_3_MODELS`.
