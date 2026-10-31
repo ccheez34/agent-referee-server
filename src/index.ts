@@ -15,7 +15,7 @@ import {
   REVIEW_LIMITS, REVIEW_MESSAGE_FORMAT, longReviewRule, REVIEW_SYSTEM, REVIEW_VERDICTS, REVIEWER_BUDGET_MS, missingReviewKey, reviewCommitment, type ReviewerCall, reviewModels, reviewPayload, runOneReviewer, validateReview, type ReviewTier,
 } from "./review.ts";
 import { Gate, GATE_MAX_WAIT_MS } from "./gate.ts";
-import { Health, adminOk, evaluateHealth, healthEvents, listUnjudged, markRefunded, pauseState, recordAccountProblem, recordEvent, recordSettleFailure, setPause, listBlocked, settledUp, unblockWallet, walletBlocked, walletStanding } from "./health.ts";
+import { Health, adminOk, evaluateHealth, healthEvents, legalDetail, listUnjudged, markRefunded, pauseState, publicLegal, recordAccountProblem, recordEvent, recordSettleFailure, setPause, listBlocked, settledUp, unblockWallet, walletBlocked, walletStanding } from "./health.ts";
 import { acquireSlots, gateStats, gatesOn, poolsOfProvider, quickBusy, resetPools, type SlotLease } from "./gateclient.ts";
 import { classifyPaidResponse, plausiblePayment, priceMicro, reviewBudget, reviewLimitRefusal } from "./paywatch.ts";
 import { fakeAiConfig } from "./fakeai.ts";
@@ -848,7 +848,7 @@ app.get("/health", async (c) => {
     ok,
     status,
     reasons: [...verdict.reasons, ...(allJudges ? [] : ["judge_key_missing"]), ...(badlyClosed ? ["judge_closed"] : [])],
-    legal: verdict.legal,
+    legal: publicLegal(verdict.legal), // F10: the public sees only that a legal alert is on; the detail is in /admin/stats
     warnings: verdict.warnings,
     checks: {
       receipts_signing: signing ? "ok" : "missing key",
@@ -1016,6 +1016,8 @@ app.get("/admin/stats", async (c) => {
     // AI answers cut off at the token limit, per model (ids with "/" and "." shown as "-"), and the latest 100 in full.
     ran_out_of_tokens_7_days: total("ran_out_of_tokens"),
     ran_out_of_tokens_recent: Array.isArray(s.cutoffs) ? s.cutoffs.slice().reverse() : [],
+    // F10: the legal list's detail, which /health shows the public only as "alert".
+    legal_now: legalDetail(await healthEvents(c.env).catch(() => []), regionRulesProblems(c.env as any)),
     free_budget_today: {
       public: { spent_usd: usd(s.free_spent_micro?.public), budget_usd: usd(pub.budgetMicro) },
       ext: { spent_usd: usd(s.free_spent_micro?.ext), budget_usd: usd(ext.budgetMicro), note: "free reviews from the hosted MCP server (ChatGPT)" },

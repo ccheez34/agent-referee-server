@@ -555,13 +555,19 @@ t("alerts (PLAN 0.4): a sanctioned-location refusal is a /health warning, a comp
   assert.deepEqual(h.body.legal, []);
   const off = await call(env({ REGION_BLOCK: "off" }), "/health");
   assert.equal(off.body.status, "degraded");
-  assert.deepEqual([off.body.reasons, off.body.legal], [["legal"], ["region_rules_off"]], JSON.stringify(off.body));
+  assert.deepEqual([off.body.reasons, off.body.legal], [["legal"], ["alert"]], JSON.stringify(off.body));
   const open = await call(env({ BLOCKED_REGIONS_OPENAI: "none" }), "/health");
   assert.equal(open.body.status, "degraded");
-  assert.ok(open.body.legal.includes("region_selftest_failed:CN:openai"), JSON.stringify(open.body));
+  assert.deepEqual(open.body.legal, ["alert"], JSON.stringify(open.body));
+  // F10 (ALERTS-spec v2): the public page never names the rule, the probe or the provider; the admin stats do.
+  assert.ok(!/region_selftest_failed|region_rules_off|provider_account_problem/.test(JSON.stringify(open.body)), JSON.stringify(open.body));
+  const eo = env({ BLOCKED_REGIONS_OPENAI: "none" });
+  const stats = await call(eo, "/admin/stats", undefined, { authorization: `Bearer ${ADMIN}` });
+  assert.equal(stats.status, 200, JSON.stringify(stats.body));
+  assert.ok(stats.body.legal_now.some((x: any) => x.code === "region_selftest_failed:CN:openai" && x.from === "settings"), JSON.stringify(stats.body.legal_now));
   // The keyword a second monitor watches (review R2): present only when the list isn't empty.
   const raw = await (await app.fetch(new Request("https://x/health"), env({ REGION_BLOCK: "off" }), ctx)).text();
-  assert.ok(raw.includes('"legal":["region_rules_off"]'), raw);
+  assert.ok(raw.includes('"legal":["alert"]'), raw);
   assert.ok(!JSON.stringify(h.body).includes('"legal":["'));
 });
 
@@ -576,7 +582,10 @@ t("alerts (PLAN 0.4, A8 end to end): a provider's \"organization disabled\" answ
     await new Promise((res) => setTimeout(res, 20)); // the event is written in the background
     const h = await call(e, "/health");
     assert.equal(h.body.status, "degraded", JSON.stringify(h.body));
-    assert.deepEqual([h.body.reasons, h.body.legal], [["legal"], ["provider_account_problem:anthropic"]]);
+    assert.deepEqual([h.body.reasons, h.body.legal], [["legal"], ["alert"]]);
+    const st = await call(e, "/admin/stats", undefined, { authorization: `Bearer ${ADMIN}` });
+    const item = st.body.legal_now.find((x: any) => x.code === "provider_account_problem:anthropic");
+    assert.ok(item && item.from === "event" && item.since && item.last_seen, JSON.stringify(st.body.legal_now));
     answer = { status: 403, body: JSON.stringify({ error: { code: 403, message: "This model requires moderation. Your input was flagged for \"harassment\".", metadata: { reasons: ["harassment"] } } }) };
     const e2 = env({ FAKE_AI: undefined });
     assert.notEqual((await call(e2, "/review", review, from("US"))).status, 200);

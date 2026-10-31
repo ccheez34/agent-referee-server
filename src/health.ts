@@ -234,6 +234,23 @@ export const listUnjudged = (env: Env): Promise<UnjudgedEntry[]> => (env.HEALTH 
 export const addUnjudged = (env: Env, entry: Omit<UnjudgedEntry, "at">) => (env.HEALTH ? healthCall(env, "unjudged", { entry }) : Promise.resolve(null));
 export const markRefunded = (env: Env, match_id: string) => healthCall(env, "unjudged", { refunded_match_id: match_id });
 
+/**
+ * F10 (research\legal-risks-2026-10-28\ALERTS-spec v2.md, section 2): /health tells the public only that a legal alert is
+ * on. "Region rules off" on a public page would tell anyone the sanctions control is down, and an account problem
+ * would tell competitors that an AI company restricted the account. The detail is in GET /admin/stats (legalDetail).
+ * The keyword monitor on `"legal":["` works the same, and the reason "legal" stays.
+ */
+export const publicLegal = (legal: string[]): string[] => (legal.length ? ["alert"] : []);
+
+/** The legal list's detail, for the admin token only: each code, where it comes from, and for an event, since when. */
+export function legalDetail(events: HealthEvent[], regionProblems: string[], now = Date.now()) {
+  const out: { code: string; from: "settings" | "event"; since?: string; last_seen?: string }[] = regionProblems.map((code) => ({ code, from: "settings" }));
+  for (const e of events)
+    if (e.kind === "provider_account_problem" && now - e.at < 24 * 3_600_000)
+      out.push({ code: `provider_account_problem:${e.detail || "unknown"}`, from: "event", since: new Date(e.first_at ?? e.at).toISOString(), last_seen: new Date(e.at).toISOString() });
+  return out;
+}
+
 /** The /health verdict from gate stats, recent events and the ledger check. Pure, so each rule is tested. */
 export function evaluateHealth(input: { gates: Record<string, any>; events: HealthEvent[]; ledger: "ok" | "error" | "off"; now?: number; unjudgedOpen?: number; regionProblems?: string[]; regionWarnings?: string[]; storeError?: boolean }) {
   const now = input.now ?? Date.now();
