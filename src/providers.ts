@@ -31,15 +31,28 @@ export function isSpendCap(model: string, status: number, bodyText: string): boo
 }
 
 /**
- * PLAN 0.4, alert A8: an answer that says the provider account itself is suspended, disabled or restricted, rather
- * than one request failing. Only 401 and 403 count, and only with account-level wording, so a bad request doesn't alert.
+ * PLAN 0.4, alert A8, and two neighbours (fresh read of Oct 31, F1 and F7). What a 400, 401 or 403 says about the
+ * provider account, if anything:
+ * - "account": the account or organization itself is disabled, suspended, deactivated, banned, terminated or revoked
+ *   (Anthropic is reported to answer a disabled organization with a 400). A legal alert.
+ * - "auth": any other 401, so the service's own key was refused. Nobody outside can cause one. An operational alert.
+ * - "region": the provider won't serve the place the call left from. A Worker calls from the data centre that took
+ *   the request, so an outsider can cause one: a warning only.
+ * Never for a moderation refusal (OpenRouter answers 403 when a request's text is flagged): that's about the text,
+ * and anyone can cause one.
  */
-export function isAccountProblem(status: number, bodyText: string): boolean {
-  if (status !== 401 && status !== 403) return false;
-  // A moderation refusal (OpenRouter answers 403 when a request's text is flagged) is about the text, not the account,
-  // and anyone can trigger one: it must never degrade /health.
-  if (/flagged|moderation/i.test(bodyText)) return false;
-  return /suspend|disabled|deactivat|banned|terminated|violat|terms of (use|service)|usage polic|not (available|supported) in your (country|region)|unsupported_country|region_not_supported/i.test(bodyText);
+export type AccountProblem = "account" | "auth" | "region";
+export function accountProblem(status: number, bodyText: string): AccountProblem | null {
+  if (status !== 400 && status !== 401 && status !== 403) return null;
+  if (/flagged|moderation/i.test(bodyText)) return null;
+  if (
+    /\b(organi[sz]ation|account|api[ _-]?key|workspace)\b[^.]{0,80}?\b(disabled|suspended|deactivated|banned|terminated|revoked)\b/i.test(bodyText) ||
+    /\b(disabled|suspended|deactivated|banned|terminated)\b[^.]{0,40}?\b(organi[sz]ation|account)\b/i.test(bodyText)
+  )
+    return "account";
+  if (status === 401) return "auth";
+  if (/not (available|supported) in your (country|region|territory)|unsupported_country|region_not_supported/i.test(bodyText)) return "region";
+  return null;
 }
 
 /** Whose account an alert is about: Claude models are called on Anthropic's account; every other model through OpenRouter. */

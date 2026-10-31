@@ -10,7 +10,7 @@
 // payment settles, so a failed review is never charged.
 
 import { LIMITS, canonicalJson, panelShapeError, sha256Hex, validateCriteria } from "./logic.ts";
-import { ProviderCapError, accountOf, classifyStatus, isAccountProblem, rateInfo, type CallObservation } from "./providers.ts";
+import { ProviderCapError, accountOf, accountProblem, classifyStatus, rateInfo, type AccountProblem, type CallObservation } from "./providers.ts";
 import type { CutOff } from "./cutoffs.ts";
 import { allowedModels, answerTokens, answerText, callModel, callUsage, choosePanel, modelPool, viaOpenRouter, JUDGE_TEMPERATURE, type Confidence, type Criterion, type JudgeKeys, type PanelEnv, type PanelRequest, type PanelSelection } from "./judge.ts";
 
@@ -300,7 +300,7 @@ export async function runOneReviewer(
   reviewer: number,
   input: ReviewInput,
   timeoutMs = REVIEWER_CALL_TIMEOUT_MS,
-  opts: { budgetMs?: number; sleep?: (ms: number) => Promise<unknown>; now?: () => number; observe?: (o: CallObservation) => void; onCutOff?: (c: CutOff) => void; onAccountProblem?: (account: string) => void; how?: ReviewerHow; onCall?: (c: ReviewerCall) => void } = {},
+  opts: { budgetMs?: number; sleep?: (ms: number) => Promise<unknown>; now?: () => number; observe?: (o: CallObservation) => void; onCutOff?: (c: CutOff) => void; onAccountProblem?: (account: string, problem: AccountProblem) => void; how?: ReviewerHow; onCall?: (c: ReviewerCall) => void } = {},
 ): Promise<ReviewVote> {
   const observe = opts.observe ?? (() => {});
   const how = opts.how;
@@ -343,7 +343,8 @@ export async function runOneReviewer(
         detail = String(e?.error?.message ?? e?.error?.type ?? "").replace(/\s+/g, " ").slice(0, 200);
       } catch {}
       const kind = classifyStatus(model, res.status, raw);
-      if (isAccountProblem(res.status, raw)) opts.onAccountProblem?.(accountOf(model)); // alert A8
+      const problem = accountProblem(res.status, raw); // alert A8 and its neighbours
+      if (problem) opts.onAccountProblem?.(accountOf(model), problem);
       call({ outcome: "error", status: res.status });
       observe({ kind, status: res.status, rate: rateInfo(res.headers) });
       lastErr = `reviewer API returned ${res.status}${detail ? `: ${detail}` : ""}`;

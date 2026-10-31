@@ -14,12 +14,12 @@ import {
   REVIEW_LIMITS, REVIEW_MESSAGE_FORMAT, longReviewRule, REVIEW_SYSTEM, REVIEW_VERDICTS, REVIEWER_BUDGET_MS, missingReviewKey, reviewCommitment, type ReviewerCall, reviewModels, reviewPayload, runOneReviewer, validateReview, type ReviewTier,
 } from "./review.ts";
 import { Gate, GATE_MAX_WAIT_MS } from "./gate.ts";
-import { Health, adminOk, evaluateHealth, healthEvents, listUnjudged, markRefunded, pauseState, recordEvent, recordSettleFailure, setPause, listBlocked, settledUp, unblockWallet, walletBlocked, walletStanding } from "./health.ts";
+import { Health, adminOk, evaluateHealth, healthEvents, listUnjudged, markRefunded, pauseState, recordAccountProblem, recordEvent, recordSettleFailure, setPause, listBlocked, settledUp, unblockWallet, walletBlocked, walletStanding } from "./health.ts";
 import { acquireSlots, gateStats, gatesOn, poolsOfProvider, quickBusy, resetPools, type SlotLease } from "./gateclient.ts";
 import { classifyPaidResponse, plausiblePayment, priceMicro, reviewBudget, reviewLimitRefusal } from "./paywatch.ts";
 import { fakeAiConfig } from "./fakeai.ts";
 import { recordCutOff } from "./cutoffs.ts";
-import { blockedStat, countryStat, judgeRegionBlock, regionBlock, regionRefusal, regionRulesProblems, whereFrom } from "./regions.ts";
+import { BASE_BLOCKED, blockedStat, countryStat, judgeRegionBlock, regionBlock, regionRefusal, regionRulesProblems, regionRulesWarnings, whereFrom } from "./regions.ts";
 import {
   MULTI_BUDGET_MS, MULTI_CALL_TIMEOUT_MS, MULTI_FORMAT_VERSION, MULTI_LEASE_MS, MULTI_LIMITS, MULTI_MAX_ISSUES, MULTI_MESSAGE_FORMAT, MULTI_PIECES, MULTI_RECEIPT_FORMAT, MULTI_SYSTEM,
   MultiClosedError, TOO_BIG, boundaryToken, multiCommitment, multiExcluded, multiMaxTokens, multiModels, MULTI_DEFAULT_PRICES, multiReviewPayload, multiReviewerHow, readJsonCapped, validateMultiReview, type MultiTier,
@@ -348,8 +348,10 @@ function regionCheck(c: any, models: string[], suffix: string, count = false, ju
   stat(c, "region_blocked");
   stat(c, blockedStat(block.code));
   // PLAN 0.4, alert A4: someone tried from a sanctioned location and was refused (the control worked). A warning on
-  // /health for 24 h, at most one event per code per hour (the Health store keeps the rest out).
-  if (block.company === "all") void inBackground(c, recordEvent(c.env, "sanctions_region_attempt", block.code));
+  // /health for 24 h, one entry per code (the Health store). Only the sanctioned codes in the code's own list: not
+  // Tor (T1), whose users' location is unknown, and not codes the operator added (fresh read, F2).
+  if (block.company === "all" && block.code !== "T1" && BASE_BLOCKED.includes(block.code))
+    void inBackground(c, recordEvent(c.env, "sanctions_region_attempt", block.code));
   return regionRefusal(block, suffix);
 }
 
@@ -830,9 +832,10 @@ app.get("/health", async (c) => {
   const badlyClosed = (["judge", "judge-2", "judge-3"] as const).some((t) => judges[t] === "closed" && !judgeTierWaitsForCompany(env, t));
   const pools = gatesOn(env) ? [...new Set([...poolsOfProvider(env, "anthropic"), "openrouter"])] : [];
   const gates = pools.length ? await gateStats(env, pools) : {};
-  const events = await healthEvents(env).catch(() => []);
+  let storeError = false;
+  const events = await healthEvents(env).catch(() => ((storeError = !!env.HEALTH), []));
   const unjudged = await listUnjudged(env).catch(() => []);
-  const verdict = evaluateHealth({ gates, events, ledger: records, unjudgedOpen: unjudged.filter((u) => !u.refunded).length, regionProblems: regionRulesProblems(env as any) });
+  const verdict = evaluateHealth({ gates, events, ledger: records, unjudgedOpen: unjudged.filter((u) => !u.refunded).length, regionProblems: regionRulesProblems(env as any), regionWarnings: regionRulesWarnings(env as any), storeError });
   const pause = await pauseState(env);
   if (pause.auto) verdict.reasons.push(`auto_paused: ${pause.auto}`), (verdict.degraded = true);
   const paused = paidPaused(env) || pause.paid;
@@ -1127,7 +1130,7 @@ function runReviewers(c: any, commitment: any, input: any, lease: SlotLease, bud
   const fake = fakeAiConfig(c.env, { mix: c.req.header("x-test-fake-mix"), delay: c.req.header("x-test-fake-delay") });
   const keys = { ANTHROPIC_API_KEY: c.env.ANTHROPIC_API_KEY, OPENROUTER_API_KEY: c.env.OPENROUTER_API_KEY, fake };
   return Promise.allSettled(
-    commitment.models.map((m: string, i: number) => runOneReviewer(keys, m, i + 1, input, undefined, { budgetMs, observe: (o) => lease.observe(i, o), onCutOff: (cut) => void inBackground(c, recordCutOff(c.env, cut)), onAccountProblem: (who) => void inBackground(c, recordEvent(c.env, "provider_account_problem", who)) })),
+    commitment.models.map((m: string, i: number) => runOneReviewer(keys, m, i + 1, input, undefined, { budgetMs, observe: (o) => lease.observe(i, o), onCutOff: (cut) => void inBackground(c, recordCutOff(c.env, cut)), onAccountProblem: (who, problem) => void inBackground(c, recordAccountProblem(c.env, who, problem)) })),
   );
 }
 
@@ -1276,7 +1279,7 @@ async function handleMultiReview(c: any, tier: MultiTier) {
             how: multiReviewerHow(m, input, token, c.env),
             observe: (o) => lease.observe(i, o),
             onCutOff: (cut) => void inBackground(c, recordCutOff(c.env, cut)),
-            onAccountProblem: (who) => void inBackground(c, recordEvent(c.env, "provider_account_problem", who)),
+            onAccountProblem: (who, problem) => void inBackground(c, recordAccountProblem(c.env, who, problem)),
             onCall: (call) => {
               calls.push(call);
               console.log(JSON.stringify({ multi_call: { tier, ...call } }));

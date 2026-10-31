@@ -7,6 +7,9 @@
 //
 // Lists are ISO 3166-1 alpha-2 country codes, or "CC-SUB" ISO 3166-2 subdivisions (UA-43 is Crimea). Each list can
 // be replaced with an env var (a comma-separated list, or "none" for an empty list); REGION_BLOCK=off turns it off.
+// /health watches these settings (PLAN 0.4): a base list missing a sanctioned code, or a company list that no longer
+// refuses CN, RU or HK, stops every service route (legal_pause); dropping a company's other codes is a warning. Opening
+// CN, RU or HK to a company is therefore a code change (regionRulesProblems), reviewed, not a setting.
 // Defaults checked Oct 2026 against each company's published list; re-check them now and then.
 
 import { companyOf } from "./judge.ts";
@@ -40,12 +43,16 @@ export function whereFrom(req: Request, header: (name: string) => string | undef
 
 /** An env list, or the default when it's unset, blank or has any code that isn't valid (a typo such as "CN;RU" must
  * never quietly empty a list). "none" is the only way to empty one. */
+const listInvalid = (raw: string) => {
+  const codes = raw.split(",").map((s) => s.trim().toUpperCase()).filter(Boolean);
+  return !codes.length || codes.some((s) => !/^[A-Z][A-Z0-9](-[A-Z0-9]{1,3})?$/.test(s));
+};
 function listFrom(env: Record<string, unknown>, name: string, fallback: string[]): string[] {
   const raw = env[name];
   if (typeof raw !== "string" || !raw.trim()) return fallback;
   if (raw.trim().toLowerCase() === "none") return [];
   const codes = raw.split(",").map((s) => s.trim().toUpperCase()).filter(Boolean);
-  if (!codes.length || codes.some((s) => !/^[A-Z][A-Z0-9](-[A-Z0-9]{1,3})?$/.test(s))) {
+  if (listInvalid(raw)) {
     console.error(`${name} has a code that isn't valid; using the default list instead`);
     return fallback;
   }
@@ -111,18 +118,37 @@ export const blockedStat = (code: string) => `rb_${code.toLowerCase()}`;
  *   every BASE_BLOCKED code (from the list itself, so it can't fall behind), with no models and with each company's;
  *   CN, RU and HK with each company that doesn't serve them; and the US, which must stay open.
  */
-export function regionRulesProblems(env: Record<string, unknown>): string[] {
+export function regionRulesProblems(env: Record<string, unknown>, block: typeof regionBlock = regionBlock): string[] {
   const base = listFrom(env, "BLOCKED_REGIONS", BASE_BLOCKED);
   if (String(env.REGION_BLOCK ?? "").trim().toLowerCase() === "off" || BASE_BLOCKED.some((c) => !base.includes(c))) return ["region_rules_off"];
   const at = (code: string): Where => (code.includes("-") ? { country: code.split("-")[0], sub: code } : { country: code });
   const sample: Record<string, string> = { anthropic: "claude-sonnet-5-5", openai: "openai/gpt-6-luna", google: "google/gemini-4-argon" };
   const failed: string[] = [];
   for (const code of BASE_BLOCKED) {
-    if (!regionBlock(env, [], at(code))) failed.push(code);
-    else for (const co of Object.keys(sample)) if (!regionBlock(env, [sample[co]], at(code))) { failed.push(`${code}:${co}`); break; }
+    if (!block(env, [], at(code))) failed.push(code);
+    else for (const co of Object.keys(sample)) if (!block(env, [sample[co]], at(code))) { failed.push(`${code}:${co}`); break; }
   }
   for (const code of ["CN", "RU", "HK"])
-    for (const co of Object.keys(sample)) if (COMPANY_BLOCKED[co]?.includes(code) && !regionBlock(env, [sample[co]], at(code))) failed.push(`${code}:${co}`);
-  if (regionBlock(env, Object.values(sample), { country: "US" })) failed.push("US:open");
+    for (const co of Object.keys(sample)) if (COMPANY_BLOCKED[co]?.includes(code) && !block(env, [sample[co]], at(code))) failed.push(`${code}:${co}`);
+  if (block(env, Object.values(sample), { country: "US" })) failed.push("US:open");
   return failed.map((f) => `region_selftest_failed:${f}`);
+}
+
+/**
+ * Warnings about the region settings (fresh read of Oct 31, F4 and F5), shown on /health; they don't stop anything.
+ * - "region_list_weakened:<company>": that company's list in force leaves out one of its default codes (the companies'
+ *   own lists, beyond the CN, RU and HK that the self-test requires).
+ * - "region_list_invalid:<setting>": a BLOCKED_REGIONS setting couldn't be read, so its default list is used instead
+ *   (a typo must never empty a list), and whatever the setting meant to add isn't in force.
+ */
+export function regionRulesWarnings(env: Record<string, unknown>): string[] {
+  const out: string[] = [];
+  for (const [co, defaults] of Object.entries(COMPANY_BLOCKED)) {
+    const list = listFrom(env, companyVar(co), defaults);
+    if (defaults.some((c) => !list.includes(c))) out.push(`region_list_weakened:${co}`);
+  }
+  for (const [name, raw] of Object.entries(env))
+    if (/^BLOCKED_REGIONS(_[A-Z0-9_]+)?$/.test(name) && typeof raw === "string" && raw.trim() && raw.trim().toLowerCase() !== "none" && listInvalid(raw))
+      out.push(`region_list_invalid:${name}`);
+  return out;
 }
