@@ -4,7 +4,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { BASE_BLOCKED, COMPANY_BLOCKED, regionBlock, regionRulesProblems, regionRulesWarnings } from "../src/regions.ts";
 import { accountOf, accountProblem } from "../src/providers.ts";
-import { Health, evaluateHealth, recordEvent } from "../src/health.ts";
+import { Health, evaluateHealth, recordEvent, publicLegal, legalDetail, publicWarnings } from "../src/health.ts";
 
 const memStorage = (d = new Map<string, unknown>()) => ({
   async get(k: string) { return structuredClone(d.get(k)); },
@@ -174,4 +174,48 @@ test("A8 wiring: the reviewer and judge calls report what a 400/401/403 says abo
   } finally {
     globalThis.fetch = orig;
   }
+});
+
+test("F10 (ALERTS-spec v2): the public sees only that a legal alert is on; the admin detail names each code and since when", () => {
+  assert.deepEqual(publicLegal([]), []);
+  assert.deepEqual(publicLegal(["region_rules_off", "provider_account_problem:anthropic"]), ["alert"]);
+  const H = 3_600_000;
+  const now = Date.UTC(2026, 9, 31, 20);
+  const d = legalDetail(
+    [
+      { kind: "provider_account_problem", at: now - H, first_at: now - 3 * H, detail: "openrouter" },
+      { kind: "provider_account_problem", at: now - 25 * H, detail: "anthropic" },
+      { kind: "sanctions_region_attempt", at: now, detail: "SY" },
+    ],
+    ["region_rules_off"],
+    now,
+  );
+  assert.deepEqual(d, [
+    { code: "region_rules_off", from: "settings" },
+    { code: "provider_account_problem:openrouter", from: "event", since: new Date(now - 3 * H).toISOString(), last_seen: new Date(now - H).toISOString() },
+  ]);
+});
+
+test("F10: the public sees one region_settings warning, never which company's list is weaker (fresh read of 30802a6, #1)", () => {
+  assert.deepEqual(publicWarnings([]), []);
+  assert.deepEqual(publicWarnings(["sanctions_region_attempt:SY", "provider_errors"]), ["sanctions_region_attempt:SY", "provider_errors"], "the others unchanged");
+  assert.deepEqual(publicWarnings(["sanctions_region_attempt:SY", "region_list_weakened:openai", "region_list_invalid:BLOCKED_REGIONS_X"]), ["sanctions_region_attempt:SY", "region_settings"]);
+});
+
+test("an alert that comes back after a day starts a new episode, so its since isn't the old one (fresh read of 30802a6, #2)", async () => {
+  const { h } = healthEnv();
+  const T = Date.UTC(2026, 9, 1, 12);
+  let t = T;
+  (h as any).now = () => t;
+  const send = () => h.fetch(new Request("https://health/event", { method: "POST", body: JSON.stringify({ kind: "provider_account_problem", detail: "anthropic" }) }));
+  const entry = async () => ((await (await h.fetch(new Request("https://health/events"))).json()) as any[]).find((e) => e.kind === "provider_account_problem");
+  await send();
+  t = T + 30 * 60_000; // 30 minutes later: the same episode
+  await send();
+  assert.deepEqual([(await entry()).at, (await entry()).first_at], [t, T]);
+  t = T + 30 * 86_400_000; // a month later: a new episode
+  await send();
+  const e = await entry();
+  assert.deepEqual([e.at, e.first_at], [t, undefined]);
+  assert.equal(legalDetail([e], [], t)[0].since, new Date(t).toISOString());
 });

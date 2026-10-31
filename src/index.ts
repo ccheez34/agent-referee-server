@@ -15,7 +15,7 @@ import {
   REVIEW_LIMITS, REVIEW_MESSAGE_FORMAT, longReviewRule, REVIEW_SYSTEM, REVIEW_VERDICTS, REVIEWER_BUDGET_MS, missingReviewKey, reviewCommitment, type ReviewerCall, reviewModels, reviewPayload, runOneReviewer, validateReview, type ReviewTier,
 } from "./review.ts";
 import { Gate, GATE_MAX_WAIT_MS } from "./gate.ts";
-import { Health, adminOk, evaluateHealth, healthEvents, listUnjudged, markRefunded, pauseState, recordAccountProblem, recordEvent, recordSettleFailure, setPause, listBlocked, settledUp, unblockWallet, walletBlocked, walletStanding } from "./health.ts";
+import { Health, adminOk, evaluateHealth, healthEvents, legalDetail, listUnjudged, publicWarnings, markRefunded, pauseState, publicLegal, recordAccountProblem, recordEvent, recordSettleFailure, setPause, listBlocked, settledUp, unblockWallet, walletBlocked, walletStanding } from "./health.ts";
 import { acquireSlots, gateStats, gatesOn, poolsOfProvider, quickBusy, resetPools, type SlotLease } from "./gateclient.ts";
 import { classifyPaidResponse, plausiblePayment, priceMicro, reviewBudget, reviewLimitRefusal } from "./paywatch.ts";
 import { fakeAiConfig } from "./fakeai.ts";
@@ -848,8 +848,8 @@ app.get("/health", async (c) => {
     ok,
     status,
     reasons: [...verdict.reasons, ...(allJudges ? [] : ["judge_key_missing"]), ...(badlyClosed ? ["judge_closed"] : [])],
-    legal: verdict.legal,
-    warnings: verdict.warnings,
+    legal: publicLegal(verdict.legal), // F10: the public sees only that a legal alert is on; the detail is in /admin/stats
+    warnings: publicWarnings(verdict.warnings), // the region lists' detail is in /admin/stats
     checks: {
       receipts_signing: signing ? "ok" : "missing key",
       records,
@@ -976,14 +976,20 @@ app.post("/admin/unblock", async (c) => {
 app.get("/admin/stats", async (c) => {
   const denied = await admin(c);
   if (denied) return denied;
-  if (!c.env.LEDGER) return err(503, "Stats need the ledger.");
+  // F10: the legal detail doesn't depend on the ledger, so it's computed first and shown even when the stats fail
+  // (fresh read of 30802a6, #3). A health store that can't be read is named, never shown as an empty list (#4).
+  let healthStoreError = false;
+  const events = await healthEvents(c.env).catch(() => ((healthStoreError = true), []));
+  const legal = [...legalDetail(events, regionRulesProblems(c.env as any)), ...(healthStoreError ? [{ code: "health_store_unreachable", from: "error" as const }] : [])];
+  const regionDetail = regionRulesWarnings(c.env as any);
+  if (!c.env.LEDGER) return c.json({ error: "Stats need the ledger.", legal_now: legal, region_settings_detail: regionDetail }, 503);
   let s: any;
   try {
     s = await ledgerJson(c.env, undefined, "stats", {});
     if (!Array.isArray(s?.days) || !s.days.length) throw new Error("unexpected answer");
   } catch (e: any) {
     console.error(`admin stats: ${String(e?.message ?? e).slice(0, 200)}`);
-    return err(503, "Stats can't be read right now; try again in a minute.");
+    return c.json({ error: "Stats can't be read right now; try again in a minute.", legal_now: legal, region_settings_detail: regionDetail }, 503);
   }
   const usd = (micro: unknown) => (Number.isFinite(micro) ? Math.round((micro as number) / 10_000) / 100 : 0);
   const pub = freeReviewConfig(c.env);
@@ -1016,6 +1022,9 @@ app.get("/admin/stats", async (c) => {
     // AI answers cut off at the token limit, per model (ids with "/" and "." shown as "-"), and the latest 100 in full.
     ran_out_of_tokens_7_days: total("ran_out_of_tokens"),
     ran_out_of_tokens_recent: Array.isArray(s.cutoffs) ? s.cutoffs.slice().reverse() : [],
+    // F10: the legal list's detail, which /health shows the public only as "alert", and the region lists' warnings.
+    legal_now: legal,
+    region_settings_detail: regionDetail,
     free_budget_today: {
       public: { spent_usd: usd(s.free_spent_micro?.public), budget_usd: usd(pub.budgetMicro) },
       ext: { spent_usd: usd(s.free_spent_micro?.ext), budget_usd: usd(ext.budgetMicro), note: "free reviews from the hosted MCP server (ChatGPT)" },
