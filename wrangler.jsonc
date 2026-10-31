@@ -34,9 +34,11 @@
     // Wrangler doesn't pass vars down to environments, so env.staging.vars repeats every judge setting below.
     "CLAUDE_JUDGES_ENABLED": "false",
     "JUDGE_MODEL": "google/gemini-3.7-flash",
-    // What judge panels draw from and agents may name (reviews keep MODEL_POOL). Mistral is judge-3's third company
-    // (ccheez34, Oct 30, 19:10); its only host on OpenRouter is Mistral itself, so there's no failover.
-    "JUDGE_MODEL_POOL": "openai/gpt-6-luna,google/gemini-4-argon,google/gemini-3.7-flash,mistralai/mistral-large-4-0",
+    // What judge panels draw from and agents may name (reviews keep MODEL_POOL). Mistral is out for now (ccheez34, Oct 31,
+    // 10:13): it ran out of tokens on a long review and gave "unusable output" on 8 of 8 judge runs, so it may not judge
+    // until it passes a judge trial (README, "Judge trials"; research\checks\judge-tier-build-2026-10-30\MISTRAL-LIVE-CHECK.md).
+    "JUDGE_MODEL_POOL": "openai/gpt-6-luna,google/gemini-4-argon,google/gemini-3.7-flash",
+    "JUDGE_EXCLUDE": "mistralai/mistral-large-4-0",
     "REVEAL_WINDOW_SECONDS": "600",
 
     // Prices are PER SEAT (each agent pays this), except the draw mediator who pays for everyone
@@ -52,9 +54,10 @@
     "PRICE_REVIEW_3": "$0.20",
     // Panel judges, panelist 1 first, from different companies so a panel isn't one model family agreeing with itself.
     // Plain Claude ids go to Anthropic (ANTHROPIC_API_KEY); "provider/model" ids go through OpenRouter (OPENROUTER_API_KEY).
-    // judge-3: OpenAI, Google and Mistral (spec v2.1 §8; the cost check is in research\checks\judge-tier-build-2026-10-30).
+    // judge-3's default waits for a third company that passes a judge trial: with two companies it's closed (agents can
+    // still name three companies), and /health stays ok (spec v2.2 rule 7).
     "PANEL_2_MODELS": "openai/gpt-6-luna,google/gemini-4-argon",
-    "PANEL_3_MODELS": "openai/gpt-6-luna,google/gemini-3.7-flash,mistralai/mistral-large-4-0",
+    "PANEL_3_MODELS": "openai/gpt-6-luna,google/gemini-3.7-flash",
     // review-3's own default, apart from the judge settings: the list it used before (reviews may still use Claude).
     "REVIEW_3_MODELS": "claude-opus-5-5,openai/gpt-6-luna,google/gemini-3.7-flash",
     // Concurrent AI calls per provider pool (code defaults: Opus 6, Sonnet 12, Haiku 12, OpenRouter 20).
@@ -117,10 +120,11 @@
         "FAKE_AI_MIX": "",
         "CLAUDE_JUDGES_ENABLED": "false",
         "JUDGE_MODEL": "google/gemini-3.7-flash",
-        "JUDGE_MODEL_POOL": "openai/gpt-6-luna,google/gemini-4-argon,google/gemini-3.7-flash,mistralai/mistral-large-4-0",
+        "JUDGE_MODEL_POOL": "openai/gpt-6-luna,google/gemini-4-argon,google/gemini-3.7-flash",
+        "JUDGE_EXCLUDE": "mistralai/mistral-large-4-0",
         "REVEAL_WINDOW_SECONDS": "600",
         "PANEL_2_MODELS": "openai/gpt-6-luna,google/gemini-4-argon",
-        "PANEL_3_MODELS": "openai/gpt-6-luna,google/gemini-3.7-flash,mistralai/mistral-large-4-0",
+        "PANEL_3_MODELS": "openai/gpt-6-luna,google/gemini-3.7-flash",
         "REVIEW_3_MODELS": "claude-opus-5-5,openai/gpt-6-luna,google/gemini-3.7-flash",
         "GATE_SLOTS_ANTHROPIC_CLAUDE_SONNET_5_5": "20",
         "GATE_SLOTS_ANTHROPIC_CLAUDE_OPUS_5_5": "10",
