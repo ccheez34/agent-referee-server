@@ -10,7 +10,7 @@ import { Ledger } from "../src/ledger.ts";
 import { _clearSnapshots } from "../src/gateclient.ts";
 import { commitmentOf, randomToken } from "../src/logic.ts";
 import { verifyReceipt } from "../src/receipt.ts";
-import { CLAUDE_JUDGES_OFF, JUDGE_ADVISORY, choosePanel, claudeJudgesOn, companyOf, defaultJudgeModels, judgeAllowed, judgePool, judgeTierClosed, PanelShortError, tierCommitment } from "../src/judge.ts";
+import { CLAUDE_JUDGES_OFF, JUDGE_ADVISORY, choosePanel, claudeJudgesOn, companyOf, defaultJudgeModels, judgeAllowed, judgePool, judgeTierClosed, judgeTierWaitsForCompany, allowedModels, PanelShortError, tierCommitment } from "../src/judge.ts";
 import { reviewModels } from "../src/review.ts";
 import { multiModels } from "../src/multipart.ts";
 
@@ -31,12 +31,16 @@ const LUNA = "openai/gpt-6-luna", ARGON = "google/gemini-4-argon", FLASH = "goog
 /** The judge settings wrangler.jsonc ships (live and staging), with the switch off. */
 const SHIPPED = {
   JUDGE_MODEL: FLASH,
-  JUDGE_MODEL_POOL: [LUNA, ARGON, FLASH, MISTRAL].join(","),
+  JUDGE_MODEL_POOL: [LUNA, ARGON, FLASH].join(","),
+  JUDGE_EXCLUDE: MISTRAL,
   PANEL_2_MODELS: [LUNA, ARGON].join(","),
-  PANEL_3_MODELS: [LUNA, FLASH, MISTRAL].join(","),
+  PANEL_3_MODELS: [LUNA, FLASH].join(","),
   REVIEW_3_MODELS: [OPUS, LUNA, FLASH].join(","),
 };
 const RULES = "Pick the cheaper plan; if equal, the faster one.";
+/** A stand-in third company for tests that need judge-3 open. The shipped judge-3 waits for a third company that passes
+ * a judge trial (Mistral is excluded since Oct 31), so it's closed with the shipped settings. */
+const THIRD = { JUDGE_MODEL_POOL: [LUNA, ARGON, FLASH, KIMI].join(","), PANEL_3_MODELS: [LUNA, FLASH, KIMI].join(",") };
 
 const mem = () => {
   const d = new Map<string, unknown>();
@@ -98,7 +102,7 @@ async function playToVerdict(w: ReturnType<typeof world>, tier: string, input: R
 // ---------- 1. With the switch off ----------
 
 test("1. off: no judge tier ever commits an Anthropic model, by default or by rotate", async () => {
-  const w = world();
+  const w = world(THIRD);
   for (const tier of ["judge", "judge-2", "judge-3"]) {
     const c = await create(w, { tier });
     assert.equal(c.status, 201, `${tier}: ${JSON.stringify(c.body)}`);
@@ -158,8 +162,9 @@ test("2. judge-2's default with one company, and judge-3's with two, are closed 
   const two = await create(world({ PANEL_3_MODELS: [LUNA, FLASH, ARGON].join(",") }), { tier: "judge-3" });
   assert.equal(two.status, 503);
   assert.match(two.body.error, /third AI company/);
-  assert.equal(judgeTierClosed({ ...SHIPPED }, "judge-3"), null, "the shipped judge-3 (OpenAI, Google, Mistral) is open");
-  const models = defaultJudgeModels({ ...SHIPPED }, "judge-3");
+  assert.match(String(judgeTierClosed({ ...SHIPPED }, "judge-3")), /third AI company/, "the shipped judge-3 waits for a third company (Oct 31)");
+  assert.equal(judgeTierClosed({ ...SHIPPED, ...THIRD }, "judge-3"), null, "with a third company it's open");
+  const models = defaultJudgeModels({ ...SHIPPED, ...THIRD }, "judge-3");
   assert.equal(new Set(models.map(companyOf)).size, 3);
 });
 
@@ -215,7 +220,7 @@ test("6. reviews are unchanged by the switch: review-3's default, rotate drawing
 test("7. the advisory and the human-review marker are in every judge-tier view and receipt: a winner, a mistrial, a forfeit", async () => {
   const ai = fakeAi();
   try {
-    const w = world();
+    const w = world(THIRD);
     const win = await playToVerdict(w, "judge-3");
     const m = win.done.match;
     assert.equal(m.phase, "done", JSON.stringify(m));
@@ -375,7 +380,7 @@ routeTest("9. /health shows a closed judge-3 as closed, and the service stays ok
 });
 
 routeTest("10. regions with the switch off: Anthropic's list still guards judge seats (YE, UA-65, UA-23), and VE for the single judge", async () => {
-  const e = appEnv();
+  const e = appEnv(THIRD);
   const from = (cc: string, sub?: string) => ({ "cf-ipcountry": cc, ...(sub ? { "x-test-country": sub } : {}) });
   for (const tier of ["judge", "judge-3"]) {
     const m = await http(e, "/matches", { tier, seats: ["alpha", "beta"], rules: RULES }, from("US"));
@@ -413,7 +418,7 @@ routeTest("6. GET /reviewers is byte for byte the same with Claude judges off an
 });
 
 routeTest("10. the free invite seat of a judge match is region-checked with the judges' companies too", async () => {
-  const e = appEnv();
+  const e = appEnv(THIRD);
   const h = await http(e, "/matches", { tier: "judge-3", seats: ["alpha", "beta"], rules: RULES, host_pays: "alpha" }, { "cf-ipcountry": "US" });
   assert.equal(h.status, 201, JSON.stringify(h.body));
   const g = await http(e, "/invite/join", { match_id: h.body.match_id, invite_token: h.body.invite.invite_token }, { "cf-ipcountry": "YE", "cf-connecting-ip": "198.51.100.77" });
@@ -517,7 +522,7 @@ test("§10 item 3 (v2.2): judge-2 rotate with the shipped judge pool seats two d
     assert.ok(!cos.includes("anthropic"));
     cos.forEach((x) => seen.add(x));
   }
-  assert.ok(seen.has("mistralai"), "Mistral can be seated (ccheez34, 19:10)");
+  assert.deepEqual([...seen].sort(), ["google", "openai"], "Mistral is never seated while it's excluded (ccheez34, Oct 31 10:13)");
 });
 
 test("§10 item 6: reviews' commitments and prompt hash are main's, and review-3 falls back to DEFAULT_REVIEW_3_MODELS", async () => {
@@ -620,7 +625,7 @@ routeTest("finding 11 and 13: GET /judge keeps its prompt fields when the single
 });
 
 routeTest("§10 item 8: every judge join route's 402 carries the advisory, /host/join too; GET / says when judge-3 is closed", async () => {
-  const paid = appEnv({ PAYMENTS_ENABLED: "true" });
+  const paid = appEnv({ PAYMENTS_ENABLED: "true", ...THIRD });
   for (const tier of ["judge", "judge-2", "judge-3"]) {
     const c = await http(paid, "/matches", { tier, seats: ["alpha", "beta"], rules: RULES });
     assert.equal(c.status, 201, `${tier}: ${JSON.stringify(c.body)}`);
@@ -647,7 +652,8 @@ routeTest("re-read R3: llms.txt gives judge-3's closed reason once", async () =>
   assert.doesNotMatch(wait, /name three/);
   const off = line(await txt(appEnv({ PANEL_3_MODELS: [LUNA, FLASH, OPUS].join(",") })));
   assert.match(off, /Claude judges are off for now\. Agents can still name three companies themselves \(GET \/judge\)\.$/, off);
-  assert.doesNotMatch(line(await txt(appEnv())), /closed/, "open with the shipped settings");
+  assert.equal(line(await txt(appEnv())), wait, "the shipped settings: judge-3 waits for a third company, said once");
+  assert.doesNotMatch(line(await txt(appEnv(THIRD))), /closed/, "open with a third company");
 });
 
 routeTest("re-read R5: GET /reviewers is byte for byte main 2aa89f2's, each with its own wrangler.jsonc settings", async () => {
@@ -707,4 +713,53 @@ routeTest("§10 item 10: /host/join and judge-2 seats are region-checked too, an
   const ve = await http(e, "/join/judge", { match_id: single.body.match_id, seat: "alpha" }, { "cf-ipcountry": "VE", "cf-connecting-ip": "198.51.100.92" });
   assert.equal(ve.status, 451);
   assert.match(ve.body.error, /judge matches aren't offered there for now/);
+});
+
+// ---------- judge trials: JUDGE_EXCLUDE (ccheez34, Oct 31 10:13: Mistral out; research\checks\judge-tier-build-2026-10-30\MISTRAL-LIVE-CHECK.md) ----------
+
+test("judge trials: an excluded model is never drawn and naming it is refused before payment (400), in every panel form", async () => {
+  const w = world();
+  assert.ok(!judgePool(w.env).includes(MISTRAL));
+  assert.ok(!judgeAllowed(w.env).includes(MISTRAL));
+  for (const panel of [[LUNA, MISTRAL], [[LUNA, MISTRAL]]] as any[]) {
+    const c = await create(w, { tier: "judge-2", panel });
+    assert.equal(c.status, 400, JSON.stringify(c.body));
+  }
+  assert.equal((await create(w, { tier: "judge-3", panel: [LUNA, FLASH, MISTRAL] })).status, 400);
+  assert.equal((await create(w, { tier: "judge-3", panel: { picks: { alpha: MISTRAL, beta: LUNA } } })).status, 400);
+  // Even if it's put back in the pool by mistake, the exclusion wins.
+  const back = world({ JUDGE_MODEL_POOL: [LUNA, ARGON, FLASH, MISTRAL].join(",") });
+  for (let i = 0; i < 40; i++) {
+    const c = await create(back, { tier: "judge-2", panel: "rotate" });
+    assert.ok(!committed(c.body).includes(MISTRAL));
+  }
+});
+
+test("judge trials: an excluded model in a tier's own default closes it with the trial reason, whatever the Claude switch says", () => {
+  for (const on of ["false", "true"]) {
+    const env = { ...SHIPPED, CLAUDE_JUDGES_ENABLED: on, PANEL_3_MODELS: [LUNA, FLASH, MISTRAL].join(",") };
+    assert.match(String(judgeTierClosed(env, "judge-3")), /hasn't passed its judge trial/, on);
+    assert.equal(judgeTierWaitsForCompany(env, "judge-3"), false, "not the wait that leaves /health ok");
+  }
+  assert.match(String(judgeTierClosed({ ...SHIPPED, JUDGE_MODEL: MISTRAL }, "judge")), /judge trial/);
+  assert.equal(judgeTierClosed({ ...SHIPPED, JUDGE_EXCLUDE: undefined, PANEL_3_MODELS: [LUNA, FLASH, MISTRAL].join(",") }, "judge-3"), null, "without the exclusion, as before");
+});
+
+test("judge trials: reviews may still name the excluded model (a failed review isn't charged)", () => {
+  assert.ok(allowedModels({ ...SHIPPED } as any).includes(MISTRAL));
+});
+
+routeTest("judge trials: the shipped settings leave /health ok and GET /judge lists the excluded model; an excluded default degrades /health", async () => {
+  const h = await http(appEnv(), "/health");
+  assert.equal(h.body.status, "ok", JSON.stringify(h.body));
+  const j = await http(appEnv(), "/judge");
+  assert.deepEqual(j.body.not_judging_for_now.models, [MISTRAL]);
+  assert.ok(!j.body.opt_in_models.includes(MISTRAL));
+  assert.ok(!j.body.model_pool.includes(MISTRAL));
+  assert.match(j.body.panels["judge-3"].closed, /third AI company/);
+  const bad = await http(appEnv({ PANEL_3_MODELS: [LUNA, FLASH, MISTRAL].join(",") }), "/health");
+  assert.equal(bad.body.status, "degraded", JSON.stringify(bad.body));
+  assert.ok(bad.body.reasons.includes("judge_closed"));
+  const none = await http(appEnv({ JUDGE_EXCLUDE: undefined }), "/judge");
+  assert.equal(none.body.not_judging_for_now, undefined);
 });

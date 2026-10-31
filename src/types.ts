@@ -67,6 +67,7 @@ export interface Env {
   PANEL_MODELS?: string; // comma separated, panelist 1 first (default: JUDGE_MODEL, claude-sonnet-5-5, claude-opus-5-5)
   PANEL_2_MODELS?: string; // judge-2's own list (overrides PANEL_MODELS). "provider/model" ids go through OpenRouter
   PANEL_3_MODELS?: string; // judge-3's own list (overrides PANEL_MODELS)
+  JUDGE_EXCLUDE?: string; // models that may not judge (named or drawn) until they pass a judge trial (README); comma-separated
   CLAUDE_JUDGES_ENABLED?: string; // only "true" lets Claude models judge (off until the lawyer; judge-tier spec v2.1). Reviews aren't affected
   JUDGE_MODEL_POOL?: string; // what judge panels draw from and agents may name (default: MODEL_POOL's list); never Anthropic while the switch is off
   REVIEW_3_MODELS?: string; // review-3's default panel (default DEFAULT_REVIEW_3_MODELS in review.ts), apart from the judge settings

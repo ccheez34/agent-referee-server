@@ -349,14 +349,18 @@ export function tierModels(env: PanelEnv, tier: JudgeTierName): string[] {
 // ccheez34, Oct 30, 16:57: "no claude on any judge panel until the lawyer approves". Anthropic's Usage Policy of Nov 12,
 // 2026 adds "Legal status and adjudication" as a high-risk area. Reviews aren't judge panels and don't change.
 
-export type JudgeEnv = PanelEnv & { CLAUDE_JUDGES_ENABLED?: string; JUDGE_MODEL_POOL?: string; MODEL_POOL?: string; OPT_IN_MODELS?: string };
+export type JudgeEnv = PanelEnv & { CLAUDE_JUDGES_ENABLED?: string; JUDGE_MODEL_POOL?: string; MODEL_POOL?: string; OPT_IN_MODELS?: string; JUDGE_EXCLUDE?: string };
 
 /** Claude models may judge only when the operator sets CLAUDE_JUDGES_ENABLED to exactly "true" (after the lawyer). */
 export const claudeJudgesOn = (env: { CLAUDE_JUDGES_ENABLED?: string }) => env.CLAUDE_JUDGES_ENABLED === "true";
 export const isClaudeModel = (model: string) => companyOf(model) === "anthropic";
 /** The companies a judge may come from. Anything else (an aggregator id such as openrouter/auto) is refused. */
 export const KNOWN_COMPANIES = ["anthropic", "openai", "google", "mistralai", "deepseek", "qwen", "moonshotai", "z-ai"];
-const mayJudge = (env: JudgeEnv, model: string) => KNOWN_COMPANIES.includes(companyOf(model)) && (claudeJudgesOn(env) || !isClaudeModel(model));
+/** Models that may not judge until they pass a judge trial (README, "Judge trials"): JUDGE_EXCLUDE, comma-separated. */
+export const judgeExcludedList = (env: JudgeEnv) => splitModels(env.JUDGE_EXCLUDE);
+export const judgeExcluded = (env: JudgeEnv, model: string) => judgeExcludedList(env).includes(model);
+const mayJudge = (env: JudgeEnv, model: string) =>
+  KNOWN_COMPANIES.includes(companyOf(model)) && (claudeJudgesOn(env) || !isClaudeModel(model)) && !judgeExcluded(env, model);
 
 /** What judge draws use: JUDGE_MODEL_POOL (else MODEL_POOL's list), known companies only, without Anthropic while the
  * switch is off. MODEL_POOL itself, which the reviews use, never changes. */
@@ -376,6 +380,8 @@ export class JudgeClosedError extends Error {}
 /** Why a tier's default panel is closed, or null when it's open (only while the switch is off; with it on, today's
  * behaviour). A Claude model in its list closes it, and so does a list with fewer companies than seats. */
 export function judgeTierClosed(env: JudgeEnv, tier: "judge" | "judge-2" | "judge-3"): string | null {
+  // A default model that hasn't passed its judge trial closes the tier whatever the Claude switch says.
+  if (tierModels(env, tier).some((m) => judgeExcluded(env, m))) return `${tier} is closed for now: a default judge model hasn't passed its judge trial yet.`;
   if (claudeJudgesOn(env)) return null;
   const models = tierModels(env, tier);
   if (models.some(isClaudeModel)) return `${tier} is closed for now: Claude judges are off for now.`;
@@ -392,6 +398,7 @@ export function judgeTierClosed(env: JudgeEnv, tier: "judge" | "judge-2" | "judg
 export function judgeTierWaitsForCompany(env: JudgeEnv, tier: "judge" | "judge-2" | "judge-3"): boolean {
   if (tier !== "judge-3" || claudeJudgesOn(env)) return false;
   const models = tierModels(env, tier);
+  if (models.some((m) => judgeExcluded(env, m))) return false;
   return !models.some(isClaudeModel) && models.every((m) => KNOWN_COMPANIES.includes(companyOf(m))) && new Set(models.map(companyOf)).size < PANEL_SIZE[tier];
 }
 

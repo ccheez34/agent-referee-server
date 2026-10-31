@@ -6,7 +6,7 @@ import { KEY_RE, MEDIATOR, MAX_SERIES_GAMES, doublePrice, idForKey, isJudgeTier,
 import { MatchRoom } from "./match.ts";
 import { Ledger, ledgerShardName, shardLimit } from "./ledger.ts";
 import { landingHtml, llmsTxt, wantsHtml } from "./landing.ts";
-import { JUDGE_ADVISORY, JUDGE_HUMAN_REVIEW, JUDGE_MESSAGE_FORMAT, JUDGE_SYSTEM, allowedModels, claudeJudgesOn, commitsClaudeWhileOff, judgeAllowed, judgeCommitment, judgePool, judgeTierClosed, judgeTierWaitsForCompany, missingJudgeKey, modelPool, optInModels, panelModels, tierCommitment, tierModels, type JudgeTierName } from "./judge.ts";
+import { JUDGE_ADVISORY, JUDGE_HUMAN_REVIEW, JUDGE_MESSAGE_FORMAT, JUDGE_SYSTEM, allowedModels, claudeJudgesOn, commitsClaudeWhileOff, judgeAllowed, judgeCommitment, judgeExcludedList, judgePool, judgeTierClosed, judgeTierWaitsForCompany, missingJudgeKey, modelPool, optInModels, panelModels, tierCommitment, tierModels, type JudgeTierName } from "./judge.ts";
 import type { Env } from "./types.ts";
 import { payaiToken } from "./payai.ts";
 import { signReceipt } from "./receipt.ts";
@@ -1040,6 +1040,8 @@ app.get("/judge", async (c) => {
     model_pool: judgePool(c.env),
     opt_in_models: judgeAllowed(c.env).filter((m) => !judgePool(c.env).includes(m)),
     opt_in_note: JUDGE_OPT_IN_NOTE,
+    // Models that may not judge, named or drawn, until they pass a judge trial (JUDGE_EXCLUDE).
+    ...(judgeExcludedList(c.env).length ? { not_judging_for_now: { models: judgeExcludedList(c.env), why: "They didn't finish long answers reliably in live tests. Naming one is refused before payment; each comes back after it passes a judge trial." } } : {}),
     choosing_the_panel: PANEL_CHOICE_HELP,
     fingerprint_formula: "sha256_hex(format_version + \"\\n\" + system_prompt + \"\\n\" + message_format)",
     system_prompt: JUDGE_SYSTEM,
@@ -1077,7 +1079,7 @@ async function multiJudgeInfo(env: Env) {
 const OPT_IN_NOTE =
   "opt_in_models come from companies outside model_pool (Mistral, EU; DeepSeek, Qwen/Alibaba, Kimi/Moonshot and GLM/Z.ai, China). Agents may name them in an exact list, an agreed set or a judge-3 pick, but they are never drawn at random: rotate and the drawn third judge use model_pool only. Their requests go through OpenRouter only to hosts that don't collect request data; submissions still reach whichever host runs the model, so leave secrets and personal data out.";
 
-// GET /reviewers keeps OPT_IN_NOTE byte for byte; the judges' pool now includes Mistral, so they get their own note.
+// GET /reviewers keeps OPT_IN_NOTE byte for byte; the judges' pool can differ from the reviewers', so they get their own note.
 const JUDGE_OPT_IN_NOTE =
   "model_pool here is the judges' own pool (JUDGE_MODEL_POOL), which can differ from the reviewers' (GET /reviewers). opt_in_models are models agents may name in an exact list, an agreed set or a judge-3 pick, but they are never drawn at random: rotate and the drawn third judge use model_pool only. Requests to models outside OpenAI and Google go through OpenRouter only to hosts that don't collect request data; submissions still reach whichever host runs the model, so leave secrets and personal data out.";
 
