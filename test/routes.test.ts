@@ -509,7 +509,9 @@ t("region rules: a free review from a country a reviewer's company doesn't serve
   assert.equal(jp.status, 200);
   assert.equal(jp.body.free.used_today, 1, "the refused ones used nothing");
   assert.equal((await call(e, "/free/review", review)).status, 200, "unknown country: allowed");
-  assert.equal((await call(env({ ...FREE, REGION_BLOCK: "off" }), "/free/review", review, from("HK"))).status, 200, "REGION_BLOCK=off");
+  // REGION_BLOCK=off no longer opens the service: it stops it (PLAN 0.4, R1; the legal-pause test below).
+  const off = await call(env({ ...FREE, REGION_BLOCK: "off" }), "/free/review", review, from("HK"));
+  assert.deepEqual([off.status, off.body.code], [503, "legal_pause"], "REGION_BLOCK=off");
   // Sub-regions: Crimea is refused; the rest of Ukraine isn't.
   assert.equal((await call(e, "/free/review", review, { ...from("UA", "198.51.100.50"), "x-test-country": "UA-43" })).status, 451);
   assert.equal((await call(e, "/free/review", review, from("UA", "198.51.100.51"))).status, 200);
@@ -535,6 +537,83 @@ t("region rules: sanctioned locations can't create matches or take paid seats, w
   assert.equal((await call(e, "/matches", { tier: "rps", seats: ["a", "b"] }, { "x-test-country": "T1" })).status, 451, "Tor, via the staging test header");
   // The test header is never read outside staging.
   assert.equal((await call(env({ STAGING: "false", FAKE_AI: undefined }), "/matches", { tier: "rps", seats: ["a", "b"] }, { "x-test-country": "IR" })).status, 201);
+});
+
+t("alerts (PLAN 0.4): a sanctioned-location refusal is a /health warning, a company's own list, Tor or an added code isn't, and weakened rules degrade /health", async () => {
+  const e = env({ BLOCKED_REGIONS: "CU,IR,KP,SY,UA-43,UA-40,UA-14,UA-09,T1,BY" });
+  assert.equal((await call(e, "/matches", { tier: "rps", seats: ["a", "b"] }, from("SY"))).status, 451);
+  assert.equal((await call(e, "/matches", { tier: "rps", seats: ["a", "b"] }, from("SY", "198.51.100.60"))).status, 451);
+  assert.equal((await call(e, "/review", review, from("CN"))).status, 451, "Anthropic's own list, not the sanctions list");
+  assert.equal((await call(e, "/matches", { tier: "rps", seats: ["a", "b"] }, { "x-test-country": "T1" })).status, 451, "Tor");
+  assert.equal((await call(e, "/matches", { tier: "rps", seats: ["a", "b"] }, from("BY", "198.51.100.61"))).status, 451, "a code the operator added");
+  await new Promise((r) => setTimeout(r, 20)); // the event is written in the background
+  const events: any[] = await (await e.HEALTH.get("global").fetch("https://health/events")).json();
+  assert.deepEqual(events.filter((x) => x.kind === "sanctions_region_attempt").map((x) => x.detail), ["SY"], "one per code; none for CN, Tor or BY (fresh read, F2)");
+  const h = await call(e, "/health");
+  assert.equal(h.body.status, "ok", "the control worked: a warning, not a reason");
+  assert.ok(h.body.warnings.includes("sanctions_region_attempt:SY"), JSON.stringify(h.body));
+  assert.deepEqual(h.body.legal, []);
+  const off = await call(env({ REGION_BLOCK: "off" }), "/health");
+  assert.equal(off.body.status, "degraded");
+  assert.deepEqual([off.body.reasons, off.body.legal], [["legal"], ["region_rules_off"]], JSON.stringify(off.body));
+  const open = await call(env({ BLOCKED_REGIONS_OPENAI: "none" }), "/health");
+  assert.equal(open.body.status, "degraded");
+  assert.ok(open.body.legal.includes("region_selftest_failed:CN:openai"), JSON.stringify(open.body));
+  // The keyword a second monitor watches (review R2): present only when the list isn't empty.
+  const raw = await (await app.fetch(new Request("https://x/health"), env({ REGION_BLOCK: "off" }), ctx)).text();
+  assert.ok(raw.includes('"legal":["region_rules_off"]'), raw);
+  assert.ok(!JSON.stringify(h.body).includes('"legal":["'));
+});
+
+t("alerts (PLAN 0.4, A8 end to end): a provider's \"organization disabled\" answer during a review shows under legal on /health; a moderation refusal doesn't", async () => {
+  const orig = globalThis.fetch;
+  let answer = { status: 400, body: JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "This organization has been disabled." } }) };
+  globalThis.fetch = (async (u: any) => (/anthropic\.com|openrouter\.ai/.test(String(u)) ? new Response(answer.body, { status: answer.status }) : new Response("{}", { status: 500 }))) as any;
+  try {
+    const e = env({ FAKE_AI: undefined });
+    const r = await call(e, "/review", review, from("US"));
+    assert.notEqual(r.status, 200, JSON.stringify(r.body));
+    await new Promise((res) => setTimeout(res, 20)); // the event is written in the background
+    const h = await call(e, "/health");
+    assert.equal(h.body.status, "degraded", JSON.stringify(h.body));
+    assert.deepEqual([h.body.reasons, h.body.legal], [["legal"], ["provider_account_problem:anthropic"]]);
+    answer = { status: 403, body: JSON.stringify({ error: { code: 403, message: "This model requires moderation. Your input was flagged for \"harassment\".", metadata: { reasons: ["harassment"] } } }) };
+    const e2 = env({ FAKE_AI: undefined });
+    assert.notEqual((await call(e2, "/review", review, from("US"))).status, 200);
+    await new Promise((res) => setTimeout(res, 20));
+    const h2 = await call(e2, "/health");
+    assert.deepEqual([h2.body.status, h2.body.legal], ["ok", []], JSON.stringify(h2.body));
+  } finally {
+    globalThis.fetch = orig;
+  }
+});
+
+t("legal pause (PLAN 0.4, R1): while the region rules are off or fail their self-test, every service route refuses with 503 legal_pause, wherever the request comes from, before anything is charged or used", async () => {
+  const team = { TEAM_TOKEN: "t".repeat(40), TEAM_MEMBERS: "2.0", TEAM_MEMBER_DAILY_USD: "0.50", TEAM_DAILY_USD: "0.80" }; // as in the team tests below
+  for (const broken of [{ REGION_BLOCK: "off" }, { BLOCKED_REGIONS: "none" }, { BLOCKED_REGIONS_OPENAI: "none" }]) {
+    const e = env({ ...FREE, ...EXT, ...team, PAYMENTS_ENABLED: "true", ...broken });
+    const routes: [string, unknown, Record<string, string>][] = [
+      ["/review", review, from("US")],
+      ["/review-3", review, from("US")],
+      ["/team/review", review, { "x-team-token": team.TEAM_TOKEN, "x-team-member": "2.0" }],
+      ["/free/review", review, from("US")],
+      ["/free/review-3", review, from("JP", "198.51.100.70")],
+      ["/internal/free/review", review, { "x-internal-auth": INTERNAL, "x-caller-id": "user-1" }],
+      ["/matches", { tier: "rps", seats: ["a", "b"] }, from("US")],
+      ["/matches", { tier: "rps", seats: ["a", "b"], demo: true }, from("US")],
+      ["/join/rps", { match_id: "a".repeat(24), seat: "a" }, from("US")],
+      ["/settle-up", { wallet: "0x" + "1".repeat(40) }, from("US")],
+    ];
+    for (const [path, body, headers] of routes) {
+      const r = await call(e, path, body, headers);
+      assert.equal(r.status, 503, `${path} with ${JSON.stringify(broken)}: ${JSON.stringify(r.body)}`);
+      assert.equal(r.body.code, "legal_pause", path);
+      assert.match(r.body.error, /^legal_pause: .*Nothing was charged or used/);
+    }
+  }
+  // With the rules as shipped, the same requests go ahead (a paid review gets its payment challenge).
+  assert.equal((await call(env({ ...FREE, PAYMENTS_ENABLED: "true" }), "/review", review, from("US"))).status, 402);
+  assert.equal((await call(env(FREE), "/free/review", review, from("US"))).status, 200);
 });
 
 t("region rules: judge seats check the match's judges' companies", async () => {

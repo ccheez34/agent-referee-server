@@ -3,8 +3,12 @@
 // Only rare things are written here, so it never becomes a hot spot: pause state is cached per isolate for 15 s.
 import type { DOState, Env } from "./types.ts";
 
-export type HealthEventKind = "settle_failure" | "facilitator_problem" | "credit_problem" | "ledger_error" | "provider_errors" | "out_of_tokens";
-export type HealthEvent = { kind: HealthEventKind; at: number; detail: string };
+export type HealthEventKind = "settle_failure" | "facilitator_problem" | "credit_problem" | "ledger_error" | "provider_errors" | "out_of_tokens" | "sanctions_region_attempt" | "provider_account_problem" | "provider_auth_failed" | "provider_region_refused";
+export type HealthEvent = { kind: HealthEventKind; at: number; detail: string; first_at?: number };
+/** The alert kinds (PLAN 0.4): one entry per kind and detail, refreshed at most every 10 minutes, so a steady failure
+ * can never push other events out of the list (fresh read, F3). */
+const ALERT_KINDS: HealthEventKind[] = ["sanctions_region_attempt", "provider_account_problem", "provider_auth_failed", "provider_region_refused"];
+const ALERT_REFRESH_MS = 10 * 60_000;
 /** A wallet whose payment failed to settle after the work was delivered: what it owes, its strikes, and whether it's banned. */
 export type WalletRecord = { owed_micro: number; strikes: number[]; permanent: boolean; history: { at: number; what: string; micro: number; detail: string }[] };
 /** Two strikes within this window (180 days) ban a wallet for good. */
@@ -13,6 +17,13 @@ export type Pause = { paid: boolean; reviews: boolean; auto?: string };
 export type UnjudgedEntry = { match_id: string; tier: string; reason: string; at: number; payers: { seat: string; wallet: string | null; payment_hash?: string }[]; refunded?: boolean };
 
 const MAX_EVENTS = 300;
+/** Alert entries are kept apart from MAX_EVENTS (one per kind and detail), so a flood of other events can't push an
+ * alert out before its time is up (alerts code review 1, Sonnet and Luna). */
+const MAX_ALERT_ENTRIES = 100;
+const keepEvents = (events: HealthEvent[]) =>
+  [...events.filter((e) => ALERT_KINDS.includes(e.kind)).slice(-MAX_ALERT_ENTRIES), ...events.filter((e) => !ALERT_KINDS.includes(e.kind)).slice(-MAX_EVENTS)].sort(
+    (a, b) => a.at - b.at,
+  );
 const MAX_UNJUDGED = 500;
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
@@ -38,11 +49,19 @@ export class Health {
       return json(200, { paid: false, reviews: false, ...((await st.get<Pause>("pause")) ?? {}) });
     }
     if (action === "event") {
-      const kinds: HealthEventKind[] = ["settle_failure", "facilitator_problem", "credit_problem", "ledger_error", "provider_errors", "out_of_tokens"];
+      const kinds: HealthEventKind[] = ["settle_failure", "facilitator_problem", "credit_problem", "ledger_error", "provider_errors", "out_of_tokens", ...ALERT_KINDS];
       if (!kinds.includes(body?.kind)) return json(400, { error: "Unknown event kind." });
-      const events = (await st.get<HealthEvent[]>("events")) ?? [];
-      events.push({ kind: body.kind, at: this.now(), detail: String(body.detail ?? "").slice(0, 300) });
-      await st.put("events", events.slice(-MAX_EVENTS));
+      let events = (await st.get<HealthEvent[]>("events")) ?? [];
+      const detail = String(body.detail ?? "").slice(0, 300);
+      const now = this.now();
+      let first_at: number | undefined;
+      if (ALERT_KINDS.includes(body.kind)) {
+        const old = events.find((e) => e.kind === body.kind && e.detail === detail);
+        if (old && now - old.at < ALERT_REFRESH_MS) return json(200, { ok: true, deduped: true });
+        if (old) (first_at = old.first_at ?? old.at), (events = events.filter((e) => e !== old));
+      }
+      events.push({ kind: body.kind, at: now, detail, ...(first_at ? { first_at } : {}) });
+      await st.put("events", keepEvents(events));
       return json(200, { ok: true });
     }
     if (action === "events") return json(200, (await st.get<HealthEvent[]>("events")) ?? []);
@@ -72,7 +91,7 @@ export class Health {
       await st.put("settle_failures", times);
       const events = (await st.get<HealthEvent[]>("events")) ?? [];
       events.push({ kind: "settle_failure", at: now, detail: String(body?.detail ?? "").slice(0, 300) });
-      await st.put("events", events.slice(-MAX_EVENTS));
+      await st.put("events", keepEvents(events));
       const limit = Number.isFinite(body?.pause_after) ? body.pause_after : 5;
       let paused = false;
       if (times.length >= limit) {
@@ -175,10 +194,16 @@ export async function recordEvent(env: Env, kind: HealthEventKind, detail: strin
   console.error(JSON.stringify({ health_event: kind, detail: detail.slice(0, 300) }));
   if (!env.HEALTH) return;
   const now = Date.now();
-  if (now - (lastEvent.get(kind) ?? 0) < 20_000) return;
-  lastEvent.set(kind, now);
+  // The two alert kinds (PLAN 0.4) are throttled per detail (a code, or a provider account), not per kind.
+  const key = ALERT_KINDS.includes(kind) ? `${kind}:${detail}` : kind;
+  if (now - (lastEvent.get(key) ?? 0) < 20_000) return;
+  lastEvent.set(key, now);
   await healthCall(env, "event", { kind, detail }).catch(() => {});
 }
+
+/** A reviewer or judge call's answer about the provider account (providers.ts, accountProblem). Never throws. */
+export const recordAccountProblem = (env: Env, account: string, problem: "account" | "auth" | "region") =>
+  recordEvent(env, problem === "account" ? "provider_account_problem" : problem === "auth" ? "provider_auth_failed" : "provider_region_refused", account);
 
 /** Work delivered, payment not settled: counted every time (see the Health DO). Never throws. */
 export async function recordSettleFailure(env: Env, wallet: string | undefined, detail: string, owed?: { micro: number; strike: boolean }) {
@@ -210,7 +235,7 @@ export const addUnjudged = (env: Env, entry: Omit<UnjudgedEntry, "at">) => (env.
 export const markRefunded = (env: Env, match_id: string) => healthCall(env, "unjudged", { refunded_match_id: match_id });
 
 /** The /health verdict from gate stats, recent events and the ledger check. Pure, so each rule is tested. */
-export function evaluateHealth(input: { gates: Record<string, any>; events: HealthEvent[]; ledger: "ok" | "error" | "off"; now?: number; unjudgedOpen?: number }) {
+export function evaluateHealth(input: { gates: Record<string, any>; events: HealthEvent[]; ledger: "ok" | "error" | "off"; now?: number; unjudgedOpen?: number; regionProblems?: string[]; regionWarnings?: string[]; storeError?: boolean }) {
   const now = input.now ?? Date.now();
   const reasons: string[] = [];
   for (const [pool, s] of Object.entries(input.gates)) {
@@ -230,7 +255,29 @@ export function evaluateHealth(input: { gates: Record<string, any>; events: Heal
   if (input.events.some((e) => e.kind === "out_of_tokens" && now - e.at < 24 * 3_600_000)) warnings.push("out_of_tokens");
   // A paid match that couldn't be judged is waiting for a refund: that needs the operator, so it alerts.
   if ((input.unjudgedOpen ?? 0) > 0) reasons.push(`unjudged_to_refund:${input.unjudgedOpen}`);
-  return { degraded: reasons.length > 0, reasons: [...new Set(reasons)], warnings };
+  // PLAN 0.4 alerts (research\legal-risks-2026-10-28\ALERTS-spec.md). They go in their own `legal` list (review R2,
+  // agreed by 4.0): a legal trigger must never look like an ordinary "degraded", so a separate keyword monitor can
+  // watch `"legal":["` at high priority. A1/A2: the region rules are off or fail their self-test (computed from the
+  // settings on each call). A8: a provider says the account itself is disabled or suspended; it stays for 24 hours
+  // after the last such answer, so a quiet hour doesn't look like a fix (fresh read, F8). Any entry also adds the
+  // reason "legal", so the existing status monitor still alerts.
+  const day = (e: HealthEvent) => now - e.at < 24 * 3_600_000;
+  const legal = [...(input.regionProblems ?? [])];
+  for (const e of input.events) if (e.kind === "provider_account_problem" && day(e)) legal.push(`provider_account_problem:${e.detail || "unknown"}`);
+  if (legal.length) reasons.push("legal");
+  // The service's own key was refused (any 401 without account wording): every call to that account fails.
+  for (const e of input.events) if (e.kind === "provider_auth_failed" && now - e.at < 3_600_000) reasons.push(`provider_auth_failed:${e.detail || "unknown"}`);
+  // Health's own store didn't answer, so the events above (and the alerts in them) couldn't be read (fresh read, F11).
+  if (input.storeError) reasons.push("health_store_unreachable");
+  // A4: someone tried from a sanctioned location and was refused. The control worked, so a warning, not a reason; it
+  // names the codes, so a new one changes the text (fresh read, F2).
+  for (const code of [...new Set(input.events.filter((e) => e.kind === "sanctions_region_attempt" && day(e)).map((e) => e.detail))].sort())
+    warnings.push(`sanctions_region_attempt:${code}`);
+  // A provider refused the place a call left from (an outsider can cause this), and region lists that were weakened
+  // or couldn't be read (fresh read, F4 and F5).
+  for (const e of input.events) if (e.kind === "provider_region_refused" && day(e)) warnings.push(`provider_region_refused:${e.detail || "unknown"}`);
+  warnings.push(...(input.regionWarnings ?? []));
+  return { degraded: reasons.length > 0, reasons: [...new Set(reasons)], warnings: [...new Set(warnings)], legal: [...new Set(legal)] };
 }
 
 /** Constant-time check of the admin token (sent as "Authorization: Bearer <token>"). No token configured = no admin. */

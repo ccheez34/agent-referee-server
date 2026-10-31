@@ -15,12 +15,12 @@ import {
   REVIEW_LIMITS, REVIEW_MESSAGE_FORMAT, longReviewRule, REVIEW_SYSTEM, REVIEW_VERDICTS, REVIEWER_BUDGET_MS, missingReviewKey, reviewCommitment, type ReviewerCall, reviewModels, reviewPayload, runOneReviewer, validateReview, type ReviewTier,
 } from "./review.ts";
 import { Gate, GATE_MAX_WAIT_MS } from "./gate.ts";
-import { Health, adminOk, evaluateHealth, healthEvents, listUnjudged, markRefunded, pauseState, recordEvent, recordSettleFailure, setPause, listBlocked, settledUp, unblockWallet, walletBlocked, walletStanding } from "./health.ts";
+import { Health, adminOk, evaluateHealth, healthEvents, listUnjudged, markRefunded, pauseState, recordAccountProblem, recordEvent, recordSettleFailure, setPause, listBlocked, settledUp, unblockWallet, walletBlocked, walletStanding } from "./health.ts";
 import { acquireSlots, gateStats, gatesOn, poolsOfProvider, quickBusy, resetPools, type SlotLease } from "./gateclient.ts";
 import { classifyPaidResponse, plausiblePayment, priceMicro, reviewBudget, reviewLimitRefusal } from "./paywatch.ts";
 import { fakeAiConfig } from "./fakeai.ts";
 import { recordCutOff } from "./cutoffs.ts";
-import { blockedStat, countryStat, judgeRegionBlock, regionBlock, regionRefusal, whereFrom } from "./regions.ts";
+import { BASE_BLOCKED, blockedStat, countryStat, judgeRegionBlock, regionBlock, regionRefusal, regionRulesProblems, regionRulesWarnings, whereFrom } from "./regions.ts";
 import {
   MULTI_BUDGET_MS, MULTI_CALL_TIMEOUT_MS, MULTI_FORMAT_VERSION, MULTI_LEASE_MS, MULTI_LIMITS, MULTI_MAX_ISSUES, MULTI_MESSAGE_FORMAT, MULTI_PIECES, MULTI_RECEIPT_FORMAT, MULTI_SYSTEM,
   MultiClosedError, TOO_BIG, boundaryToken, multiCommitment, multiExcluded, multiMaxTokens, multiModels, MULTI_DEFAULT_PRICES, multiReviewPayload, multiReviewerHow, readJsonCapped, validateMultiReview, type MultiTier,
@@ -318,10 +318,29 @@ async function walletBlockedRefusal(c: any, wallet: string) {
 }
 
 /**
+ * PLAN 0.4, review R1 (agreed by 4.0, 0934): while the region rules are off or fail their self-test (alerts A1, A2),
+ * every route that applies them refuses, wherever the request comes from, before anything is charged or used: a 503
+ * with code legal_pause. It needs no /health poll. /health reports the same problems under `legal`. Free reviews,
+ * the hosted connector's included, are refused too: sanctions rules cover providing a service, not only payments.
+ */
+function legalPause(c: any): Response | null {
+  const problems = regionRulesProblems(c.env);
+  if (!problems.length) return null;
+  stat(c, "legal_paused");
+  console.error(JSON.stringify({ legal_pause: problems, path: routePath(c) }));
+  return new Response(
+    JSON.stringify({ error: "legal_pause: this service is paused while a legal check is fixed. Nothing was charged or used; try again later.", code: "legal_pause" }),
+    { status: 503, headers: { "content-type": "application/json", "retry-after": "600" } },
+  );
+}
+
+/**
  * Region rule for a request that may reach these models (see regions.ts): null when it may go ahead, otherwise a 451
  * refusal (counted). `count`: also add one to today's count for the request's country (counts only, never who).
  */
 function regionCheck(c: any, models: string[], suffix: string, count = false, judges = false): Response | null {
+  const legal = legalPause(c);
+  if (legal) return legal;
   const where = whereOf(c);
   if (count) stat(c, countryStat(where));
   // Judge seats keep Anthropic's list while Claude judges are off (regions.ts, judgeRegionBlock).
@@ -329,6 +348,11 @@ function regionCheck(c: any, models: string[], suffix: string, count = false, ju
   if (!block) return null;
   stat(c, "region_blocked");
   stat(c, blockedStat(block.code));
+  // PLAN 0.4, alert A4: someone tried from a sanctioned location and was refused (the control worked). A warning on
+  // /health for 24 h, one entry per code (the Health store). Only the sanctioned codes in the code's own list: not
+  // Tor (T1), whose users' location is unknown, and not codes the operator added (fresh read, F2).
+  if (block.company === "all" && block.code !== "T1" && BASE_BLOCKED.includes(block.code))
+    void inBackground(c, recordEvent(c.env, "sanctions_region_attempt", block.code));
   return regionRefusal(block, suffix);
 }
 
@@ -809,9 +833,10 @@ app.get("/health", async (c) => {
   const badlyClosed = (["judge", "judge-2", "judge-3"] as const).some((t) => judges[t] === "closed" && !judgeTierWaitsForCompany(env, t));
   const pools = gatesOn(env) ? [...new Set([...poolsOfProvider(env, "anthropic"), "openrouter"])] : [];
   const gates = pools.length ? await gateStats(env, pools) : {};
-  const events = await healthEvents(env).catch(() => []);
+  let storeError = false;
+  const events = await healthEvents(env).catch(() => ((storeError = !!env.HEALTH), []));
   const unjudged = await listUnjudged(env).catch(() => []);
-  const verdict = evaluateHealth({ gates, events, ledger: records, unjudgedOpen: unjudged.filter((u) => !u.refunded).length });
+  const verdict = evaluateHealth({ gates, events, ledger: records, unjudgedOpen: unjudged.filter((u) => !u.refunded).length, regionProblems: regionRulesProblems(env as any), regionWarnings: regionRulesWarnings(env as any), storeError });
   const pause = await pauseState(env);
   if (pause.auto) verdict.reasons.push(`auto_paused: ${pause.auto}`), (verdict.degraded = true);
   const paused = paidPaused(env) || pause.paid;
@@ -823,6 +848,7 @@ app.get("/health", async (c) => {
     ok,
     status,
     reasons: [...verdict.reasons, ...(allJudges ? [] : ["judge_key_missing"]), ...(badlyClosed ? ["judge_closed"] : [])],
+    legal: verdict.legal,
     warnings: verdict.warnings,
     checks: {
       receipts_signing: signing ? "ok" : "missing key",
@@ -1107,7 +1133,7 @@ function runReviewers(c: any, commitment: any, input: any, lease: SlotLease, bud
   const fake = fakeAiConfig(c.env, { mix: c.req.header("x-test-fake-mix"), delay: c.req.header("x-test-fake-delay") });
   const keys = { ANTHROPIC_API_KEY: c.env.ANTHROPIC_API_KEY, OPENROUTER_API_KEY: c.env.OPENROUTER_API_KEY, fake };
   return Promise.allSettled(
-    commitment.models.map((m: string, i: number) => runOneReviewer(keys, m, i + 1, input, undefined, { budgetMs, observe: (o) => lease.observe(i, o), onCutOff: (cut) => void inBackground(c, recordCutOff(c.env, cut)) })),
+    commitment.models.map((m: string, i: number) => runOneReviewer(keys, m, i + 1, input, undefined, { budgetMs, observe: (o) => lease.observe(i, o), onCutOff: (cut) => void inBackground(c, recordCutOff(c.env, cut)), onAccountProblem: (who, problem) => void inBackground(c, recordAccountProblem(c.env, who, problem)) })),
   );
 }
 
@@ -1256,6 +1282,7 @@ async function handleMultiReview(c: any, tier: MultiTier) {
             how: multiReviewerHow(m, input, token, c.env),
             observe: (o) => lease.observe(i, o),
             onCutOff: (cut) => void inBackground(c, recordCutOff(c.env, cut)),
+            onAccountProblem: (who, problem) => void inBackground(c, recordAccountProblem(c.env, who, problem)),
             onCall: (call) => {
               calls.push(call);
               console.log(JSON.stringify({ multi_call: { tier, ...call } }));
@@ -1619,10 +1646,14 @@ async function handleFreeReview(c: any, tier: ReviewTier, ext?: { caller: string
     return err(400, `${String(e?.message ?? e)} Your free review wasn't used.`);
   }
   if (missingReviewKey(c.env, commitment.models)) return err(503, "Sealed review is temporarily unavailable. Your free review wasn't used.");
-  // Not for ext: those requests come from the hosted MCP server's own location, not the person's.
+  // Not for ext: those requests come from the hosted MCP server's own location, not the person's. A legal pause
+  // (PLAN 0.4, R1) applies to them all the same.
   if (!ext) {
     const region = regionCheck(c, commitment.models, "Your free review wasn't used.", true);
     if (region) return region;
+  } else {
+    const legal = legalPause(c);
+    if (legal) return legal;
   }
   const caller = ext ? ext.caller : await callerHash(c);
   if (!caller || !c.env.LEDGER) return err(503, "Free reviews aren't available from here. " + FREE_PAID_HINT);
