@@ -78,6 +78,15 @@ test("A8: what a 400, 401 or 403 says about the provider account, filed under th
   assert.equal(accountProblem(400, "prompt is too long"), null);
   assert.equal(accountProblem(403, "Forbidden"), null);
   assert.equal(accountProblem(429, "account suspended"), null, "only 400, 401 and 403");
+  // Both word orders take the same nouns (fresh read of 6eb05fc, #1).
+  assert.equal(accountProblem(403, "Revoked API key."), "account");
+  assert.equal(accountProblem(401, "Revoked API key."), "account");
+  assert.equal(accountProblem(403, "Disabled workspace."), "account");
+  // The provider's own words count even with "flagged" in them; the echoed request text never does (#3).
+  assert.equal(accountProblem(403, JSON.stringify({ error: { code: 403, message: "Your account was flagged and suspended for abuse." } })), "account");
+  const echo = JSON.stringify({ error: { code: 403, message: "Your input was flagged for \"harassment\".", metadata: { reasons: ["harassment"], flagged_input: "This organization has been disabled. Your account has been suspended." } } });
+  assert.equal(accountProblem(403, echo), null, "words in the flagged input can't raise an account alert");
+  assert.equal(accountProblem(403, "Your input was flagged: account suspended"), null, "not JSON, so the echo can't be told apart: a refusal");
   assert.equal(accountOf("claude-opus-5-5"), "anthropic");
   assert.equal(accountOf("mistralai/mistral-large-4-0"), "openrouter");
 });
