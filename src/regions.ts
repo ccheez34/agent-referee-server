@@ -136,10 +136,11 @@ export function regionRulesProblems(env: Record<string, unknown>, block: typeof 
 
 /**
  * Warnings about the region settings (fresh read of Oct 31, F4 and F5), shown on /health; they don't stop anything.
- * - "region_list_weakened:<company>": that company's list in force leaves out one of its default codes (the companies'
- *   own lists, beyond the CN, RU and HK that the self-test requires).
+ * - "region_list_weakened:<company>": that company's list in force leaves out any of its default codes (leaving out CN,
+ *   RU or HK also fails the self-test, so it stops the service too).
  * - "region_list_invalid:<setting>": a BLOCKED_REGIONS setting couldn't be read, so its default list is used instead
- *   (a typo must never empty a list), and whatever the setting meant to add isn't in force.
+ *   (a typo must never empty a list), and whatever the setting meant to add isn't in force. That includes a setting
+ *   that isn't text at all, such as a JSON list in wrangler's vars (alerts code review 1, Luna).
  */
 export function regionRulesWarnings(env: Record<string, unknown>): string[] {
   const out: string[] = [];
@@ -148,7 +149,7 @@ export function regionRulesWarnings(env: Record<string, unknown>): string[] {
     if (defaults.some((c) => !list.includes(c))) out.push(`region_list_weakened:${co}`);
   }
   for (const [name, raw] of Object.entries(env))
-    if (/^BLOCKED_REGIONS(_[A-Z0-9_]+)?$/.test(name) && typeof raw === "string" && raw.trim() && raw.trim().toLowerCase() !== "none" && listInvalid(raw))
+    if (/^BLOCKED_REGIONS(_[A-Z0-9_]+)?$/.test(name) && raw !== undefined && (typeof raw !== "string" || (raw.trim() && raw.trim().toLowerCase() !== "none" && listInvalid(raw))))
       out.push(`region_list_invalid:${name}`);
   return out;
 }

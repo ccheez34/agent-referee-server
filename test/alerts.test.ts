@@ -57,6 +57,9 @@ test("region warnings: a company list missing its own codes, and a setting that 
   assert.deepEqual(regionRulesWarnings({ BLOCKED_REGIONS: "CU,IR,KP,SY,UA-43,UA-40,UA-14,UA-09,T1,BY;RU" }), ["region_list_invalid:BLOCKED_REGIONS"]);
   assert.deepEqual(regionRulesWarnings({ BLOCKED_REGIONS_GOOGLE: "CN RU" }), ["region_list_invalid:BLOCKED_REGIONS_GOOGLE"]);
   assert.deepEqual(regionRulesWarnings({ BLOCKED_REGIONS: "none", BLOCKED_REGIONS_DEEPSEEK: "none" }), [], "none is read fine (A1 reports the base list)");
+  // A setting that isn't text (a JSON list or number in wrangler's vars) falls back to the default too: say so (code review 1).
+  assert.deepEqual(regionRulesWarnings({ BLOCKED_REGIONS_OPENAI: ["CN", "RU"] as any, BLOCKED_REGIONS_DEEPSEEK: 5 as any }), ["region_list_invalid:BLOCKED_REGIONS_OPENAI", "region_list_invalid:BLOCKED_REGIONS_DEEPSEEK"]);
+  assert.deepEqual(regionRulesWarnings({ BLOCKED_REGIONS: "" }), [], "blank is unset");
 });
 
 test("A8: what a 400, 401 or 403 says about the provider account, filed under the account that was used (F1, F7)", () => {
@@ -64,6 +67,7 @@ test("A8: what a 400, 401 or 403 says about the provider account, filed under th
   assert.equal(accountProblem(400, JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "This organization has been disabled." } })), "account");
   assert.equal(accountProblem(403, JSON.stringify({ error: { message: "Your account has been suspended for violating our usage policies." } })), "account");
   assert.equal(accountProblem(401, "Your API key has been revoked."), "account");
+  assert.equal(accountProblem(403, "Revoked account: contact support."), "account", "revoked before the word account too (code review 1)");
   assert.equal(accountProblem(401, JSON.stringify({ type: "error", error: { type: "authentication_error", message: "invalid x-api-key" } })), "auth", "our own key refused");
   assert.equal(accountProblem(403, "This model is not available in your region."), "region", "where the call left from: a warning");
   assert.equal(accountProblem(403, "unsupported_country_region_territory"), "region");
@@ -125,6 +129,15 @@ test("the Health store keeps one entry per alert and detail, refreshed at most e
   await recordEvent(env, "sanctions_region_attempt", "SY");
   await recordEvent(env, "sanctions_region_attempt", "CU");
   assert.deepEqual((await events()).filter((e) => e.kind === "sanctions_region_attempt").map((e) => e.detail), ["IR", "SY", "CU"]);
+  // A flood of other events can't push an alert out early: alerts are kept apart from the 300-event cap (code review 1).
+  for (let i = 0; i < 400; i++) {
+    clock += 1_000;
+    await post("provider_errors", `burst ${i}`);
+  }
+  const after = await events();
+  assert.deepEqual(after.filter((e) => e.kind !== "provider_errors").map((e) => e.kind + ":" + e.detail).sort(), ["provider_account_problem:openrouter", "sanctions_region_attempt:CU", "sanctions_region_attempt:IR", "sanctions_region_attempt:SY"]);
+  assert.equal(after.filter((e) => e.kind === "provider_errors").length, 300, "the other events keep their cap of 300; the old settle failure went first");
+  assert.ok(after.every((e, i) => i === 0 || after[i - 1].at <= e.at), "in time order");
 });
 
 test("A8 wiring: the reviewer and judge calls report what a 400/401/403 says about the account, once, under the right account", async () => {

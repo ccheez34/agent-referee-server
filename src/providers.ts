@@ -47,7 +47,7 @@ export function accountProblem(status: number, bodyText: string): AccountProblem
   if (/flagged|moderation/i.test(bodyText)) return null;
   if (
     /\b(organi[sz]ation|account|api[ _-]?key|workspace)\b[^.]{0,80}?\b(disabled|suspended|deactivated|banned|terminated|revoked)\b/i.test(bodyText) ||
-    /\b(disabled|suspended|deactivated|banned|terminated)\b[^.]{0,40}?\b(organi[sz]ation|account)\b/i.test(bodyText)
+    /\b(disabled|suspended|deactivated|banned|terminated|revoked)\b[^.]{0,40}?\b(organi[sz]ation|account)\b/i.test(bodyText)
   )
     return "account";
   if (status === 401) return "auth";

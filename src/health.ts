@@ -17,6 +17,13 @@ export type Pause = { paid: boolean; reviews: boolean; auto?: string };
 export type UnjudgedEntry = { match_id: string; tier: string; reason: string; at: number; payers: { seat: string; wallet: string | null; payment_hash?: string }[]; refunded?: boolean };
 
 const MAX_EVENTS = 300;
+/** Alert entries are kept apart from MAX_EVENTS (one per kind and detail), so a flood of other events can't push an
+ * alert out before its time is up (alerts code review 1, Sonnet and Luna). */
+const MAX_ALERT_ENTRIES = 100;
+const keepEvents = (events: HealthEvent[]) =>
+  [...events.filter((e) => ALERT_KINDS.includes(e.kind)).slice(-MAX_ALERT_ENTRIES), ...events.filter((e) => !ALERT_KINDS.includes(e.kind)).slice(-MAX_EVENTS)].sort(
+    (a, b) => a.at - b.at,
+  );
 const MAX_UNJUDGED = 500;
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
@@ -54,7 +61,7 @@ export class Health {
         if (old) (first_at = old.first_at ?? old.at), (events = events.filter((e) => e !== old));
       }
       events.push({ kind: body.kind, at: now, detail, ...(first_at ? { first_at } : {}) });
-      await st.put("events", events.slice(-MAX_EVENTS));
+      await st.put("events", keepEvents(events));
       return json(200, { ok: true });
     }
     if (action === "events") return json(200, (await st.get<HealthEvent[]>("events")) ?? []);
@@ -84,7 +91,7 @@ export class Health {
       await st.put("settle_failures", times);
       const events = (await st.get<HealthEvent[]>("events")) ?? [];
       events.push({ kind: "settle_failure", at: now, detail: String(body?.detail ?? "").slice(0, 300) });
-      await st.put("events", events.slice(-MAX_EVENTS));
+      await st.put("events", keepEvents(events));
       const limit = Number.isFinite(body?.pause_after) ? body.pause_after : 5;
       let paused = false;
       if (times.length >= limit) {
