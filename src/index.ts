@@ -1274,7 +1274,8 @@ app.post("/team/proof", teamAuth, async (c: any) => {
   if (!c.env.LEDGER) return err(503, "Proof receipts are unavailable here. Nothing was issued.");
   // A daily limit per member and level, counted per attempt (an L1 attempt asks GitHub even when it fails).
   // A setting that isn't a whole number falls back to the default instead of refusing everything (code review 1).
-  const setting = Number(request.level === "L0" ? c.env.PROOF_L0_DAILY : c.env.PROOF_L1_DAILY);
+  const raw = String((request.level === "L0" ? c.env.PROOF_L0_DAILY : c.env.PROOF_L1_DAILY) ?? "").trim();
+  const setting = raw === "" ? NaN : Number(raw);
   const limit = Number.isInteger(setting) && setting >= 0 ? setting : request.level === "L0" ? 500 : 200;
   let q: any;
   try {

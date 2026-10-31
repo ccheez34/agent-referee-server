@@ -225,8 +225,10 @@ t("route: team members only; bad requests, sanctioned regions and the daily limi
   assert.equal((await post(e, { level: "L0", sha256: H64 }, as("3.0"))).status, 200, "per member");
   const big = await app.fetch(new Request("https://x/team/proof", { method: "POST", headers: { "content-type": "application/json", ...as() }, body: JSON.stringify({ level: "L0", sha256: H64, claim: "x".repeat(9000) }) }), e, ctx);
   assert.equal(big.status, 413);
-  const typo = await env({ PROOF_L0_DAILY: "five hundred" });
-  assert.equal((await post(typo, { level: "L0", sha256: H64 })).status, 200, "a setting that isn't a number falls back to the default");
+  for (const setting of ["five hundred", "", " ", "2.5", "-1"]) {
+    const odd = await env({ PROOF_L0_DAILY: setting });
+    assert.equal((await post(odd, { level: "L0", sha256: H64 })).status, 200, `a setting of ${JSON.stringify(setting)} falls back to the default`);
+  }
 });
 
 t("route: L1 has its own daily limit, and a failed L1 attempt counts against it", async () => {
