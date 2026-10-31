@@ -15,7 +15,7 @@ const HOST_WALLET = "0x" + "a".repeat(40);
 /** The real match rooms behind a fake HTTP service that mirrors the worker's routes (payments faked). */
 function service(extraEnv: Record<string, unknown> = {}) {
   const rooms = new Map<string, MatchRoom>();
-  const env: any = { ...keys, JOIN_WAIT_SECONDS: "1", ...extraEnv };
+  const env: any = { ...keys, JOIN_WAIT_SECONDS: "1", CLAUDE_JUDGES_ENABLED: "true", ...extraEnv };
   const roomFor = (name: string) => {
     if (!rooms.has(name)) {
       const data = new Map<string, unknown>();

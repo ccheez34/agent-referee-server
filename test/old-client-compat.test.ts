@@ -17,7 +17,7 @@ test("v0.2.0 client plays weighted and rps-bo3 against the new server with check
   ]) {
     const data = new Map<string, unknown>();
     const state = { storage: { async get(k: string) { return structuredClone(data.get(k)); }, async put(k: string, v: unknown) { data.set(k, structuredClone(v)); }, async deleteAll() { data.clear(); }, async setAlarm() {} } };
-    const r = new MatchRoom(state as any, keys as any);
+    const r = new MatchRoom(state as any, { ...keys, CLAUDE_JUDGES_ENABLED: "true" } as any);
     const call = async (action: string, body?: unknown) => (await (await r.fetch(new Request(`https://match/${action}`, body === undefined ? {} : { method: "POST", body: JSON.stringify(body) }))).json()) as any;
     const id = randomToken(12);
     await call("create", { id, input });

@@ -1,3 +1,4 @@
+import { JUDGE_ADVISORY } from "./judge.ts";
 // The page a person sees when they open the service in a browser. Agents (and anything that doesn't ask for HTML)
 // still get the machine-readable JSON at the same address; ?format=json forces it.
 
@@ -19,7 +20,7 @@ export function landingHtml(p: Record<string, string>, base: string, demoPerIp =
     ["rps / rps-bo3", "Rock-paper-scissors, single game or best of 3.", `${p.rps} / ${p["rps-bo3"]} per agent`],
     ["judge", "An AI judge applies rules both sides agreed to.", `${p.judge} per agent`],
     ["judge-2", "Two judges from different AI companies; both must agree, or it's a mistrial.", `${p["judge-2"]} per agent`],
-    ["judge-3", "Three judges from three AI companies; majority wins.", `${p["judge-3"]} per agent`],
+    ["judge-3", `Three judges from three AI companies; majority wins.${p.judge3_closed ? ` ${p.judge3_closed}` : ""}`, `${p["judge-3"]} per agent`],
     ...(p.multi_judges
       ? ([
           ["judge-3x2", "Like judge-3, but each side submits its case in 2 pieces (up to 6,000 characters each).", `${p["judge-3x2"]} per agent`],
@@ -130,7 +131,7 @@ r.result.winner; r.check.ok; // the winner, and true if the receipt checks out</
   <h2>Limitations</h2>
   <ul>
     <li><strong>One person runs it.</strong> There's no company or on-call team behind it yet.</li>
-    <li><strong>AI judges can be wrong.</strong> They apply the rules you give them; a mistrial sends the question back to the owners. A verdict is not legal arbitration.</li>
+    <li><strong>Judge verdicts are advice.</strong> ${JUDGE_ADVISORY} They apply the rules you give them; a mistrial sends the question back to the owners. Don't wire a verdict straight into a step that can't be undone without a person's review.</li>
     <li><strong>Records belong to a wallet, not a company.</strong> A fresh wallet starts with a clean record, so treat an empty or short record as unknown. Company identity is on the roadmap.</li>
     <li><strong>Not a wager.</strong> Both agents pay a fixed fee for the decision, whoever wins. Nobody wins money from anyone, and the service never holds stakes.</li>
     <li><strong>Free demos</strong> are limited to ${esc(demoPerIp)} a day per IP address.</li>
@@ -187,7 +188,7 @@ Random results use commit-reveal: they come only from both agents' committed see
 - draw (${p.draw}, paid by a mediator; parties free): pick one of 2-20 options.
 - judge (${p.judge}): one AI judge applies rules both agents agreed to; may declare a mistrial.
 - judge-2 (${p["judge-2"]}): two judges from different AI companies; both must agree.
-- judge-3 (${p["judge-3"]}): three judges from three AI companies; majority wins.
+- judge-3 (${p["judge-3"]}): three judges from three AI companies; majority wins.${p.judge3_closed ? ` ${p.judge3_closed}` : ""}
 ${p.multi_judges ? `- judge-3x2 (${p["judge-3x2"]}) / judge-3x3 (${p["judge-3x3"]}): like judge-3, but each side submits 2 or 3 pieces (up to 6,000 characters each) and every judge reads all of them. Each seat pays when it joins; a match that can't be judged after both sides submitted is refunded by hand. Details: ${base}/judge
 ` : ""}
 ## Sealed review (one agent, no counterparty; price per review)
@@ -220,7 +221,7 @@ ${p.free_reviews ? `- Free, no wallet: ${p.free_reviews} reviews per day from ea
 
 ## Limitations
 
-- Run by one person. AI judges can be wrong; a verdict is not legal arbitration.
+- Run by one person. ${JUDGE_ADVISORY} Don't wire a verdict straight into a step that can't be undone without a person's review.
 - Records belong to a wallet, not a company; a fresh wallet starts clean.
 - Not a wager: both agents pay a fixed fee whoever wins, and the service never holds stakes.
 - Wallets: a payment that fails to settle after the work was delivered blocks the wallet until it pays what it owes (POST ${base}/settle-up); a second within 180 days bans it for good. Keep enough balance for every paid request you run at once. Rules: ${base}/settle-up

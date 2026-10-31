@@ -237,16 +237,19 @@ export function companyOf(model: string): string {
 const randomIndex = (n: number, rand: () => number) => Math.min(n - 1, Math.floor(rand() * n));
 export const cryptoRandom = () => crypto.getRandomValues(new Uint32Array(1))[0] / 2 ** 32;
 
+/** The pool can't seat the panel asked for: the request is fine, the service can't do it (judge tiers answer 503). */
+export class PanelShortError extends Error {}
+
 /**
- * Pick a panel's models from a request. Throws a readable Error when a model isn't in the approved pool or the
- * pool can't supply enough companies.
+ * Pick a panel's models from a request. Throws a readable Error when a model isn't in the approved pool, and
+ * PanelShortError when the pool can't supply enough companies.
  */
 export function choosePanel(req: PanelRequest, size: number, pool: string[], rand: () => number = cryptoRandom, allowed: string[] = pool): { models: string[]; selection: PanelSelection } {
   // `pool` is what random draws use; `allowed` (pool + opt-in models) is what agents may name themselves.
   const notInPool = (ms: string[]) => ms.filter((m) => !allowed.includes(m));
   // Panels promise judges from different AI companies, so an agreed set can't repeat one.
   const sameCompany = (ms: string[]) => new Set(ms.map(companyOf)).size !== ms.length;
-  const companyError = "Each panel must use models from different AI companies (for example one Anthropic, one OpenAI, one Google). GET /judge lists the pool.";
+  const companyError = "Each panel must use models from different AI companies (for example one OpenAI, one Google, one Mistral). GET /judge lists the pool.";
   if (typeof req === "object" && !Array.isArray(req)) {
     // judge-3 "each picks one": each party names one judge; the third comes from a company neither picked, at
     // random, and the seat order is shuffled so neither pick is always the panelist who sees the parties reversed.
@@ -257,7 +260,8 @@ export function choosePanel(req: PanelRequest, size: number, pool: string[], ran
     const used = new Set(picked.map(companyOf));
     const rest = pool.filter((m) => !used.has(companyOf(m)));
     const companies = [...new Set(rest.map(companyOf))];
-    if (!companies.length || picked.length + 1 !== size) throw new Error(`"picks" needs one judge per party plus one drawn at random (a panel of ${size}).`);
+    if (picked.length + 1 !== size) throw new Error(`"picks" needs one judge per party plus one drawn at random (a panel of ${size}).`);
+    if (!companies.length) throw new PanelShortError("No AI company is left in the model pool to draw the third judge from. GET /judge lists the pool.");
     const company = companies[randomIndex(companies.length, rand)];
     const options = rest.filter((m) => companyOf(m) === company);
     const models = [...picked, options[randomIndex(options.length, rand)]];
@@ -271,7 +275,7 @@ export function choosePanel(req: PanelRequest, size: number, pool: string[], ran
     const byCompany = new Map<string, string[]>();
     for (const m of pool) byCompany.set(companyOf(m), [...(byCompany.get(companyOf(m)) ?? []), m]);
     const companies = [...byCompany.keys()];
-    if (companies.length < size) throw new Error(`The model pool has only ${companies.length} AI companies; a rotating panel of ${size} needs ${size}.`);
+    if (companies.length < size) throw new PanelShortError(`The model pool has only ${companies.length} AI companies; a rotating panel of ${size} needs ${size}.`);
     const chosen: string[] = [];
     const left = [...companies];
     for (let i = 0; i < size; i++) {
@@ -340,6 +344,70 @@ export function tierModels(env: PanelEnv, tier: JudgeTierName): string[] {
   if (tier === "judge") return [env.JUDGE_MODEL || "claude-haiku-5-5"];
   return panelModels(env, tier === "judge-2" ? "judge-2" : "judge-3").slice(0, PANEL_SIZE[tier]);
 }
+
+// ---------- Claude judges: off unless CLAUDE_JUDGES_ENABLED is exactly "true" (judge-tier spec v2.1, §2-§4) ----------
+// ccheez34, Oct 30, 16:57: "no claude on any judge panel until the lawyer approves". Anthropic's Usage Policy of Nov 12,
+// 2026 adds "Legal status and adjudication" as a high-risk area. Reviews aren't judge panels and don't change.
+
+export type JudgeEnv = PanelEnv & { CLAUDE_JUDGES_ENABLED?: string; JUDGE_MODEL_POOL?: string; MODEL_POOL?: string; OPT_IN_MODELS?: string };
+
+/** Claude models may judge only when the operator sets CLAUDE_JUDGES_ENABLED to exactly "true" (after the lawyer). */
+export const claudeJudgesOn = (env: { CLAUDE_JUDGES_ENABLED?: string }) => env.CLAUDE_JUDGES_ENABLED === "true";
+export const isClaudeModel = (model: string) => companyOf(model) === "anthropic";
+/** The companies a judge may come from. Anything else (an aggregator id such as openrouter/auto) is refused. */
+export const KNOWN_COMPANIES = ["anthropic", "openai", "google", "mistralai", "deepseek", "qwen", "moonshotai", "z-ai"];
+const mayJudge = (env: JudgeEnv, model: string) => KNOWN_COMPANIES.includes(companyOf(model)) && (claudeJudgesOn(env) || !isClaudeModel(model));
+
+/** What judge draws use: JUDGE_MODEL_POOL (else MODEL_POOL's list), known companies only, without Anthropic while the
+ * switch is off. MODEL_POOL itself, which the reviews use, never changes. */
+export function judgePool(env: JudgeEnv): string[] {
+  return splitModels(env.JUDGE_MODEL_POOL || env.MODEL_POOL || DEFAULT_MODEL_POOL).filter((m) => mayJudge(env, m));
+}
+/** What agents may name as judges: the judge pool plus the opt-in models, under the same rule. */
+export function judgeAllowed(env: JudgeEnv): string[] {
+  return [...new Set([...judgePool(env), ...optInModels(env).filter((m) => mayJudge(env, m))])];
+}
+
+export const CLAUDE_JUDGES_OFF = "Claude models aren't offered as judges for now. Name models from other companies; GET /judge lists them.";
+
+/** A judge tier (or one match's committed panel) that can't run right now: answered 503 before payment. */
+export class JudgeClosedError extends Error {}
+
+/** Why a tier's default panel is closed, or null when it's open (only while the switch is off; with it on, today's
+ * behaviour). A Claude model in its list closes it, and so does a list with fewer companies than seats. */
+export function judgeTierClosed(env: JudgeEnv, tier: "judge" | "judge-2" | "judge-3"): string | null {
+  if (claudeJudgesOn(env)) return null;
+  const models = tierModels(env, tier);
+  if (models.some(isClaudeModel)) return `${tier} is closed for now: Claude judges are off for now.`;
+  if (models.some((m) => !KNOWN_COMPANIES.includes(companyOf(m)))) return `${tier} is closed for now: a configured judge model's company isn't one the service knows.`;
+  const seats = PANEL_SIZE[tier];
+  if (new Set(models.map(companyOf)).size < seats)
+    return tier === "judge-3" ? "judge-3 is closed for now: judge-3 needs a third AI company; agents can name one themselves (GET /judge)." : `${tier} is closed for now: it needs judges from ${seats} AI companies.`;
+  return null;
+}
+
+/** The default models of a judge tier, or JudgeClosedError with the reason. */
+export function defaultJudgeModels(env: JudgeEnv, tier: "judge" | "judge-2" | "judge-3"): string[] {
+  const closed = judgeTierClosed(env, tier);
+  if (closed) throw new JudgeClosedError(closed);
+  return tierModels(env, tier);
+}
+
+/** Every model id an agent's panel request names (exact list, agreed sets, or each party's pick). */
+export function namedModels(req: PanelRequest | undefined): string[] {
+  if (!req || req === "rotate") return [];
+  if (typeof req === "object" && !Array.isArray(req)) return Object.values(req.picks ?? {}).filter((m): m is string => typeof m === "string");
+  return (req as unknown[]).flat().filter((m): m is string => typeof m === "string");
+}
+
+/** A committed panel that names a Claude model, while the switch is off: it must never be called. */
+export const commitsClaudeWhileOff = (env: JudgeEnv, models: string[]) => !claudeJudgesOn(env) && models.some(isClaudeModel);
+
+/** The advisory sentence: in every judge-tier receipt (signed), every judge-tier reply, the 402s and the docs. */
+export const JUDGE_ADVISORY =
+  "Advisory only: AI judges decide this kind of match. A verdict is advice, not a binding decision or legal arbitration, and AI can be wrong. A person should review it before acting on it.";
+/** The signed human-review marker beside it (D4): an integrator's code can hold a verdict for a person. */
+export const JUDGE_HUMAN_REVIEW = "required" as const;
 
 export const viaOpenRouter = (model: string) => model.includes("/");
 /** fake: staging only (see fakeai.ts); when set, no provider is called at all. */

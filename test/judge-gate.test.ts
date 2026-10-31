@@ -33,7 +33,7 @@ function ns<T extends { fetch(r: Request): Promise<Response> }>(make: () => T) {
 
 function world(extra: Record<string, unknown> = {}) {
   _clearSnapshots();
-  const env: any = { ...keys, ANTHROPIC_API_KEY: "test", GATES: ns(() => new Gate(mem() as any)), HEALTH: ns(() => new Health(mem() as any)), ...extra };
+  const env: any = { ...keys, ANTHROPIC_API_KEY: "test", CLAUDE_JUDGES_ENABLED: "true", GATES: ns(() => new Gate(mem() as any)), HEALTH: ns(() => new Health(mem() as any)), ...extra };
   const rooms = new Map<string, { room: MatchRoom; st: ReturnType<typeof mem> }>();
   const roomFor = (id: string) => {
     if (!rooms.has(id)) {

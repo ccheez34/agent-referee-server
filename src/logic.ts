@@ -355,7 +355,7 @@ const isPicks = (v: unknown): v is { picks: Record<string, string> } => !!v && t
 
 /** judge-3 { picks: { seatA: model, seatB: model } }: each of the two parties names one judge; the third is drawn. */
 function picksError(v: { picks?: unknown }, tier: string, seats: string[]): string | null {
-  const err = 'panel {"picks": {...}} is for the 3-judge tiers with two parties: one model id per party, like {"picks": {"buyer": "claude-sonnet-5-5", "seller": "openai/gpt-6-luna"}}. The third judge is drawn at random.';
+  const err = 'panel {"picks": {...}} is for the 3-judge tiers with two parties: one model id per party, like {"picks": {"buyer": "mistralai/mistral-large-4-0", "seller": "openai/gpt-6-luna"}}. The third judge is drawn at random.';
   const p = v.picks;
   if (!isPanel3Tier(tier) || seats.length !== 2 || Object.keys(v).length !== 1 || !p || typeof p !== "object" || Array.isArray(p)) return err;
   const keys = Object.keys(p);

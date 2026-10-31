@@ -43,6 +43,7 @@ function env(extra: Record<string, unknown> = {}) {
     ANTHROPIC_API_KEY: "fake",
     OPENROUTER_API_KEY: "fake",
     ADMIN_TOKEN: ADMIN,
+    CLAUDE_JUDGES_ENABLED: "true", // the existing judge tests keep today's (Claude) defaults; judge-no-claude.test.ts covers "off"
     GATES: ns(() => new Gate(mem() as any)),
     HEALTH: ns(() => new Health(mem() as any)),
     ...extra,

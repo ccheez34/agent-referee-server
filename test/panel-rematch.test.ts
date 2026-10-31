@@ -13,7 +13,7 @@ const keys = { SIGNING_KEY: b64(await crypto.subtle.exportKey("pkcs8", kp.privat
 /** Several match rooms that can reach each other (like the MATCHES namespace), for rematches. */
 function world(extraEnv: Record<string, unknown> = {}) {
   const rooms = new Map<string, MatchRoom>();
-  const env: any = { ...keys, ANTHROPIC_API_KEY: "test", ...extraEnv };
+  const env: any = { ...keys, ANTHROPIC_API_KEY: "test", CLAUDE_JUDGES_ENABLED: "true", ...extraEnv };
   const roomFor = (name: string) => {
     if (!rooms.has(name)) {
       const data = new Map<string, unknown>();
@@ -614,7 +614,7 @@ test("a judge-3 match created with panel: rotate commits the drawn panel before 
   const { MatchRoom } = await import("../src/match.ts");
   const data = new Map();
   const state = { storage: { async get(k: string) { return structuredClone(data.get(k)); }, async put(k: string, v: unknown) { data.set(k, structuredClone(v)); }, async deleteAll() { data.clear(); }, async setAlarm() {} } };
-  const r = new MatchRoom(state as any, { ANTHROPIC_API_KEY: "a", OPENROUTER_API_KEY: "o" } as any);
+  const r = new MatchRoom(state as any, { ANTHROPIC_API_KEY: "a", OPENROUTER_API_KEY: "o", CLAUDE_JUDGES_ENABLED: "true" } as any);
   const call = async (action: string, body: unknown) => {
     const res = await r.fetch(new Request(`https://match/${action}`, { method: "POST", body: JSON.stringify(body) }));
     return { status: res.status, body: (await res.json()) as any };
@@ -640,7 +640,7 @@ test("panel is refused outside the panel tiers and for models outside the pool",
   const { MatchRoom } = await import("../src/match.ts");
   const data = new Map();
   const state = { storage: { async get(k: string) { return structuredClone(data.get(k)); }, async put(k: string, v: unknown) { data.set(k, structuredClone(v)); }, async deleteAll() { data.clear(); }, async setAlarm() {} } };
-  const r = new MatchRoom(state as any, { ANTHROPIC_API_KEY: "a", OPENROUTER_API_KEY: "o" } as any);
+  const r = new MatchRoom(state as any, { ANTHROPIC_API_KEY: "a", OPENROUTER_API_KEY: "o", CLAUDE_JUDGES_ENABLED: "true" } as any);
   const res = await r.fetch(new Request("https://match/create", { method: "POST", body: JSON.stringify({ id: "m2", input: { tier: "judge-2", seats: ["a", "b"], rules: "The cheaper plan wins.", panel: ["claude-opus-5-5", "evil/expensive-model"] } }) }));
   assert.equal(res.status, 400);
   assert.match(((await res.json()) as any).error, /Not in the approved model pool/);
@@ -696,7 +696,7 @@ test("a judge-3 match with picks: both agents send the same picks (in any key or
   const { MatchRoom } = await import("../src/match.ts");
   const data = new Map();
   const state = { storage: { async get(k: string) { return structuredClone(data.get(k)); }, async put(k: string, v: unknown) { data.set(k, structuredClone(v)); }, async deleteAll() { data.clear(); }, async setAlarm() {} } };
-  const r = new MatchRoom(state as any, { ANTHROPIC_API_KEY: "a", OPENROUTER_API_KEY: "o" } as any);
+  const r = new MatchRoom(state as any, { ANTHROPIC_API_KEY: "a", OPENROUTER_API_KEY: "o", CLAUDE_JUDGES_ENABLED: "true" } as any);
   const call = async (action: string, body: unknown) => {
     const res = await r.fetch(new Request(`https://match/${action}`, { method: "POST", body: JSON.stringify(body) }));
     return { status: res.status, body: (await res.json()) as any };
@@ -763,7 +763,7 @@ test("a judge-3 match where both agents pick opt-in judges is created, with a de
   const { MatchRoom } = await import("../src/match.ts");
   const data = new Map();
   const state = { storage: { async get(k: string) { return structuredClone(data.get(k)); }, async put(k: string, v: unknown) { data.set(k, structuredClone(v)); }, async deleteAll() { data.clear(); }, async setAlarm() {} } };
-  const r = new MatchRoom(state as any, { ANTHROPIC_API_KEY: "a", OPENROUTER_API_KEY: "o" } as any);
+  const r = new MatchRoom(state as any, { ANTHROPIC_API_KEY: "a", OPENROUTER_API_KEY: "o", CLAUDE_JUDGES_ENABLED: "true" } as any);
   const res = await r.fetch(new Request("https://match/create", { method: "POST", body: JSON.stringify({ id: "o1", input: { tier: "judge-3", seats: ["a", "b"], rules: "The cheaper plan wins.", panel: { picks: { a: "mistralai/mistral-large-4-0", b: "deepseek/deepseek-v4-pro-0813" } } } }) }));
   const body = (await res.json()) as any;
   assert.equal(res.status, 201, JSON.stringify(body));
