@@ -742,6 +742,10 @@ test("judge trials: an excluded model in a tier's own default closes it with the
     assert.equal(judgeTierWaitsForCompany(env, "judge-3"), false, "not the wait that leaves /health ok");
   }
   assert.match(String(judgeTierClosed({ ...SHIPPED, JUDGE_MODEL: MISTRAL }, "judge")), /judge trial/);
+  // Two companies with an excluded one among them: closed for the trial, not the harmless wait for a third company.
+  const short = { ...SHIPPED, PANEL_3_MODELS: [LUNA, MISTRAL].join(",") };
+  assert.match(String(judgeTierClosed(short, "judge-3")), /judge trial/);
+  assert.equal(judgeTierWaitsForCompany(short, "judge-3"), false);
   assert.equal(judgeTierClosed({ ...SHIPPED, JUDGE_EXCLUDE: undefined, PANEL_3_MODELS: [LUNA, FLASH, MISTRAL].join(",") }, "judge-3"), null, "without the exclusion, as before");
 });
 
