@@ -420,3 +420,205 @@ routeTest("10. the free invite seat of a judge match is region-checked with the 
   assert.equal(g.status, 451, JSON.stringify(g.body));
   assert.match(g.body.error, /judge matches aren't offered there for now/);
 });
+
+// ---------- review 1's findings (2.0's 2059) and the rest of §10 ----------
+
+import { readFile } from "node:fs/promises";
+import { judgeRegionBlock, whereFrom } from "../src/regions.ts";
+import { reviewCommitment, DEFAULT_REVIEW_3_MODELS } from "../src/review.ts";
+import { MODEL_OUTPUT_LIMITS } from "../src/multipart.ts";
+
+test("finding 1: the multi-part reviews keep a pool model with no recorded output limit, as on main; only the judges drop it", () => {
+  const NEW = "openai/gpt-7-new";
+  assert.equal(MODEL_OUTPUT_LIMITS[NEW], undefined);
+  const env: any = { MODEL_POOL: [SONNET, NEW, ARGON].join(","), JUDGE_MODEL_POOL: [NEW, ARGON, MISTRAL].join(",") };
+  assert.ok(multiModels(env, "review").eligible.includes(NEW), "reviews: as on main");
+  assert.ok(!multiModels(env, "judge").eligible.includes(NEW), "judges: no recorded limit, not drawn");
+  assert.ok(!multiModels(env, "judge").eligible.includes(MISTRAL), "Mistral's limit isn't recorded for these tiers yet");
+});
+
+test("finding 2 (spec v2.2 §5): Anthropic's region list guards judge seats whatever the switch says", () => {
+  const where = (country: string, sub?: string) => whereFrom({ cf: { country, regionCode: sub } } as any, () => undefined);
+  for (const on of [{}, { CLAUDE_JUDGES_ENABLED: "true" }]) {
+    for (const [cc, sub] of [["YE"], ["UA", "65"], ["UA", "23"]] as [string, string?][]) {
+      assert.equal(judgeRegionBlock(on, [LUNA, ARGON], where(cc, sub))?.company, "judges", `${JSON.stringify(on)} ${cc}${sub ?? ""}`);
+    }
+    assert.equal(judgeRegionBlock(on, [FLASH], where("VE"))?.company, "judges", "VE for the single judge");
+    assert.equal(judgeRegionBlock(on, [LUNA, ARGON], where("JP")), null);
+  }
+});
+
+test("finding 8: a Claude-committed match on a server without ANTHROPIC_API_KEY still ends unjudged and lists its payers", async () => {
+  const ai = fakeAi();
+  try {
+    const on = world({ CLAUDE_JUDGES_ENABLED: "true", JUDGE_MODEL_POOL: undefined });
+    const c = await create(on, { tier: "judge-2", panel: [LUNA, SONNET] });
+    const off = world({ ANTHROPIC_API_KEY: undefined });
+    (on.roomFor(c.id) as any).env = off.env;
+    const t: Record<string, string> = {};
+    for (const s of ["alpha", "beta"]) t[s] = (await on.call(c.id, "join", { seat: s, tier: "judge-2", role: "party", paid: true, payer: `0x${s[0].repeat(40)}`, payment_hash: `h-${s}` })).body.seat_token;
+    await on.call(c.id, "submit", { seat: "alpha", seat_token: t.alpha, position: "Plan A." });
+    const done = await on.call(c.id, "submit", { seat: "beta", seat_token: t.beta, position: "Plan B." });
+    assert.equal(done.body.match.error_code, "unjudged", JSON.stringify(done.body.match));
+    assert.equal((on.roomFor(c.id) as any).m.unjudged_reason, "claude_off", "finding 9: a marker, not the error text");
+    const list: any = await (await off.env.HEALTH.get("global").fetch("https://health/unjudged")).json();
+    assert.equal(list.length, 1);
+    assert.equal(ai.calls.length, 0);
+  } finally {
+    ai.restore();
+  }
+});
+
+test("§10 item 11: the alarm path, and a panel that had partly voted, end unjudged with no Claude call", async () => {
+  // Sonnet fails (529), Luna and Argon answer: judge_failed with two votes kept, and a retry due.
+  const real = globalThis.fetch;
+  const calls: string[] = [];
+  globalThis.fetch = (async (url: any, init: any) => {
+    const b = JSON.parse(init.body);
+    calls.push(b.model);
+    if (!String(url).includes("openrouter")) return new Response("overloaded", { status: 529 });
+    const text = JSON.stringify({ winner: "alpha", confidence: "high", rule_applied: "r", reasoning: "Because." });
+    return new Response(JSON.stringify({ model: b.model, choices: [{ message: { content: text }, finish_reason: "stop" }] }));
+  }) as any;
+  try {
+    const on = world({ CLAUDE_JUDGES_ENABLED: "true", JUDGE_MODEL_POOL: undefined });
+    const { id } = await playToVerdict(on, "judge-3", { panel: [SONNET, LUNA, ARGON] });
+    const room: any = on.roomFor(id);
+    room.m = undefined;
+    await room.load?.();
+    let st = await on.call(id, "status");
+    assert.equal(st.body.error_code, "judge_failed", JSON.stringify(st.body).slice(0, 300));
+    const before = calls.length;
+    // Claude judges go off; the alarm's retry comes due.
+    const off = world();
+    room.env = off.env;
+    room.m = undefined;
+    room.now = () => Date.now() + 10 * 60_000;
+    await room.alarm();
+    st = await on.call(id, "status");
+    assert.equal(st.body.error_code, "unjudged", JSON.stringify(st.body).slice(0, 300));
+    assert.match(st.body.error, /part of it had already voted/);
+    assert.equal(calls.length, before, "the alarm called no judge");
+    const list: any = await (await off.env.HEALTH.get("global").fetch("https://health/unjudged")).json();
+    assert.equal(list.length, 1);
+  } finally {
+    globalThis.fetch = real;
+  }
+});
+
+test("§10 item 3 (v2.2): judge-2 rotate with the shipped judge pool seats two different companies, never Anthropic", async () => {
+  const w = world();
+  const seen = new Set<string>();
+  for (let i = 0; i < 60; i++) {
+    const c = await create(w, { tier: "judge-2", panel: "rotate" });
+    assert.equal(c.status, 201);
+    const cos = committed(c.body).map(companyOf);
+    assert.equal(new Set(cos).size, 2);
+    assert.ok(!cos.includes("anthropic"));
+    cos.forEach((x) => seen.add(x));
+  }
+  assert.ok(seen.has("mistralai"), "Mistral can be seated (ccheez34, 19:10)");
+});
+
+test("§10 item 6: reviews' commitments and prompt hash are main's, and review-3 falls back to DEFAULT_REVIEW_3_MODELS", async () => {
+  const PROMPT = "6ddeb4657d84f1a4346b452ce7bb431404dbe1f05bdac62b54372628c9fa031e"; // main 2aa89f2, computed Oct 30
+  const env: any = { ...SHIPPED };
+  const one = await reviewCommitment("review", env);
+  const three = await reviewCommitment("review-3", env);
+  assert.deepEqual(one.models, [SONNET]);
+  assert.deepEqual(three.models, [OPUS, LUNA, FLASH]);
+  assert.equal(one.prompt_sha256, PROMPT);
+  assert.equal(three.prompt_sha256, PROMPT);
+  assert.deepEqual((await reviewCommitment("review-3", {} as any)).models, DEFAULT_REVIEW_3_MODELS.split(","), "an unconfigured server");
+  for (let i = 0; i < 40; i++) {
+    const r = await reviewCommitment("review-3", env, "rotate");
+    if (r.models.some((m) => companyOf(m) === "anthropic")) return; // review rotate can still draw Claude
+  }
+  assert.fail("review-3 rotate never drew Claude in 40 tries");
+});
+
+test("§10 item 7: a receipt from before the build still verifies, and the regenerated vectors have no Claude judge", async () => {
+  const mr = JSON.parse(await readFile(new URL("./fixtures/multi-review-vectors.json", import.meta.url), "utf8"));
+  const old = mr.cases.find((c: any) => c.expect.ok);
+  assert.equal(await verifyReceipt(old.receipt, mr.public_key), true, "a pre-build (review) receipt");
+  assert.equal(old.receipt.payload.advisory, undefined, "a review receipt has no advisory");
+  const mj = JSON.parse(await readFile(new URL("./fixtures/multi-judge-vectors.json", import.meta.url), "utf8"));
+  for (const c of mj.cases) {
+    const p = c.receipt.payload;
+    assert.equal(p.advisory, JUDGE_ADVISORY, c.id);
+    assert.equal(p.human_review, "required", c.id);
+    const models = [p.proof?.judge?.model, ...(p.proof?.judge?.panel ?? []).map((x: any) => x.model), ...(p.outcome?.votes ?? []).map((v: any) => v.model)].filter(Boolean);
+    assert.ok(models.every((m: string) => companyOf(m) !== "anthropic"), `${c.id}: ${models}`);
+  }
+});
+
+routeTest("finding 3 (v2.2 rule 7): only judge-3's wait for a company leaves /health ok; any other closure degrades it", async () => {
+  const wait = await http(appEnv({ PANEL_3_MODELS: [LUNA, FLASH].join(",") }), "/health");
+  assert.equal(wait.body.status, "ok", JSON.stringify(wait.body));
+  for (const bad of [{ JUDGE_MODEL: HAIKU }, { PANEL_2_MODELS: [ARGON, FLASH].join(",") }, { PANEL_3_MODELS: [LUNA, FLASH, OPUS].join(",") }]) {
+    const h = await http(appEnv(bad), "/health");
+    assert.equal(h.body.status, "degraded", JSON.stringify(bad));
+    assert.ok(h.body.reasons.includes("judge_closed"), JSON.stringify(h.body.reasons));
+  }
+});
+
+routeTest("finding 6: a match whose status can't be read is refused before payment (503); a missing match still gets the handler's 404", async () => {
+  const e = appEnv();
+  e.MATCHES = { idFromName: (x: string) => x, get: () => ({ fetch: async () => { throw new Error("object unavailable"); } }) };
+  const r = await http(e, "/join/judge-3", { match_id: "a".repeat(24), seat: "alpha" }, { "cf-ipcountry": "US" });
+  assert.equal(r.status, 503, JSON.stringify(r.body));
+  assert.match(r.body.error, /Nothing was charged/);
+  const missing = await http(appEnv(), "/join/judge-3", { match_id: "b".repeat(24), seat: "alpha" }, { "cf-ipcountry": "US" });
+  assert.equal(missing.status, 404, JSON.stringify(missing.body));
+});
+
+routeTest("finding 7: the free invite seat of a Claude-committed match is refused too", async () => {
+  const e = appEnv({ CLAUDE_JUDGES_ENABLED: "true", JUDGE_MODEL_POOL: undefined });
+  const h = await http(e, "/matches", { tier: "judge-2", seats: ["alpha", "beta"], rules: RULES, panel: [LUNA, SONNET], host_pays: "alpha" });
+  assert.equal(h.status, 201, JSON.stringify(h.body));
+  e.CLAUDE_JUDGES_ENABLED = "false";
+  _clearSnapshots();
+  const g = await http(e, "/invite/join", { match_id: h.body.match_id, invite_token: h.body.invite.invite_token });
+  assert.equal(g.status, 503, JSON.stringify(g.body));
+  assert.match(g.body.error, /no longer offered/);
+});
+
+routeTest("finding 11 and 13: GET /judge keeps its prompt fields when the single judge is closed, and has its own opt-in note", async () => {
+  const j = await http(appEnv({ JUDGE_MODEL: HAIKU }), "/judge");
+  assert.match(j.body.closed, /closed for now/);
+  assert.match(j.body.prompt_sha256, /^[0-9a-f]{64}$/);
+  assert.ok(j.body.format_version);
+  assert.equal(j.body.model, null);
+  const r = await http(appEnv(), "/reviewers");
+  assert.notEqual(j.body.opt_in_note, r.body.opt_in_note, "the reviewers' note stays as it was; the judges' differs");
+  assert.ok(!j.body.opt_in_models.includes(MISTRAL), "Mistral is in the judges' own pool, not an opt-in there");
+});
+
+routeTest("§10 item 8: every judge join route's 402 carries the advisory, /host/join too; GET / says when judge-3 is closed", async () => {
+  const paid = appEnv({ PAYMENTS_ENABLED: "true" });
+  for (const tier of ["judge", "judge-2", "judge-3"]) {
+    const c = await http(paid, "/matches", { tier, seats: ["alpha", "beta"], rules: RULES });
+    assert.equal(c.status, 201, `${tier}: ${JSON.stringify(c.body)}`);
+    for (const route of [`/join/${tier}`, `/host/join/${tier}`]) {
+      const r = await http(paid, route, { match_id: c.body.match_id, seat: "alpha" });
+      assert.equal(r.status, 402, `${route}: ${JSON.stringify(r.body).slice(0, 200)}`);
+      assert.ok(JSON.stringify(r.body).includes(JUDGE_ADVISORY), `${route}: the advisory`);
+    }
+  }
+  const root = await http(appEnv({ PANEL_3_MODELS: [LUNA, FLASH].join(",") }), "/");
+  assert.match(JSON.stringify(root.body), /judge-3 is closed for now/);
+});
+
+routeTest("§10 item 10: /host/join and judge-2 seats are region-checked too, and VE's 451 for the single judge has the judges' text", async () => {
+  const e = appEnv();
+  const m = await http(e, "/matches", { tier: "judge-2", seats: ["alpha", "beta"], rules: RULES }, { "cf-ipcountry": "US" });
+  for (const route of ["/join/judge-2", "/host/join/judge-2"]) {
+    const r = await http(e, route, { match_id: m.body.match_id, seat: "alpha" }, { "cf-ipcountry": "YE", "cf-connecting-ip": "198.51.100.91" });
+    assert.equal(r.status, 451, `${route}: ${JSON.stringify(r.body)}`);
+    assert.match(r.body.error, /judge matches aren't offered there for now/);
+  }
+  const single = await http(e, "/matches", { tier: "judge", seats: ["alpha", "beta"], rules: RULES }, { "cf-ipcountry": "US" });
+  const ve = await http(e, "/join/judge", { match_id: single.body.match_id, seat: "alpha" }, { "cf-ipcountry": "VE", "cf-connecting-ip": "198.51.100.92" });
+  assert.equal(ve.status, 451);
+  assert.match(ve.body.error, /judge matches aren't offered there for now/);
+});

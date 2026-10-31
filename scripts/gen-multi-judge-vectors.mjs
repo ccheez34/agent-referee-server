@@ -21,7 +21,11 @@ const PUBLIC_KEY = b64(await crypto.subtle.exportKey("raw", kp.publicKey));
 const sign = (payload) => signReceipt(payload, SIGNING_KEY, PUBLIC_KEY);
 
 const RULES = "The side whose plan costs less wins; if equal, the faster one.";
-const PANEL = ["claude-sonnet-5-5", "openai/gpt-6-luna", "google/gemini-4-argon"];
+// No Claude judge (judge-tier spec v2.1, §4.1): OpenAI, Google and Mistral. Mistral's output limit isn't recorded in
+// multipart.ts yet (its cost check for these tiers hasn't been done), so it's set here, for this run only.
+const PANEL = ["openai/gpt-6-luna", "google/gemini-4-argon", "mistralai/mistral-large-4-0"];
+const { MODEL_OUTPUT_LIMITS } = await import("../src/multipart.ts");
+MODEL_OUTPUT_LIMITS["mistralai/mistral-large-4-0"] = 262_144; // Mistral's published limit (4.0's FACTS.md, Oct 30)
 
 // Fake judges: votes[model] is the winner each one names.
 let votes = {};
@@ -33,9 +37,8 @@ globalThis.fetch = async (url, init) => {
     : new Response(JSON.stringify({ model: b.model, content: [{ type: "text", text }], stop_reason: "end_turn" }));
 };
 
-// The multi-part judge tiers need three companies, which they only have with Claude judges on (judge-tier spec v2.1,
-// §10 item 7): the vectors are made with the switch on. Their receipts carry the advisory and human_review fields.
-const env = { SIGNING_KEY, PUBLIC_KEY, ANTHROPIC_API_KEY: "x", OPENROUTER_API_KEY: "x", CLAUDE_JUDGES_ENABLED: "true" };
+// Claude judges off, as shipped; the judge pool includes Mistral. Every receipt carries advisory and human_review.
+const env = { SIGNING_KEY, PUBLIC_KEY, ANTHROPIC_API_KEY: "x", OPENROUTER_API_KEY: "x", JUDGE_MODEL_POOL: "openai/gpt-6-luna,google/gemini-4-argon,google/gemini-3.7-flash,mistralai/mistral-large-4-0" };
 async function run(tier, sides, verdicts, { forfeitOf } = {}) {
   votes = Object.fromEntries(PANEL.map((m, i) => [m, verdicts?.[i] ?? "alpha"]));
   const d = new Map();
@@ -102,7 +105,7 @@ add("bad-winner", "Signed, but the winner doesn't follow from the votes (2 for a
 add("bad-tally", "Signed, but the tally doesn't match the votes.", await resign({ ...p, outcome: { ...p.outcome, tally: { alpha: 3, beta: 0, mistrial: 0 } } }), { pieces: sides2 }, { ok: false, reason: "tally doesn't recompute" });
 add("two-votes", "Signed, but only 2 votes on a 3-judge tier.", await resign({ ...p, outcome: { ...p.outcome, votes: p.outcome.votes.slice(0, 2) } }), { pieces: sides2 }, { ok: false, reason: "expected 3 votes" });
 {
-  const same = ["claude-sonnet-5-5", "google/gemini-3.7-flash", "google/gemini-4-argon"];
+  const same = ["openai/gpt-6-luna", "google/gemini-3.7-flash", "google/gemini-4-argon"]; // two from Google
   const judge = { ...p.proof.judge, model: same[0], panel: p.proof.judge.panel.map((s, i) => ({ ...s, model: same[i] })) };
   add("same-company", "Signed, but two judges from one company.", await resign({ ...p, proof: { ...p.proof, judge }, outcome: { ...p.outcome, votes: p.outcome.votes.map((v, i) => ({ ...v, model: same[i] })) } }), { pieces: sides2 }, { ok: false, reason: "judges not from three companies" });
 }

@@ -74,13 +74,14 @@ export function regionBlock(env: Record<string, unknown>, models: string[], wher
 }
 
 /**
- * The judge routes' rule. While Claude judges are off, Anthropic's list still applies to them, so taking Claude off the
- * panels opens no country as a side effect (judge-tier spec v2.1, §5, D3). ccheez34 can open them later, after the
- * lawyer. Such a refusal says "judge matches aren't offered there for now" rather than naming Anthropic.
+ * The judge routes' rule. Anthropic's list still applies to them, whatever CLAUDE_JUDGES_ENABLED says, so taking Claude
+ * off the panels, or turning Claude judges back on, opens no country as a side effect (judge-tier spec v2.2, §5, D3).
+ * ccheez34 can open them later, after the lawyer. Such a refusal says "judge matches aren't offered there for now"
+ * rather than naming Anthropic.
  */
 export function judgeRegionBlock(env: Record<string, unknown>, models: string[], where: Where): { code: string; company: string } | null {
   const block = regionBlock(env, models, where);
-  if (block || env.CLAUDE_JUDGES_ENABLED === "true" || models.some((m) => companyOf(m) === "anthropic")) return block;
+  if (block || models.some((m) => companyOf(m) === "anthropic")) return block;
   const kept = regionBlock(env, ["anthropic/judges-off"], where);
   return kept ? { code: kept.code, company: "judges" } : null;
 }

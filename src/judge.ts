@@ -210,9 +210,9 @@ export function modelPool(env: { MODEL_POOL?: string }): string[] {
 
 /**
  * Opt-in models from companies outside the default pool (Mistral in the EU; DeepSeek, Qwen, Kimi and GLM in China).
- * Agents can name them in an exact list, an agreed set, or as their own pick, but they're never drawn at random:
- * "rotate" and the drawn third judge of "picks" only use modelPool. Their calls go only to OpenRouter hosts that
- * don't collect request data (see privacyRouting).
+ * Agents can name them in an exact list, an agreed set, or as their own pick, but reviews never draw them at random:
+ * review "rotate" uses modelPool only. Judges draw from judgePool, which may include one of them (Mistral, since
+ * Oct 30). Their calls go only to OpenRouter hosts that don't collect request data (see privacyRouting).
  */
 export const DEFAULT_OPT_IN_MODELS = "mistralai/mistral-large-4-0,deepseek/deepseek-v4-pro-0813,qwen/qwen3.8-max-0902,moonshotai/kimi-k3,z-ai/glm-5.3";
 export function optInModels(env: { OPT_IN_MODELS?: string }): string[] {
@@ -384,6 +384,15 @@ export function judgeTierClosed(env: JudgeEnv, tier: "judge" | "judge-2" | "judg
   if (new Set(models.map(companyOf)).size < seats)
     return tier === "judge-3" ? "judge-3 is closed for now: judge-3 needs a third AI company; agents can name one themselves (GET /judge)." : `${tier} is closed for now: it needs judges from ${seats} AI companies.`;
   return null;
+}
+
+/** Whether a tier's default is closed only because judge-3 waits for a third company (D7): the one closure that leaves
+ * /health "ok". Any other closure (a Claude model while off, an unknown company, judge-2 short of companies) degrades it
+ * (judge-tier spec v2.2, §3 rule 7). */
+export function judgeTierWaitsForCompany(env: JudgeEnv, tier: "judge" | "judge-2" | "judge-3"): boolean {
+  if (tier !== "judge-3" || claudeJudgesOn(env)) return false;
+  const models = tierModels(env, tier);
+  return !models.some(isClaudeModel) && models.every((m) => KNOWN_COMPANIES.includes(companyOf(m))) && new Set(models.map(companyOf)).size < PANEL_SIZE[tier];
 }
 
 /** The default models of a judge tier, or JudgeClosedError with the reason. */

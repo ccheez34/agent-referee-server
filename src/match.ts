@@ -121,6 +121,7 @@ export type MatchState = {
   receipt?: Receipt;
   error?: string;
   error_code?: "judges_busy" | "judge_failed" | "unjudged"; // judge tiers: why phase is "error"
+  unjudged_reason?: "claude_off"; // why an unjudged match won't be retried: committed to a Claude judge while they're off
   judge_runs?: number; // judging attempts that actually called the AI (busy refusals don't count)
   retry_at?: number; // the room retries judging on its own at this time (match alarm)
   auto_retries?: number; // how many automatic retries were scheduled (sets the next wait)
@@ -151,8 +152,8 @@ const MAX_RPS_ROUNDS = 25;
 // Judging can wait up to 20 s for a free slot, then run two 50 s tries with a short wait between: 3 minutes covers it.
 const JUDGE_TIMEOUT_MS = 3 * 60_000;
 /** Why a match committed to a Claude judge ends unjudged while Claude judges are off. */
-const CLAUDE_COMMITTED_OFF = (id: string) =>
-  `This match's judges are no longer offered: Claude judges are off for now, so it can't be judged and won't be retried. The seats that paid are on the operator's refund list; contact hello@agentreferee.ai with the match id (${id}).`;
+const CLAUDE_COMMITTED_OFF = (id: string, partly: boolean) =>
+  `This match's judges are no longer offered: Claude judges are off for now, so ${partly ? "the panel couldn't finish (part of it had already voted, and no partial verdict is given)" : "it can't be judged"} and won't be retried. The seats that paid are on the operator's refund list; contact hello@agentreferee.ai with the match id (${id}).`;
 
 /** Judging runs that actually call the AI: the first one plus 3 retries. After that the match ends unjudged. */
 export const MAX_JUDGE_RUNS = 4;
@@ -713,7 +714,7 @@ export class MatchRoom {
     if (seat instanceof Response) return seat;
     const m = this.m!;
     if (m.phase !== "error" || !isJudgeTier(m.tier)) return bad(409, "Nothing to retry.");
-    if (m.error_code === "unjudged" && m.error === CLAUDE_COMMITTED_OFF(m.id)) return bad(409, m.error, { match: this.publicView() });
+    if (m.error_code === "unjudged" && m.unjudged_reason === "claude_off") return bad(409, m.error!, { match: this.publicView() });
     if (m.error_code === "unjudged")
       return bad(409, `Judging failed ${MAX_JUDGE_RUNS} times, so this match won't be retried again. The seats that paid are on the operator's refund list; contact hello@agentreferee.ai with the match id.`, { match: this.publicView() });
     return this.startJudging();
@@ -783,22 +784,24 @@ export class MatchRoom {
     m.error_code = undefined;
     m.retry_at = undefined;
     const needed = m.judge ? (m.judge.panel ?? [{ model: m.judge.model }]).map((p) => p.model) : [this.env.JUDGE_MODEL || "claude-haiku-5-5"];
+    // No Claude judge is called while Claude judges are off (judge-tier spec v2.1, §7): a match committed to one before
+    // the change (or an old match whose fallback is Claude) ends unjudged, and its payers go on the operator's refund
+    // list. A panel that has already voted in part ends the same way: its committed procedure can't run, so there's no
+    // partial verdict. The alarm and retry-judge both come through here. Checked before the keys, so a server without
+    // ANTHROPIC_API_KEY still lists the payers (review 1, finding 8).
+    if (commitsClaudeWhileOff(this.env, needed)) {
+      m.phase = "error";
+      m.error_code = "unjudged";
+      m.unjudged_reason = "claude_off";
+      m.error = CLAUDE_COMMITTED_OFF(m.id, (m.panel_votes ?? []).some(Boolean));
+      await this.listIfUnjudged("committed to a Claude judge, and Claude judges are off for now");
+      await this.save();
+      return json(200, { ok: true, match: this.publicView() });
+    }
     const missing = missingJudgeKey(this.env, needed);
     if (missing) {
       m.phase = "error";
       m.error = `Judge is not configured on this server (missing ${missing}).`;
-      await this.save();
-      return json(200, { ok: true, match: this.publicView() });
-    }
-    // No Claude judge is called while Claude judges are off (judge-tier spec v2.1, §7): a match committed to one before
-    // the change (or an old match whose fallback is Claude) ends unjudged, and its payers go on the operator's refund
-    // list. A panel that has already voted in part ends the same way: its committed procedure can't run, so there's no
-    // partial verdict. The alarm and retry-judge both come through here.
-    if (commitsClaudeWhileOff(this.env, needed)) {
-      m.phase = "error";
-      m.error_code = "unjudged";
-      m.error = CLAUDE_COMMITTED_OFF(m.id);
-      await this.listIfUnjudged("committed to a Claude judge, and Claude judges are off for now");
       await this.save();
       return json(200, { ok: true, match: this.publicView() });
     }

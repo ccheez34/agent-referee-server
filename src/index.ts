@@ -6,7 +6,7 @@ import { KEY_RE, MEDIATOR, MAX_SERIES_GAMES, doublePrice, idForKey, isJudgeTier,
 import { MatchRoom } from "./match.ts";
 import { Ledger, ledgerShardName, shardLimit } from "./ledger.ts";
 import { landingHtml, llmsTxt, wantsHtml } from "./landing.ts";
-import { JUDGE_ADVISORY, JUDGE_HUMAN_REVIEW, JUDGE_MESSAGE_FORMAT, JUDGE_SYSTEM, allowedModels, claudeJudgesOn, commitsClaudeWhileOff, isClaudeModel, judgeAllowed, judgeCommitment, judgePool, judgeTierClosed, missingJudgeKey, modelPool, optInModels, panelModels, tierCommitment, tierModels, type JudgeTierName } from "./judge.ts";
+import { JUDGE_ADVISORY, JUDGE_HUMAN_REVIEW, JUDGE_MESSAGE_FORMAT, JUDGE_SYSTEM, allowedModels, claudeJudgesOn, commitsClaudeWhileOff, judgeAllowed, judgeCommitment, judgePool, judgeTierClosed, judgeTierWaitsForCompany, missingJudgeKey, modelPool, optInModels, panelModels, tierCommitment, tierModels, type JudgeTierName } from "./judge.ts";
 import type { Env } from "./types.ts";
 import { payaiToken } from "./payai.ts";
 import { signReceipt } from "./receipt.ts";
@@ -339,18 +339,25 @@ async function matchJudgeModels(c: any, id: string, judgeTier: boolean): Promise
   return (await matchJudgeInfo(c, id, judgeTier)).models;
 }
 /** matchJudgeModels, plus whether the models are the match's own (false: the fail-closed list). */
-async function matchJudgeInfo(c: any, id: string, judgeTier: boolean): Promise<{ models: string[]; own: boolean }> {
+async function matchJudgeInfo(c: any, id: string, judgeTier: boolean): Promise<{ models: string[]; own: boolean; failed?: boolean }> {
   let status: any = null;
+  let failed = false; // the read itself failed (an error or a 5xx), as opposed to a match that doesn't exist (404)
   try {
     const res = await forward(c.env, id, "status");
     if (res.ok) status = await res.json();
-  } catch {}
+    else if (res.status >= 500) failed = true;
+  } catch {
+    failed = true;
+  }
   const models: unknown[] = status?.judge ? (status.judge.panel ?? [{ model: status.judge.model }]).map((p: any) => p?.model) : [];
   // A judge-tier match must show its judges, whichever route asks (the match's own tier counts, not only the route's).
   const needsJudges = judgeTier || isJudgeTier(status?.tier);
   const readable = !!status && models.every((m) => typeof m === "string" && m) && (!needsJudges || models.length > 0);
-  return readable ? { models: models as string[], own: true } : { models: allowedModels(c.env), own: false };
+  return readable ? { models: models as string[], own: true } : { models: allowedModels(c.env), own: false, failed };
 }
+
+const CANT_CHECK_MATCH = "Can't check this match's judges right now. Nothing was charged; try again in a moment.";
+const CLAUDE_MATCH_CLOSED = "This match's judges are no longer offered (Claude judges are off for now). Nothing was charged.";
 
 /** Region rule for a guest joining an invite match: its judges' companies (no judges: the sanctions list only). */
 async function matchRegionCheck(c: any, id: string, suffix: string): Promise<Response | null> {
@@ -574,13 +581,15 @@ async function judgeJoinGuard(c: any, next: any) {
   const body: any = await c.req.json().catch(() => null);
   const id = body?.match_id;
   if (typeof id !== "string" || !ID_RE.test(id)) return next(); // the handler gives the proper error, before payment settles
-  const { models, own } = await matchJudgeInfo(c, id, true);
+  const { models, own, failed } = await matchJudgeInfo(c, id, true);
   // Counted once per paid seat (the call carrying the payment).
   const region = regionCheck(c, models, "Nothing was charged.", c.env.PAYMENTS_ENABLED === "false" || !!c.req.header("x-payment"), true);
   if (region) return region;
   // A match committed to a Claude judge before Claude judges were switched off is never judged (match.ts,
-  // startJudging), so nobody new pays to join it (judge-tier spec v2.1, §7).
-  if (own && commitsClaudeWhileOff(c.env, models)) return err(503, "This match's judges are no longer offered (Claude judges are off for now). Nothing was charged.");
+  // startJudging), so nobody new pays to join it (judge-tier spec v2.1, §7). If its status can't be read right now,
+  // nobody pays either (review 1, finding 6); a match that doesn't exist goes on to the handler's own 404.
+  if (failed) return err(503, CANT_CHECK_MATCH);
+  if (own && commitsClaudeWhileOff(c.env, models)) return err(503, CLAUDE_MATCH_CLOSED);
   if (!gatesOn(c.env)) return next();
   const b = models.length ? await quickBusy(c.env, models) : null;
   if (b) return busy(b.retryAfter, "this match's AI judges are at capacity.");
@@ -669,7 +678,7 @@ function docPrices(env: Env): Record<string, string> {
     ...(multiOnForAll(env) ? { ...multiPrices(env), multi_reviews: "on" } : {}),
     ...(multiJudgeOnForAll(env) ? { multi_judges: "on" } : {}),
     // judge-3's default panel closed (waiting for a third company, or Claude judges off): the docs say so.
-    ...(judgeTierClosed(env, "judge-3") ? { judge3_closed: "judge-3's default panel is closed for now: it needs a third AI company. Agents can still name three companies themselves (GET /judge)." } : {}),
+    ...(judgeTierClosed(env, "judge-3") ? { judge3_closed: `${judgeTierClosed(env, "judge-3")} Agents can still name three companies themselves (GET /judge).` } : {}),
   };
 }
 
@@ -786,11 +795,13 @@ app.get("/health", async (c) => {
       records = "error";
     }
   }
-  // A tier closed on purpose (Claude judges off, or judge-3 waiting for a third company) shows "closed": a deliberate
-  // choice isn't damage, so it doesn't make the service "degraded" (judge-tier spec v2.1, §3 rule 7, D7).
+  // A closed tier shows "closed". Only judge-3 waiting for a third company is a deliberate, known state that leaves the
+  // service "ok" (D7); any other closure (a misconfigured single judge or judge-2) degrades it, with judge_closed
+  // (judge-tier spec v2.2, §3 rule 7).
   const judges = Object.fromEntries(
     (["judge", "judge-2", "judge-3"] as const).map((t) => [t, judgeTierClosed(env, t) ? "closed" : missingJudgeKey(env, tierModels(env, t)) ? "unavailable" : "ok"]),
   );
+  const badlyClosed = (["judge", "judge-2", "judge-3"] as const).some((t) => judges[t] === "closed" && !judgeTierWaitsForCompany(env, t));
   const pools = gatesOn(env) ? [...new Set([...poolsOfProvider(env, "anthropic"), "openrouter"])] : [];
   const gates = pools.length ? await gateStats(env, pools) : {};
   const events = await healthEvents(env).catch(() => []);
@@ -802,11 +813,11 @@ app.get("/health", async (c) => {
   const reviewsPaused = env.REVIEWS_PAUSED === "true" || pause.reviews;
   const ok = signing && records !== "error";
   const allJudges = Object.values(judges).every((v) => v === "ok" || v === "closed");
-  const status = !ok ? "down" : verdict.degraded || !allJudges ? "degraded" : paused || reviewsPaused ? "paused" : "ok";
+  const status = !ok ? "down" : verdict.degraded || !allJudges || badlyClosed ? "degraded" : paused || reviewsPaused ? "paused" : "ok";
   const body = {
     ok,
     status,
-    reasons: [...verdict.reasons, ...(allJudges ? [] : ["judge_key_missing"])],
+    reasons: [...verdict.reasons, ...(allJudges ? [] : ["judge_key_missing"]), ...(badlyClosed ? ["judge_closed"] : [])],
     warnings: verdict.warnings,
     checks: {
       receipts_signing: signing ? "ok" : "missing key",
@@ -997,7 +1008,10 @@ app.get("/judge", async (c) => {
   // Each tier's default panel, or "closed" with the reason (judge-tier spec v2.1, §3 rule 6).
   const closed = (t: "judge" | "judge-2" | "judge-3") => judgeTierClosed(c.env, t);
   const single = closed("judge");
-  const commit = single ? { closed: single } : await judgeCommitment(c.env.JUDGE_MODEL || "claude-haiku-5-5");
+  // The prompt fields stay even when the single judge is closed, so a match's prompt_sha256 can always be checked here.
+  const commit = single
+    ? { ...(await judgeCommitment(c.env.JUDGE_MODEL || "claude-haiku-5-5")), model: null, closed: single }
+    : await judgeCommitment(c.env.JUDGE_MODEL || "claude-haiku-5-5");
   const panel = async (t: "judge-2" | "judge-3") => {
     const why = closed(t);
     return why ? { closed: why } : await tierCommitment(t, panelModels(c.env, t));
@@ -1020,7 +1034,7 @@ app.get("/judge", async (c) => {
     },
     model_pool: judgePool(c.env),
     opt_in_models: judgeAllowed(c.env).filter((m) => !judgePool(c.env).includes(m)),
-    opt_in_note: OPT_IN_NOTE,
+    opt_in_note: JUDGE_OPT_IN_NOTE,
     choosing_the_panel: PANEL_CHOICE_HELP,
     fingerprint_formula: "sha256_hex(format_version + \"\\n\" + system_prompt + \"\\n\" + message_format)",
     system_prompt: JUDGE_SYSTEM,
@@ -1057,6 +1071,10 @@ async function multiJudgeInfo(env: Env) {
 
 const OPT_IN_NOTE =
   "opt_in_models come from companies outside model_pool (Mistral, EU; DeepSeek, Qwen/Alibaba, Kimi/Moonshot and GLM/Z.ai, China). Agents may name them in an exact list, an agreed set or a judge-3 pick, but they are never drawn at random: rotate and the drawn third judge use model_pool only. Their requests go through OpenRouter only to hosts that don't collect request data; submissions still reach whichever host runs the model, so leave secrets and personal data out.";
+
+// GET /reviewers keeps OPT_IN_NOTE byte for byte; the judges' pool now includes Mistral, so they get their own note.
+const JUDGE_OPT_IN_NOTE =
+  "model_pool here is the judges' own pool (JUDGE_MODEL_POOL), which can differ from the reviewers' (GET /reviewers). opt_in_models are models agents may name in an exact list, an agreed set or a judge-3 pick, but they are never drawn at random: rotate and the drawn third judge use model_pool only. Requests to models outside OpenAI and Google go through OpenRouter only to hosts that don't collect request data; submissions still reach whichever host runs the model, so leave secrets and personal data out.";
 
 const PANEL_CHOICE_HELP =
   'Optional "panel" on POST /matches (judge-2, judge-3), part of the settings both agents agree to: "rotate" seats one model from each AI company, choosing which model at random within each company from model_pool; ["model", ...] uses exactly those models (each from model_pool or opt_in_models); [["a","b","c"], ["d","e","f"]] draws one of up to 5 agreed sets at random; judge-3 only: {"picks": {"<seat>": "model", "<seat>": "model"}} lets each party name one judge, and the third comes at random from a company neither picked, so neither side controls the majority. Every panel uses models from different AI companies. The draw happens before anyone pays, and the chosen models plus how they were chosen (panel_selection) are in the match status and the signed receipt. Without it, the default panel is used.';
@@ -1830,6 +1848,9 @@ app.post("/invite/join", async (c) => {
   if (typeof body.invite_token !== "string" || body.invite_token.length > 200) return err(400, "invite_token is required.");
   const region = await matchRegionCheck(c, body.match_id, "");
   if (region) return region;
+  // The guest's seat is free, but the host's payment is waiting on it: the same refusal as a paid judge seat (finding 7).
+  const info = await matchJudgeInfo(c, body.match_id, false);
+  if (info.own && commitsClaudeWhileOff(c.env, info.models)) return err(503, CLAUDE_MATCH_CLOSED);
   return forward(c.env, body.match_id, "join", { role: "guest", invite_token: body.invite_token, seat: body.seat });
 });
 
