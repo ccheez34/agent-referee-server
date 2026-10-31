@@ -10,6 +10,7 @@ import { JUDGE_ADVISORY, JUDGE_HUMAN_REVIEW, JUDGE_MESSAGE_FORMAT, JUDGE_SYSTEM,
 import type { Env } from "./types.ts";
 import { payaiToken } from "./payai.ts";
 import { signReceipt } from "./receipt.ts";
+import { NEVER_AN_APPROVAL, observeGithub, parseProofRequest, proofPayload } from "./proof.ts";
 import {
   REVIEW_LIMITS, REVIEW_MESSAGE_FORMAT, longReviewRule, REVIEW_SYSTEM, REVIEW_VERDICTS, REVIEWER_BUDGET_MS, missingReviewKey, reviewCommitment, type ReviewerCall, reviewModels, reviewPayload, runOneReviewer, validateReview, type ReviewTier,
 } from "./review.ts";
@@ -1313,6 +1314,63 @@ app.post("/team/review", (c) => handleReview(c, "review"));
 app.post("/team/review-3", (c) => handleReview(c, "review-3"));
 app.post("/team/review-3x2", (c) => handleMultiReview(c, "review-3x2"));
 app.post("/team/review-3x3", (c) => handleMultiReview(c, "review-3x3"));
+// ---------- proof receipts (research\specs\proof-receipts-2026-10-31\SPEC.md v0.5) ----------
+// Signed records that use no AI model: L0 a claim and a hash, L1 a public GitHub fact the service checked itself.
+// For now team members only, free, and unlisted: it isn't in GET /, llms.txt or any tool text until the experiment's
+// last arm ends (4.0's 1020). Nothing that exists changes. A receipt never stands in for the owner's yes.
+app.post("/team/proof", teamAuth, async (c: any) => {
+  const sanctioned = regionCheck(c, [], "Nothing was issued.");
+  if (sanctioned) return sanctioned;
+  const team = c.get("team") as TeamCaller;
+  // Read at most 8 KB (code review 1): a proof request is small.
+  const body = await readJsonCapped(c.req.raw, 8_192);
+  if (body === TOO_BIG) return err(413, "Too big: a proof request is at most 8 KB. Nothing was issued.");
+  const parsed = parseProofRequest(body);
+  if (!parsed.ok) return err(400, `${parsed.error} Nothing was issued.`);
+  const request = parsed.value;
+  if (!c.env.LEDGER) return err(503, "Proof receipts are unavailable here. Nothing was issued.");
+  // A daily limit per member and level, counted per attempt (an L1 attempt asks GitHub even when it fails).
+  // A setting that isn't a whole number falls back to the default instead of refusing everything (code review 1).
+  const raw = String((request.level === "L0" ? c.env.PROOF_L0_DAILY : c.env.PROOF_L1_DAILY) ?? "").trim();
+  const setting = raw === "" ? NaN : Number(raw);
+  const limit = Number.isInteger(setting) && setting >= 0 ? setting : request.level === "L0" ? 500 : 200;
+  let q: any;
+  try {
+    q = await ledgerJson(c.env, undefined, "proof-quota", { member: team.member, level: request.level, limit }, true);
+  } catch (e: any) {
+    await recordEvent(c.env, "ledger_error", `proof-quota: ${String(e?.message ?? e)}`);
+    // A timeout may come after the ledger counted the attempt (as on /team/review), so don't promise it wasn't counted.
+    return err(503, "The proof limit can't be checked right now. Nothing was issued, but this attempt may have been counted against today's limit.");
+  }
+  if (q.__status === 429) return err(429, `${q.error ?? "Today's proof receipts are used up."} Nothing was issued.`);
+  let observation: { repo: string; observed: Record<string, unknown> } | undefined;
+  if (request.level === "L1") {
+    const o = await observeGithub(request.check, request.repo, request.sha, { token: c.env.GITHUB_TOKEN });
+    if (!o.ok) {
+      stat(c, "proof_unobserved");
+      return err(o.status, `${o.error}. No receipt was issued.`);
+    }
+    observation = o;
+  }
+  const payload = proofPayload({ request, member: team.member, id: randomToken(12), issuedAt: new Date().toISOString(), observation });
+  let receipt;
+  try {
+    receipt = await signReceipt(payload, c.env.SIGNING_KEY, c.env.PUBLIC_KEY);
+  } catch (e: any) {
+    console.error(`proof receipt signing failed: ${String(e?.message ?? e).slice(0, 200)}`);
+    return err(503, "The receipt couldn't be signed right now. Nothing was issued.");
+  }
+  stat(c, `proof_${request.level.toLowerCase()}`);
+  return c.json({
+    receipt,
+    what_it_proves:
+      request.level === "L0"
+        ? "That this claim and hash reached Agent Referee at issued_at from a holder of the team token (the member name is declared, not verified). Not that the claim is true."
+        : "That Agent Referee itself read these facts from GitHub at observed_at (the member name is declared, not verified). Not that the work is good.",
+    never_an_approval: NEVER_AN_APPROVAL,
+  });
+});
+
 app.get("/team/allowance", teamAuth, async (c: any) => {
   const cfg = teamConfig(c.env);
   const team = c.get("team") as TeamCaller;

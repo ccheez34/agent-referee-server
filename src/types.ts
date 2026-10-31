@@ -15,6 +15,9 @@ export interface Env {
   FREE_REVIEWS_PER_DAY?: string; // free single-reviewer reviews per address per UTC day (default 3)
   FREE_REVIEW3_PER_DAY?: string; // free review-3 reviews per address per UTC day (default 1)
   TEAM_TOKEN?: string; // secret: the owner's team allowance token (sent as x-team-token); enables /team/*
+  GITHUB_TOKEN?: string; // secret (optional): a read-only GitHub token for proof receipts' L1 checks, for a higher rate limit
+  PROOF_L0_DAILY?: string; // proof receipts per team member per UTC day, level L0 (default 500)
+  PROOF_L1_DAILY?: string; // the same for level L1 (default 200)
   TEAM_MEMBERS?: string; // comma-separated members allowed on /team/* (x-team-member): "name" or "name:usd" for its own daily budget, e.g. "S1,T3,T4,T5,2.0:0"
   TEAM_GROUPS?: string; // shared pools, a total each (not daily): "name=member,member:usd;..." e.g. "TB-run1=T3,T4,T5:8.00"
   TEAM_MEMBER_DAILY_USD?: string; // each member's daily review budget at list price (default 8.00)
