@@ -170,6 +170,8 @@ let app: any = null;
 try {
   app = (await import("../src/index.ts")).default;
 } catch (e) {
+  // On GitHub's CI the route tests must run: a skip there would leave CI green without them.
+  if (process.env.GITHUB_ACTIONS === "true") throw e;
   console.log(`proof route tests skipped (dependencies not installed here): ${String((e as any)?.message ?? e).slice(0, 120)}`);
 }
 const t = app ? test : test.skip;
