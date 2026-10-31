@@ -111,8 +111,8 @@ export const blockedStat = (code: string) => `rb_${code.toLowerCase()}`;
 
 /**
  * PLAN 0.4, alerts A1 and A2 (research\legal-risks-2026-10-28\ALERTS-spec.md): what /health reports about the region
- * rules themselves. Pure and cheap, so /health can run it on every call. Reporting only: whether routes also refuse
- * while it isn't empty waits on the spec's open question (2.0's review, R1).
+ * rules themselves. Pure and cheap, so /health and every route can run it on every call: while it isn't empty, the
+ * routes refuse with legal_pause (review R1, agreed by 4.0 at 09:34; index.ts, legalPause).
  * - "region_rules_off" (A1): REGION_BLOCK=off, or a BLOCKED_REGIONS setting that leaves out any BASE_BLOCKED code.
  * - "region_selftest_failed:<probe>" (A2): the rule itself, run against fixed locations, lets one through. Probes:
  *   every BASE_BLOCKED code (from the list itself, so it can't fall behind), with no models and with each company's;
