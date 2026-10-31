@@ -152,7 +152,7 @@ export class Ledger {
     const today = (await st.get<string>("counters_day")) ?? new Date(this.now()).toISOString().slice(0, 10);
     const yesterday = new Date(Date.parse(`${today}T00:00:00Z`) - 86_400_000).toISOString().slice(0, 10);
     let deleted = 0;
-    for (const prefix of ["rf:", "ro:", "rft:", "rfi:", "dm:", "dmc:", "fr:", "frb:", "frt:", "tm:", "tt:", "tmt:", "reviewfail:", "reviewok:", "reviewfailtotal:", "demo:", "demoip:"]) {
+    for (const prefix of ["rf:", "ro:", "rft:", "rfi:", "dm:", "dmc:", "fr:", "frb:", "frt:", "tm:", "tt:", "tmt:", "reviewfail:", "reviewok:", "reviewfailtotal:", "demo:", "demoip:", "pq:"]) {
       while (deleted < 5_000) {
         const found = await st.list({ prefix, limit: 128 });
         // Team reservation tokens (tmt:) are kept one extra day, so a review that runs across midnight can still give
@@ -289,6 +289,22 @@ export class Ledger {
         return json(429, { error: `You've used today's free demo matches (${perCaller} per day from one address). They reset at 00:00 UTC. Paid matches are not limited.`, limit: perCaller });
       await st.put(`dm:${day}`, used + 1);
       if (who) await st.put(`dmc:${day}:${who}`, mine + 1);
+      return json(200, { ok: true, used: used + 1, limit });
+    }
+
+    if (action === "proof-quota") {
+      // body: { member, level, limit } -> counts one proof-receipt request (src/proof.ts) for today (UTC), per team member
+      // and level; refuses once that member's daily limit is reached. Members are team names, never addresses.
+      const day = nowIso.slice(0, 10);
+      await this.newDay(day);
+      const st = this.state.storage;
+      const member = String(body?.member ?? "").slice(0, 40);
+      const level = body?.level === "L1" ? "L1" : "L0";
+      const limit = Number.isFinite(body?.limit) ? body.limit : 0;
+      const k = `pq:${day}:${member}:${level}`;
+      const used = (await st.get<number>(k)) ?? 0;
+      if (!member || used >= limit) return json(429, { error: `Today's ${level} proof receipts for ${member || "this member"} are used up (${limit} a day). They reset at 00:00 UTC.`, limit });
+      await st.put(k, used + 1);
       return json(200, { ok: true, used: used + 1, limit });
     }
 

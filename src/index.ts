@@ -10,6 +10,7 @@ import { JUDGE_MESSAGE_FORMAT, JUDGE_SYSTEM, allowedModels, judgeCommitment, mis
 import type { Env } from "./types.ts";
 import { payaiToken } from "./payai.ts";
 import { signReceipt } from "./receipt.ts";
+import { NEVER_AN_APPROVAL, observeGithub, parseProofRequest, proofPayload } from "./proof.ts";
 import {
   REVIEW_LIMITS, REVIEW_MESSAGE_FORMAT, longReviewRule, REVIEW_SYSTEM, REVIEW_VERDICTS, REVIEWER_BUDGET_MS, missingReviewKey, reviewCommitment, type ReviewerCall, reviewModels, reviewPayload, runOneReviewer, validateReview, type ReviewTier,
 } from "./review.ts";
@@ -1256,6 +1257,56 @@ app.post("/team/review", (c) => handleReview(c, "review"));
 app.post("/team/review-3", (c) => handleReview(c, "review-3"));
 app.post("/team/review-3x2", (c) => handleMultiReview(c, "review-3x2"));
 app.post("/team/review-3x3", (c) => handleMultiReview(c, "review-3x3"));
+// ---------- proof receipts (research\specs\proof-receipts-2026-10-31\SPEC.md v0.4) ----------
+// Signed records that use no AI model: L0 a claim and a hash, L1 a public GitHub fact the service checked itself.
+// For now team members only, free, and unlisted: it isn't in GET /, llms.txt or any tool text until the experiment's
+// last arm ends (4.0's 1020). Nothing that exists changes. A receipt never stands in for the owner's yes.
+app.post("/team/proof", teamAuth, async (c: any) => {
+  const sanctioned = regionCheck(c, [], "Nothing was issued.");
+  if (sanctioned) return sanctioned;
+  const team = c.get("team") as TeamCaller;
+  const raw = await c.req.text().catch(() => "");
+  if (raw.length > 4_000) return err(413, "Too big: a proof request is at most 4,000 characters. Nothing was issued.");
+  let body: any = null;
+  try {
+    body = JSON.parse(raw);
+  } catch {}
+  const parsed = parseProofRequest(body);
+  if (!parsed.ok) return err(400, `${parsed.error} Nothing was issued.`);
+  const request = parsed.value;
+  if (!c.env.LEDGER) return err(503, "Proof receipts are unavailable here. Nothing was issued.");
+  // A daily limit per member and level, counted per attempt (an L1 attempt asks GitHub even when it fails).
+  const limit = Number(request.level === "L0" ? c.env.PROOF_L0_DAILY || 500 : c.env.PROOF_L1_DAILY || 200);
+  let q: any;
+  try {
+    q = await ledgerJson(c.env, undefined, "proof-quota", { member: team.member, level: request.level, limit }, true);
+  } catch (e: any) {
+    await recordEvent(c.env, "ledger_error", `proof-quota: ${String(e?.message ?? e)}`);
+    return err(503, "The proof limit can't be checked right now. Nothing was issued; try again shortly.");
+  }
+  if (q.__status === 429) return err(429, `${q.error ?? "Today's proof receipts are used up."} Nothing was issued.`);
+  let observation: { repo: string; observed: Record<string, unknown> } | undefined;
+  if (request.level === "L1") {
+    const o = await observeGithub(request.check, request.repo, request.sha, { token: c.env.GITHUB_TOKEN });
+    if (!o.ok) {
+      stat(c, "proof_unobserved");
+      return err(o.status, `${o.error}. No receipt was issued.`);
+    }
+    observation = o;
+  }
+  const payload = proofPayload({ request, member: team.member, id: randomToken(12), issuedAt: new Date().toISOString(), observation });
+  const receipt = await signReceipt(payload, c.env.SIGNING_KEY, c.env.PUBLIC_KEY);
+  stat(c, `proof_${request.level.toLowerCase()}`);
+  return c.json({
+    receipt,
+    what_it_proves:
+      request.level === "L0"
+        ? "That this claim and hash reached Agent Referee from this team member at issued_at. Not that the claim is true."
+        : "That Agent Referee itself saw these facts on GitHub at observed_at. Not that the work is good.",
+    never_an_approval: NEVER_AN_APPROVAL,
+  });
+});
+
 app.get("/team/allowance", teamAuth, async (c) => {
   const cfg = teamConfig(c.env);
   const team = c.get("team") as TeamCaller;
