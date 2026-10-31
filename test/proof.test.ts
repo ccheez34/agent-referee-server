@@ -36,8 +36,8 @@ function fakeGithub(over: Record<string, () => Response> = {}, tick: () => void 
     if (u.pathname.endsWith("/check-runs"))
       return Response.json({ total_count: 2, check_runs: [{ name: "test (22)", head_sha: SHA, app: { slug: "github-actions" }, status: "completed", conclusion: "success", completed_at: "2026-10-31T16:00:00Z" }, { name: "test (24)", head_sha: SHA, app: { slug: "github-actions" }, status: "in_progress", conclusion: null, completed_at: null }] });
     if (u.pathname.endsWith("/status")) return Response.json({ sha: SHA, state: "pending", total_count: 0, statuses: [] });
-    if (u.pathname.includes("/compare/")) return Response.json({ status: "behind" });
-    if (u.pathname.endsWith("/branches-where-head")) return Response.json([{ name: "main" }]);
+    if (u.pathname.includes("/compare/")) return Response.json({ status: "behind", merge_base_commit: { sha: SHA } });
+    if (u.pathname.endsWith("/branches-where-head")) return Response.json([{ name: "main", commit: { sha: SHA } }]);
     if (/^\/repos\/[^/]+\/[^/]+$/.test(u.pathname)) return Response.json({ full_name: "CCheez34/Agent-Referee-Server", private: false, default_branch: "main" });
     return Response.json({ sha: SHA, html_url: `https://github.com/CCheez34/Agent-Referee-Server/commit/${SHA}`, commit: { tree: { sha: "C".repeat(40) }, author: { date: "2026-10-31T15:00:00Z" }, committer: { date: "2026-10-31T15:01:00Z" } }, parents: [{ sha: "D".repeat(40) }] });
   }) as any;
@@ -68,9 +68,28 @@ test("L1 github_commit: GitHub's facts, where the commit is in the repository, a
 
 test("L1: a commit that lives only in a fork shows as not on the default branch and no branch's head (fresh read #1)", async () => {
   _clearProofCache();
-  const { f } = fakeGithub({ "/compare/": () => Response.json({ status: "diverged" }), "/branches-where-head": () => Response.json([]) });
+  const { f } = fakeGithub({ "/compare/": () => Response.json({ status: "diverged", merge_base_commit: { sha: "e".repeat(40) } }), "/branches-where-head": () => Response.json([]) });
   const o: any = await observeGithub("github_commit", "o/r", SHA, { fetch: f });
   assert.deepEqual([o.observed.on_default_branch, o.observed.branch_heads], [false, []]);
+  // A comparison GitHub can't find says nothing either way.
+  _clearProofCache();
+  const g = fakeGithub({ "/compare/": () => new Response("{}", { status: 404 }) });
+  assert.equal(((await observeGithub("github_commit", "o/r", SHA, { fetch: g.f })) as any).observed.on_default_branch, null);
+});
+
+test("L1: the comparison and the branch list must be about the commit asked for, and long branch lists are flagged (code review 1)", async () => {
+  _clearProofCache();
+  const wrongBase = fakeGithub({ "/compare/": () => Response.json({ status: "behind", merge_base_commit: { sha: "e".repeat(40) } }) });
+  const a: any = await observeGithub("github_commit", "o/r", SHA, { fetch: wrongBase.f });
+  assert.deepEqual([a.ok, a.status], [false, 502]);
+  _clearProofCache();
+  const wrongHead = fakeGithub({ "/branches-where-head": () => Response.json([{ name: "x", commit: { sha: "e".repeat(40) } }]) });
+  const b: any = await observeGithub("github_commit", "o/r", SHA, { fetch: wrongHead.f });
+  assert.deepEqual([b.ok, b.status], [false, 502]);
+  _clearProofCache();
+  const many = fakeGithub({ "/branches-where-head": () => Response.json(Array.from({ length: 101 }, (_, i) => ({ name: `b${i}`, commit: { sha: SHA } }))) });
+  const m: any = await observeGithub("github_commit", "o/r", SHA, { fetch: many.f });
+  assert.deepEqual([m.observed.branch_heads.length, m.observed.branch_heads_truncated], [100, true]);
 });
 
 test("L1 github_checks: every run and status with who posted it, in-progress runs never shown as passed; cached 10 minutes as a copy", async () => {
@@ -120,9 +139,13 @@ test("L1 failures give no receipt: private, not found, rate limit, redirects off
   // A redirect inside GitHub's API (a renamed repository) is followed once.
   _clearProofCache();
   let n = 0;
-  const moved = fakeGithub({ [`/commits/${SHA}`]: () => (n++ === 0 ? new Response(null, { status: 301, headers: { location: `https://api.github.com/repositories/1/commits/${SHA}` } }) : Response.json({ sha: SHA, commit: {}, parents: [] })) });
-  const o: any = await observeGithub("github_commit", "o/r", SHA, { fetch: moved.f });
-  assert.equal(o.ok, true);
+  const base = fakeGithub().f;
+  const moved = (async (url: string, init: any) =>
+    new URL(url).pathname === `/repos/o/r/commits/${SHA}` && n++ === 0
+      ? new Response(null, { status: 301, headers: { location: `https://api.github.com/repositories/1/commits/${SHA}` } })
+      : base(url, init)) as any;
+  const o: any = await observeGithub("github_commit", "o/r", SHA, { fetch: moved });
+  assert.equal(o.ok, true, o.error);
 });
 // The private-repository case needs the repository call to match exactly, not every path that starts with it.
 function k0(over: Record<string, () => Response>) {
@@ -200,8 +223,10 @@ t("route: team members only; bad requests, sanctioned regions and the daily limi
   const third = await post(e, { level: "L0", sha256: H64 });
   assert.equal(third.status, 429, JSON.stringify(third.body));
   assert.equal((await post(e, { level: "L0", sha256: H64 }, as("3.0"))).status, 200, "per member");
-  const big = await app.fetch(new Request("https://x/team/proof", { method: "POST", headers: { "content-type": "application/json", ...as() }, body: JSON.stringify({ level: "L0", sha256: H64, claim: "x".repeat(5000) }) }), e, ctx);
+  const big = await app.fetch(new Request("https://x/team/proof", { method: "POST", headers: { "content-type": "application/json", ...as() }, body: JSON.stringify({ level: "L0", sha256: H64, claim: "x".repeat(9000) }) }), e, ctx);
   assert.equal(big.status, 413);
+  const typo = await env({ PROOF_L0_DAILY: "five hundred" });
+  assert.equal((await post(typo, { level: "L0", sha256: H64 })).status, 200, "a setting that isn't a number falls back to the default");
 });
 
 t("route: L1 has its own daily limit, and a failed L1 attempt counts against it", async () => {

@@ -1265,18 +1265,17 @@ app.post("/team/proof", teamAuth, async (c: any) => {
   const sanctioned = regionCheck(c, [], "Nothing was issued.");
   if (sanctioned) return sanctioned;
   const team = c.get("team") as TeamCaller;
-  const raw = await c.req.text().catch(() => "");
-  if (raw.length > 4_000) return err(413, "Too big: a proof request is at most 4,000 characters. Nothing was issued.");
-  let body: any = null;
-  try {
-    body = JSON.parse(raw);
-  } catch {}
+  // Read at most 8 KB (code review 1): a proof request is small.
+  const body = await readJsonCapped(c.req.raw, 8_192);
+  if (body === TOO_BIG) return err(413, "Too big: a proof request is at most 8 KB. Nothing was issued.");
   const parsed = parseProofRequest(body);
   if (!parsed.ok) return err(400, `${parsed.error} Nothing was issued.`);
   const request = parsed.value;
   if (!c.env.LEDGER) return err(503, "Proof receipts are unavailable here. Nothing was issued.");
   // A daily limit per member and level, counted per attempt (an L1 attempt asks GitHub even when it fails).
-  const limit = Number(request.level === "L0" ? c.env.PROOF_L0_DAILY || 500 : c.env.PROOF_L1_DAILY || 200);
+  // A setting that isn't a whole number falls back to the default instead of refusing everything (code review 1).
+  const setting = Number(request.level === "L0" ? c.env.PROOF_L0_DAILY : c.env.PROOF_L1_DAILY);
+  const limit = Number.isInteger(setting) && setting >= 0 ? setting : request.level === "L0" ? 500 : 200;
   let q: any;
   try {
     q = await ledgerJson(c.env, undefined, "proof-quota", { member: team.member, level: request.level, limit }, true);
@@ -1296,7 +1295,13 @@ app.post("/team/proof", teamAuth, async (c: any) => {
     observation = o;
   }
   const payload = proofPayload({ request, member: team.member, id: randomToken(12), issuedAt: new Date().toISOString(), observation });
-  const receipt = await signReceipt(payload, c.env.SIGNING_KEY, c.env.PUBLIC_KEY);
+  let receipt;
+  try {
+    receipt = await signReceipt(payload, c.env.SIGNING_KEY, c.env.PUBLIC_KEY);
+  } catch (e: any) {
+    console.error(`proof receipt signing failed: ${String(e?.message ?? e).slice(0, 200)}`);
+    return err(503, "The receipt couldn't be signed right now. Nothing was issued.");
+  }
   stat(c, `proof_${request.level.toLowerCase()}`);
   return c.json({
     receipt,

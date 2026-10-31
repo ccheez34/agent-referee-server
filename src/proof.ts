@@ -111,16 +111,29 @@ export async function observeGithub(
   if (String(c.sha ?? "").toLowerCase() !== sha) return fail(404, "not found: GitHub returned a different commit");
   // A commit can be served through a repository's API path although it lives only in a fork ("imposter commits"),
   // so say where it is in this repository (fresh read #1): on the default branch, and which branches have it as head.
+  // null means GitHub couldn't say (no default branch, or the comparison wasn't found): not shown either way.
   let onDefault: boolean | null = null;
   if (defaultBranch) {
     const cmp = await get(`/repos/${repo}/compare/${encodeURIComponent(defaultBranch)}...${sha}`);
     if (!cmp.ok && cmp.status !== 404) return cmp;
-    onDefault = cmp.ok ? cmp.data.status === "behind" || cmp.data.status === "identical" : false;
+    if (cmp.ok) {
+      const contained = cmp.data.status === "behind" || cmp.data.status === "identical";
+      // When the commit is on the default branch, the comparison's merge base is the commit itself (code review 1).
+      if (contained && String(cmp.data.merge_base_commit?.sha ?? "").toLowerCase() !== sha) return fail(502, "couldn't observe: GitHub's comparison was about a different commit");
+      onDefault = contained;
+    }
   }
   const heads = await get(`${base}/branches-where-head`);
   if (!heads.ok && heads.status !== 404) return heads;
-  const branchHeads = heads.ok && Array.isArray(heads.data) ? heads.data.slice(0, 20).map((b: any) => String(b?.name ?? "")) : [];
-  const where = { default_branch: defaultBranch || null, on_default_branch: onDefault, branch_heads: branchHeads };
+  const headList: any[] = heads.ok ? heads.data : [];
+  if (!Array.isArray(headList)) return fail(502, "couldn't observe: GitHub's answer about branches couldn't be read");
+  if (headList.some((b: any) => String(b?.commit?.sha ?? "").toLowerCase() !== sha)) return fail(502, "couldn't observe: GitHub answered about a different commit");
+  const where = {
+    default_branch: defaultBranch || null,
+    on_default_branch: onDefault,
+    branch_heads: headList.slice(0, 100).map((b: any) => String(b?.name ?? "")),
+    ...(headList.length > 100 ? { branch_heads_truncated: true } : {}),
+  };
   let observed: Record<string, unknown>;
   if (check === "github_commit") {
     observed = {

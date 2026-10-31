@@ -298,7 +298,8 @@ export class Ledger {
       const day = nowIso.slice(0, 10);
       await this.newDay(day);
       const st = this.state.storage;
-      const member = String(body?.member ?? "").slice(0, 40);
+      // teamAuth has already checked the name against TEAM_MEMBERS; it's used whole, so two names never share a count.
+      const member = typeof body?.member === "string" && body.member.length <= 200 ? body.member : "";
       const level = body?.level === "L1" ? "L1" : "L0";
       const limit = Number.isFinite(body?.limit) ? body.limit : 0;
       const k = `pq:${day}:${member}:${level}`;
