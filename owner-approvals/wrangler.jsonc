@@ -1,5 +1,5 @@
 // The owner-approvals Worker: apart from Agent Referee, with its own key and the owner's own token.
-// Secrets (set by the owner, never in this file): OWNER_TOKEN, READ_TOKEN, APPROVALS_SIGNING_KEY.
+// Secrets (set by the owner, never in this file): OWNER_TOKEN, APPROVALS_SIGNING_KEY.
 // Deploying it is the owner's (installing a server is on his owner-only list).
 {
   "name": "owner-approvals",

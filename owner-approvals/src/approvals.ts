@@ -1,24 +1,26 @@
-// Owner approvals: "one place to say yes" (research\specs\rules-in-code-2026-10-31\DESIGN.md part A, and
-// APPROVALS-FORMAT.md v1). A small Worker apart from Agent Referee, with its own Ed25519 key and the owner's own token.
-// The owner signs approvals here from his phone; every gate, from any AI company's session, reads them and checks them
-// against the pinned public key. Sessions never hold the owner's token or the signing key, so they can't make one.
+// Owner approvals: "one place to say yes" (research\specs\rules-in-code-2026-10-31\DESIGN.md part A). A small Worker
+// apart from Agent Referee, with its own Ed25519 key and the owner's own token. The owner signs approvals here from his
+// phone; every gate, from any AI company's session, reads them and checks them against the pinned public key. Sessions
+// never hold the owner's token or the signing key, so they can't make one. The records are exactly the ones 3.0's gate
+// checks: `agent-referee-owner-approval-v1` (agent-referee-mcp, branch gate-v0, gate/README.md; 2.0's 1126).
 // Deploying it, and setting its secrets, is the owner's (installing a server is on his owner-only list).
 
-export const ACTIONS = ["deploy", "payment", "delete", "secret", "install", "rule_change"] as const;
+export const APPROVAL_FORMAT = "agent-referee-owner-approval-v1";
+// The gate policy's owner-only actions. Whether publishing stays owner-only is the owner's call; approving one only adds
+// a way to say yes.
+export const ACTIONS = ["deploy", "publish", "payment", "delete", "secret", "install", "rule_change"] as const;
 export type Action = (typeof ACTIONS)[number];
-const HEX40 = /^[0-9a-f]{40}$/;
 const HEX64 = /^[0-9a-f]{64}$/;
-const HEX32 = /^[0-9a-f]{32}$/;
-const NAME = /^[A-Za-z0-9_.:\/-]{1,100}$/;
+const NONCE = /^[0-9a-f]{24,64}$/;
+const VERSION = /^[A-Za-z0-9._:-]{1,64}$/;
 const MAX_USES = 20;
 const MAX_HOURS = 24;
-const KEEP_EXPIRED_MS = 7 * 86_400_000;
+const KEEP_MS = 7 * 86_400_000;
 const MAX_RECORDS = 500;
 
 export interface Env {
   APPROVALS: DurableObjectNamespace;
   OWNER_TOKEN?: string; // secret, 32+ characters, typed on his phone; never stored on the PC where sessions run
-  READ_TOKEN?: string; // secret (optional): when set, GET /approvals needs it (sessions and gates hold this one)
   APPROVALS_SIGNING_KEY?: string; // secret: base64 PKCS#8 Ed25519 private key
   APPROVALS_PUBLIC_KEY?: string; // base64 raw 32-byte public key (also served at GET /pubkey)
 }
@@ -61,33 +63,28 @@ export async function verifyRecord(r: Envelope, pinnedPublicKeyB64: string): Pro
   }
 }
 
-/** Checks an approval request; returns the fields to sign (without times, ids and the policy version) or an error. */
-export function parseApproval(body: any): { ok: true; value: { action: Action; target: string; target_ref: Record<string, string>; uses: number; hours: number; note?: string } } | { ok: false; error: string } {
+/**
+ * Checks an approval request; returns the fields to sign (without times, nonce and policy version) or an error. The
+ * gate compares `target` and `target_sha256` exactly, so the exact version goes in one of them, for example
+ * "agent-referee-server:production@<40-hex commit>", or a bundle's sha256 in target_sha256.
+ */
+export function parseApproval(body: any): { ok: true; value: { action: Action; target: string; target_sha256: string | null; max_uses: number; hours: number } } | { ok: false; error: string } {
   if (!body || typeof body !== "object") return { ok: false, error: "Send JSON." };
   if (!ACTIONS.includes(body.action)) return { ok: false, error: `action must be one of ${ACTIONS.join(", ")}.` };
   const target = typeof body.target === "string" ? body.target.trim() : "";
-  if (!target || target.length > 200) return { ok: false, error: "target: say what this applies to, in at most 200 characters." };
-  const ref = body.target_ref;
-  let target_ref: Record<string, string>;
-  if (ref && typeof ref.commit === "string" && Object.keys(ref).length === 1) {
-    const commit = ref.commit.trim().toLowerCase();
-    if (!HEX40.test(commit)) return { ok: false, error: "target_ref.commit must be the full 40-hex commit." };
-    target_ref = { commit };
-  } else if (ref && typeof ref.sha256 === "string" && Object.keys(ref).length === 1) {
-    const sha256 = ref.sha256.trim().toLowerCase();
-    if (!HEX64.test(sha256)) return { ok: false, error: "target_ref.sha256 must be 64 hex characters." };
-    target_ref = { sha256 };
-  } else if (ref && typeof ref.name === "string" && Object.keys(ref).length === 1) {
-    const name = ref.name.trim();
-    if (!NAME.test(name)) return { ok: false, error: "target_ref.name: letters, digits and _ . : / - only, at most 100." };
-    target_ref = { name };
-  } else return { ok: false, error: 'target_ref must be exactly one of {"commit"}, {"sha256"} or {"name"}.' };
-  const uses = body.uses === undefined ? 1 : body.uses;
-  if (!Number.isInteger(uses) || uses < 1 || uses > MAX_USES) return { ok: false, error: `uses must be a whole number from 1 to ${MAX_USES}.` };
+  if (!target || target.length > 200 || /[\u0000-\u001f\u007f]/.test(target))
+    return { ok: false, error: "target: the exact thing, on one line and at most 200 characters, for example agent-referee-server:production@<40-hex commit>." };
+  let target_sha256: string | null = null;
+  if (body.target_sha256 !== undefined && body.target_sha256 !== null && body.target_sha256 !== "") {
+    const sha: string = typeof body.target_sha256 === "string" ? body.target_sha256.trim().toLowerCase() : "";
+    if (!HEX64.test(sha)) return { ok: false, error: "target_sha256 must be 64 hex characters, or left empty." };
+    target_sha256 = sha;
+  }
+  const max_uses = body.max_uses === undefined ? 1 : body.max_uses;
+  if (!Number.isInteger(max_uses) || max_uses < 1 || max_uses > MAX_USES) return { ok: false, error: `max_uses must be a whole number from 1 to ${MAX_USES}.` };
   const hours = body.expires_in_hours === undefined ? 2 : body.expires_in_hours;
   if (typeof hours !== "number" || !(hours >= 0.25 && hours <= MAX_HOURS)) return { ok: false, error: `expires_in_hours must be from 0.25 to ${MAX_HOURS}.` };
-  if (body.note !== undefined && (typeof body.note !== "string" || body.note.length > 200)) return { ok: false, error: "note: at most 200 characters." };
-  return { ok: true, value: { action: body.action, target, target_ref, uses, hours, ...(body.note ? { note: body.note } : {}) } };
+  return { ok: true, value: { action: body.action, target, target_sha256, max_uses, hours } };
 }
 
 const json = (status: number, body: unknown, extra: Record<string, string> = {}) =>
@@ -103,7 +100,7 @@ async function sameToken(configured: string | undefined, sent: string | undefine
 }
 const bearer = (req: Request) => (req.headers.get("authorization") ?? "").replace(/^Bearer\s+/i, "") || undefined;
 
-/** One store for every record (a single Durable Object), so the list and the revocations are never split. */
+/** One store and one list for every record (a single Durable Object), so approvals and revocations are never split. */
 export class ApprovalStore {
   state: any;
   now: () => number = () => Date.now();
@@ -115,17 +112,18 @@ export class ApprovalStore {
     const st = this.state.storage;
     const body: any = req.method === "POST" ? await req.json().catch(() => ({})) : {};
     const now = this.now();
-    const fresh = (list: Envelope[]) => list.filter((r) => Date.parse(String(r.payload.expires_at ?? r.payload.issued_at)) > now - KEEP_EXPIRED_MS);
-    if (action === "add-approval" || action === "add-revocation") {
-      const k = action === "add-approval" ? "approvals" : "revocations";
-      const list: Envelope[] = fresh((await st.get(k)) ?? []);
+    // Approvals are kept 7 days past expiry, revocations 7 days past issue (an approval lasts at most 24 hours).
+    const fresh = (list: Envelope[]) => list.filter((r) => Date.parse(String(r.payload.expires_at ?? r.payload.issued_at)) > now - KEEP_MS);
+    if (action === "add") {
+      const list: Envelope[] = fresh((await st.get("records")) ?? []);
       list.push(body.record);
-      await st.put(k, list.slice(-MAX_RECORDS));
+      await st.put("records", list.slice(-MAX_RECORDS));
       return json(200, { ok: true });
     }
-    if (action === "list") return json(200, { approvals: fresh((await st.get("approvals")) ?? []), revocations: fresh((await st.get("revocations")) ?? []), policy_version: (await st.get("policy_version")) ?? null });
+    // The gate reads {"approvals": [...]} and tells approvals and revocations apart by `type`.
+    if (action === "list") return json(200, { approvals: fresh((await st.get("records")) ?? []), policy_version: (await st.get("policy_version")) ?? null });
     if (action === "set-policy") {
-      await st.put("policy_version", body.sha256);
+      await st.put("policy_version", body.version);
       return json(200, { ok: true });
     }
     if (action === "get-policy") return json(200, { policy_version: (await st.get("policy_version")) ?? null });
@@ -147,10 +145,8 @@ export async function handle(req: Request, env: Env, page: () => Response): Prom
     if (!env.APPROVALS_PUBLIC_KEY) return json(503, { error: "The approvals key isn't set yet." });
     return json(200, { public_key: env.APPROVALS_PUBLIC_KEY.trim(), key_id: await keyIdOf(env.APPROVALS_PUBLIC_KEY), algorithm: "Ed25519" }, { "access-control-allow-origin": "*" });
   }
-  if (req.method === "GET" && path === "/approvals") {
-    if (env.READ_TOKEN && !(await sameToken(env.READ_TOKEN, bearer(req)))) return json(401, { error: "Send the read token as Authorization: Bearer." });
-    return json(200, await call(env, "list"));
-  }
+  // Anyone can read the records (DESIGN §3A): their signatures are what count, and gates send no token.
+  if (req.method === "GET" && path === "/approvals") return json(200, await call(env, "list"));
   if (req.method !== "POST" || !["/approve", "/revoke", "/policy"].includes(path)) return json(404, { error: "Not found." });
   // The owner's token. Repeated wrong tokens slow everyone down for a while, in this Worker instance.
   const now = Date.now();
@@ -162,35 +158,44 @@ export async function handle(req: Request, env: Env, page: () => Response): Prom
   }
   const body: any = await req.json().catch(() => null);
   if (path === "/policy") {
-    const sha256 = typeof body?.sha256 === "string" ? body.sha256.trim().toLowerCase() : "";
-    if (!HEX64.test(sha256)) return json(400, { error: "sha256 must be the 64-hex sha256 of the RULES.md in force." });
-    await call(env, "set-policy", { sha256 });
-    return json(200, { ok: true, policy_version: sha256 });
+    // The gate policy's `version`: an approval made under another version doesn't count.
+    const version = typeof body?.version === "string" ? body.version.trim() : "";
+    if (!VERSION.test(version)) return json(400, { error: 'version must be the gate policy\'s "version": 1 to 64 letters, digits, or . _ : -' });
+    await call(env, "set-policy", { version });
+    return json(200, { ok: true, policy_version: version });
   }
   if (path === "/revoke") {
     const nonce = typeof body?.nonce === "string" ? body.nonce.trim().toLowerCase() : "";
-    if (!HEX32.test(nonce)) return json(400, { error: "nonce must be the 32-hex nonce of the approval to revoke." });
-    const record = await signRecord({ record_format: "owner-revocation-v1", revokes_nonce: nonce, issued_at: new Date(now).toISOString(), nonce: hex(16) }, env);
-    await call(env, "add-revocation", { record });
+    if (!NONCE.test(nonce)) return json(400, { error: "nonce must be the approval's nonce: 24 to 64 hex characters." });
+    const { approvals } = await call(env, "list");
+    // A mistyped nonce would revoke nothing, so say so instead of signing it.
+    if (!approvals.some((r: Envelope) => r.payload.type === "approval" && r.payload.nonce === nonce))
+      return json(404, { error: "No approval with that nonce is on file here. Nothing was revoked." });
+    let record: Envelope;
+    try {
+      record = await signRecord({ format: APPROVAL_FORMAT, type: "revocation", nonce, issued_at: new Date(now).toISOString() }, env);
+    } catch (e: any) {
+      return json(503, { error: `Couldn't sign: ${String(e?.message ?? e)}. Nothing was revoked.` });
+    }
+    await call(env, "add", { record });
     return json(200, { revocation: record });
   }
   const parsed = parseApproval(body);
   if (!parsed.ok) return json(400, { error: parsed.error });
   const policy = (await call(env, "get-policy")).policy_version;
-  if (!policy) return json(409, { error: "Set the policy version first: POST /policy with the sha256 of the RULES.md in force." });
+  if (!policy) return json(409, { error: "Set the policy version first: POST /policy with the gate policy's version." });
   const v = parsed.value;
   const payload = {
-    record_format: "owner-approval-v1",
-    approval_id: hex(12),
+    format: APPROVAL_FORMAT,
+    type: "approval",
     action: v.action,
     target: v.target,
-    target_ref: v.target_ref,
-    uses: v.uses,
+    target_sha256: v.target_sha256,
     policy_version: policy,
     issued_at: new Date(now).toISOString(),
     expires_at: new Date(now + Math.round(v.hours * 3_600_000)).toISOString(),
     nonce: hex(16),
-    ...(v.note ? { note: v.note } : {}),
+    max_uses: v.max_uses,
   };
   let record: Envelope;
   try {
@@ -198,7 +203,7 @@ export async function handle(req: Request, env: Env, page: () => Response): Prom
   } catch (e: any) {
     return json(503, { error: `Couldn't sign: ${String(e?.message ?? e)}. Nothing was approved.` });
   }
-  await call(env, "add-approval", { record });
+  await call(env, "add", { record });
   return json(200, { approval: record });
 }
 
