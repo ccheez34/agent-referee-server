@@ -33,7 +33,9 @@ globalThis.fetch = async (url, init) => {
     : new Response(JSON.stringify({ model: b.model, content: [{ type: "text", text }], stop_reason: "end_turn" }));
 };
 
-const env = { SIGNING_KEY, PUBLIC_KEY, ANTHROPIC_API_KEY: "x", OPENROUTER_API_KEY: "x" };
+// The multi-part judge tiers need three companies, which they only have with Claude judges on (judge-tier spec v2.1,
+// §10 item 7): the vectors are made with the switch on. Their receipts carry the advisory and human_review fields.
+const env = { SIGNING_KEY, PUBLIC_KEY, ANTHROPIC_API_KEY: "x", OPENROUTER_API_KEY: "x", CLAUDE_JUDGES_ENABLED: "true" };
 async function run(tier, sides, verdicts, { forfeitOf } = {}) {
   votes = Object.fromEntries(PANEL.map((m, i) => [m, verdicts?.[i] ?? "alpha"]));
   const d = new Map();

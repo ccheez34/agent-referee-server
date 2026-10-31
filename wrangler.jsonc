@@ -34,9 +34,9 @@
     // Wrangler doesn't pass vars down to environments, so env.staging.vars repeats every judge setting below.
     "CLAUDE_JUDGES_ENABLED": "false",
     "JUDGE_MODEL": "google/gemini-3.7-flash",
-    // What judge panels draw from and agents may name (reviews keep MODEL_POOL). A third company joins here, and in
-    // PANEL_3_MODELS, once it's chosen.
-    "JUDGE_MODEL_POOL": "openai/gpt-6-luna,google/gemini-4-argon,google/gemini-3.7-flash",
+    // What judge panels draw from and agents may name (reviews keep MODEL_POOL). Mistral is judge-3's third company
+    // (ccheez34, Oct 30, 19:10); its only host on OpenRouter is Mistral itself, so there's no failover.
+    "JUDGE_MODEL_POOL": "openai/gpt-6-luna,google/gemini-4-argon,google/gemini-3.7-flash,mistralai/mistral-large-4-0",
     "REVEAL_WINDOW_SECONDS": "600",
 
     // Prices are PER SEAT (each agent pays this), except the draw mediator who pays for everyone
@@ -52,9 +52,9 @@
     "PRICE_REVIEW_3": "$0.20",
     // Panel judges, panelist 1 first, from different companies so a panel isn't one model family agreeing with itself.
     // Plain Claude ids go to Anthropic (ANTHROPIC_API_KEY); "provider/model" ids go through OpenRouter (OPENROUTER_API_KEY).
-    // judge-3's list has two companies, so its default panel is closed until a third is added (agents can name three).
+    // judge-3: OpenAI, Google and Mistral (spec v2.1 §8; the cost check is in research\checks\judge-tier-build-2026-10-30).
     "PANEL_2_MODELS": "openai/gpt-6-luna,google/gemini-4-argon",
-    "PANEL_3_MODELS": "openai/gpt-6-luna,google/gemini-3.7-flash",
+    "PANEL_3_MODELS": "openai/gpt-6-luna,google/gemini-3.7-flash,mistralai/mistral-large-4-0",
     // review-3's own default, apart from the judge settings: the list it used before (reviews may still use Claude).
     "REVIEW_3_MODELS": "claude-opus-5-5,openai/gpt-6-luna,google/gemini-3.7-flash",
     // Concurrent AI calls per provider pool (code defaults: Opus 6, Sonnet 12, Haiku 12, OpenRouter 20).
@@ -117,10 +117,10 @@
         "FAKE_AI_MIX": "",
         "CLAUDE_JUDGES_ENABLED": "false",
         "JUDGE_MODEL": "google/gemini-3.7-flash",
-        "JUDGE_MODEL_POOL": "openai/gpt-6-luna,google/gemini-4-argon,google/gemini-3.7-flash",
+        "JUDGE_MODEL_POOL": "openai/gpt-6-luna,google/gemini-4-argon,google/gemini-3.7-flash,mistralai/mistral-large-4-0",
         "REVEAL_WINDOW_SECONDS": "600",
         "PANEL_2_MODELS": "openai/gpt-6-luna,google/gemini-4-argon",
-        "PANEL_3_MODELS": "openai/gpt-6-luna,google/gemini-3.7-flash",
+        "PANEL_3_MODELS": "openai/gpt-6-luna,google/gemini-3.7-flash,mistralai/mistral-large-4-0",
         "REVIEW_3_MODELS": "claude-opus-5-5,openai/gpt-6-luna,google/gemini-3.7-flash",
         "GATE_SLOTS_ANTHROPIC_CLAUDE_SONNET_5_5": "20",
         "GATE_SLOTS_ANTHROPIC_CLAUDE_OPUS_5_5": "10",

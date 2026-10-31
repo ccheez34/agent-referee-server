@@ -1,7 +1,7 @@
 {
   "generated_by": "agent-referee-server scripts/gen-multi-judge-vectors.mjs",
   "receipt_format": "judge-multi-v1",
-  "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI=",
+  "public_key": "pigDaZRPQzflmTjJJiATbZ3XihvNtFTl2laXepEtI/w=",
   "notes": [
     "Verify the signature (Ed25519 over canonical JSON of payload) against public_key, for the receipt and for every ack.",
     "Then: receipt_format must be known; tier judge-3x2 (2 pieces per side) or judge-3x3 (3); proof.judge.format_version agent-referee-judge-v5-multi; no proof.submission_sha256; for every side in proof.pieces, proof.pieces_sha256[side] = sha256 hex of canonical JSON of proof.pieces[side], each record {index, sha256, chars} (no name), chars in UTF-16 code units.",
@@ -81,7 +81,7 @@
               "tier": "judge-3x2",
               "seat": "alpha",
               "step": "submit",
-              "accepted_at": "2026-10-29T05:19:54.171Z",
+              "accepted_at": "2026-10-31T02:02:04.372Z",
               "receipt_format": "judge-multi-v1",
               "pieces": [
                 {
@@ -97,9 +97,9 @@
               ],
               "pieces_sha256": "e9f5507dcab94a8f8b8a33a6aaeb1e2752648008f51999a889e5a8b4d60d16f5"
             },
-            "signature": "It5hWSKnD9K9q6jvp5jNoB+jEvABzsJy5NZXeigYnEI6yeXPBYEMXlK/cX8cuvzFhcs/piszhKrjMImGFv9wCQ==",
+            "signature": "Be/gkeFYUgdVmG8yG5KDMlUTCcvFiThjwbfXUagQzezztzeDmJt5eSS5TNJmJ8W0Vhs9D3hg/SvhOGpFuwSVDQ==",
             "algorithm": "Ed25519",
-            "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
+            "public_key": "pigDaZRPQzflmTjJJiATbZ3XihvNtFTl2laXepEtI/w="
           },
           {
             "payload": {
@@ -109,7 +109,7 @@
               "tier": "judge-3x2",
               "seat": "beta",
               "step": "submit",
-              "accepted_at": "2026-10-29T05:19:54.173Z",
+              "accepted_at": "2026-10-31T02:02:04.374Z",
               "receipt_format": "judge-multi-v1",
               "pieces": [
                 {
@@ -125,9 +125,9 @@
               ],
               "pieces_sha256": "1de523c62eb8fe6c7f97935fff74acc66af36db57f7f34dfa1b8c49d37b14b69"
             },
-            "signature": "7/1toTXsmhKfe09toQe1BGtbhi7F7BHXmSgeieReWIYXbpIKq8klt4ZaBkRh6az7VulBX9vSI/uEgriL9rZFDw==",
+            "signature": "cikyXVHCEjvThPfEN3BEvYFOzGcbng4aXnNnEseICAkkLB1j+/9mT0MMaXKllzF/RkjaIHOMslBYSShoD4w4AQ==",
             "algorithm": "Ed25519",
-            "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
+            "public_key": "pigDaZRPQzflmTjJJiATbZ3XihvNtFTl2laXepEtI/w="
           }
         ]
       },
@@ -142,7 +142,7 @@
             "alpha",
             "beta"
           ],
-          "decided_at": "2026-10-29T05:19:54.178Z",
+          "decided_at": "2026-10-31T02:02:04.378Z",
           "outcome": {
             "winner": "alpha",
             "decision_rule": "majority",
@@ -249,11 +249,13 @@
           "paid_by": {
             "alpha": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "beta": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-          }
+          },
+          "advisory": "Advisory only: AI judges give this match's verdict as advice, not a binding decision or legal arbitration, and AI can be wrong. A person should review it before acting on it.",
+          "human_review": "required"
         },
-        "signature": "Id5mgr8PkMML1VZz6IJ1ksok9bDHxPnpLOa5WSirpUjU3KFIA+8Y5+/lwE/3fxOQP2JwF1/AMbB00gtpKlLYAA==",
+        "signature": "0OuSFAZr+JohDIyVGWvhh3Lp6gnoXnmhuszTRbs49ZhrF8Us30xGWzsZUySGujfeoHdcY/SZRYUZg8A2Eix5DA==",
         "algorithm": "Ed25519",
-        "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
+        "public_key": "pigDaZRPQzflmTjJJiATbZ3XihvNtFTl2laXepEtI/w="
       },
       "expect": {
         "ok": true,
@@ -285,7 +287,7 @@
               "tier": "judge-3x3",
               "seat": "alpha",
               "step": "submit",
-              "accepted_at": "2026-10-29T05:19:54.184Z",
+              "accepted_at": "2026-10-31T02:02:04.390Z",
               "receipt_format": "judge-multi-v1",
               "pieces": [
                 {
@@ -306,9 +308,9 @@
               ],
               "pieces_sha256": "dccccf636177272c8dbd5a1a97d1d0e9b01e46cb07acd33eb240c9d16ce69036"
             },
-            "signature": "WKVIty1WQYdEKNpwnlMk0QC5HYhnAemqx+VjOBUFDF9YBY/xKFXgElToGMOhJVwipOLPnQV/fBQyCn6cUnWoAw==",
+            "signature": "IyE6LhbJGphLqPWGRmO9caVFz/tgIniokR5QY5n0wV21p7WXSrHWmN3jTNEcAuIp9jSBP1CZWgt2sx3vtB3vCg==",
             "algorithm": "Ed25519",
-            "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
+            "public_key": "pigDaZRPQzflmTjJJiATbZ3XihvNtFTl2laXepEtI/w="
           },
           {
             "payload": {
@@ -318,7 +320,7 @@
               "tier": "judge-3x3",
               "seat": "beta",
               "step": "submit",
-              "accepted_at": "2026-10-29T05:19:54.185Z",
+              "accepted_at": "2026-10-31T02:02:04.391Z",
               "receipt_format": "judge-multi-v1",
               "pieces": [
                 {
@@ -339,9 +341,9 @@
               ],
               "pieces_sha256": "02a12ce1ad35151b71dfafea536feed9bb0cb0a95cad7aaeec22f7a697273f1a"
             },
-            "signature": "ugVaa8x+3nfm1OWihPR/qTd3b8uM8GV0lTa0lzibcGPQVEefYBm98djBQOiMmo7IIPts76ee0Sb0VDWBMVYxCw==",
+            "signature": "s8/GdaY08OzSS84ukmAuco0gTO5nHwCoXycdyyL+Emg5f//7ivjgru03kGsQCXXfXKw9iyo3Ih51A1dIafl7Dg==",
             "algorithm": "Ed25519",
-            "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
+            "public_key": "pigDaZRPQzflmTjJJiATbZ3XihvNtFTl2laXepEtI/w="
           }
         ]
       },
@@ -356,7 +358,7 @@
             "alpha",
             "beta"
           ],
-          "decided_at": "2026-10-29T05:19:54.187Z",
+          "decided_at": "2026-10-31T02:02:04.392Z",
           "outcome": {
             "winner": "beta",
             "decision_rule": "majority",
@@ -473,11 +475,13 @@
           "paid_by": {
             "alpha": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "beta": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-          }
+          },
+          "advisory": "Advisory only: AI judges give this match's verdict as advice, not a binding decision or legal arbitration, and AI can be wrong. A person should review it before acting on it.",
+          "human_review": "required"
         },
-        "signature": "FFx21USHCAzEuP/HfPa9gPFs2ub3vCS4d/JxZS4g8YZ5CUy+rOYr5kjGknJFKdQGQOkWWo52t8EmRO/FCe6uDA==",
+        "signature": "sb81dG52FnX7lr3Pob6EgL1pR97uf8K1X2guwF0slyrOTt1hPx26kkP2YmN3oRoR/Gf+4OSy6VmwaZ3q/1pBAQ==",
         "algorithm": "Ed25519",
-        "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
+        "public_key": "pigDaZRPQzflmTjJJiATbZ3XihvNtFTl2laXepEtI/w="
       },
       "expect": {
         "ok": true,
@@ -503,7 +507,7 @@
               "tier": "judge-3x2",
               "seat": "alpha",
               "step": "submit",
-              "accepted_at": "2026-10-29T05:19:54.191Z",
+              "accepted_at": "2026-10-31T02:02:04.395Z",
               "receipt_format": "judge-multi-v1",
               "pieces": [
                 {
@@ -519,9 +523,9 @@
               ],
               "pieces_sha256": "e9f5507dcab94a8f8b8a33a6aaeb1e2752648008f51999a889e5a8b4d60d16f5"
             },
-            "signature": "ZQ78l/xjQR/m+AbYW8PbbfzZgRcSGrKBtMnVlOG57SscBd/8QMlGyYUIDaNGbDBS7htbBxxH68W1+hKlSSDpBQ==",
+            "signature": "SoxED/7aAvyMKvgl6V7Rtb7NQBmegFkq4u6G7QlxGDW4x5frwbFsQc7IGzCxqrP38eIDDHl6q0gEcOSKjU8EBg==",
             "algorithm": "Ed25519",
-            "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
+            "public_key": "pigDaZRPQzflmTjJJiATbZ3XihvNtFTl2laXepEtI/w="
           }
         ]
       },
@@ -536,7 +540,7 @@
             "alpha",
             "beta"
           ],
-          "decided_at": "2026-10-29T05:30:54.192Z",
+          "decided_at": "2026-10-31T02:13:04.396Z",
           "outcome": {
             "winner": "alpha",
             "by_forfeit": true,
@@ -596,11 +600,13 @@
           "paid_by": {
             "alpha": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "beta": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-          }
+          },
+          "advisory": "Advisory only: AI judges give this match's verdict as advice, not a binding decision or legal arbitration, and AI can be wrong. A person should review it before acting on it.",
+          "human_review": "required"
         },
-        "signature": "pB8cjO/sFI3w7zQjfgDMpU2gmVyFAQJ+RR8gxTiVMGbGpGnpdo8AoozTFWBa8SOarFjKxNbVNxHR21xsBKGbDg==",
+        "signature": "SSK0OG4MOtmMORuPzNvacXru1vbtkwXUAbqPKi3U0PcG0cTMYmOXShj1Y7jHyHcdCqz3sL84xc/IrAbxtCztDQ==",
         "algorithm": "Ed25519",
-        "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
+        "public_key": "pigDaZRPQzflmTjJJiATbZ3XihvNtFTl2laXepEtI/w="
       },
       "expect": {
         "ok": true,
@@ -634,7 +640,7 @@
             "alpha",
             "beta"
           ],
-          "decided_at": "2026-10-29T05:19:54.178Z",
+          "decided_at": "2026-10-31T02:02:04.378Z",
           "outcome": {
             "winner": "alpha",
             "decision_rule": "majority",
@@ -741,11 +747,13 @@
           "paid_by": {
             "alpha": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "beta": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-          }
+          },
+          "advisory": "Advisory only: AI judges give this match's verdict as advice, not a binding decision or legal arbitration, and AI can be wrong. A person should review it before acting on it.",
+          "human_review": "required"
         },
-        "signature": "Id5mgr8PkMML1VZz6IJ1ksok9bDHxPnpLOa5WSirpUjU3KFIA+8Y5+/lwE/3fxOQP2JwF1/AMbB00gtpKlLYAA==",
+        "signature": "0OuSFAZr+JohDIyVGWvhh3Lp6gnoXnmhuszTRbs49ZhrF8Us30xGWzsZUySGujfeoHdcY/SZRYUZg8A2Eix5DA==",
         "algorithm": "Ed25519",
-        "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
+        "public_key": "pigDaZRPQzflmTjJJiATbZ3XihvNtFTl2laXepEtI/w="
       },
       "expect": {
         "ok": false,
@@ -778,7 +786,7 @@
             "alpha",
             "beta"
           ],
-          "decided_at": "2026-10-29T05:19:54.178Z",
+          "decided_at": "2026-10-31T02:02:04.378Z",
           "outcome": {
             "winner": "alpha",
             "decision_rule": "majority",
@@ -885,11 +893,13 @@
           "paid_by": {
             "alpha": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "beta": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-          }
+          },
+          "advisory": "Advisory only: AI judges give this match's verdict as advice, not a binding decision or legal arbitration, and AI can be wrong. A person should review it before acting on it.",
+          "human_review": "required"
         },
-        "signature": "Id5mgr8PkMML1VZz6IJ1ksok9bDHxPnpLOa5WSirpUjU3KFIA+8Y5+/lwE/3fxOQP2JwF1/AMbB00gtpKlLYAA==",
+        "signature": "0OuSFAZr+JohDIyVGWvhh3Lp6gnoXnmhuszTRbs49ZhrF8Us30xGWzsZUySGujfeoHdcY/SZRYUZg8A2Eix5DA==",
         "algorithm": "Ed25519",
-        "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
+        "public_key": "pigDaZRPQzflmTjJJiATbZ3XihvNtFTl2laXepEtI/w="
       },
       "expect": {
         "ok": false,
@@ -923,7 +933,7 @@
             "alpha",
             "beta"
           ],
-          "decided_at": "2026-10-29T05:19:54.178Z",
+          "decided_at": "2026-10-31T02:02:04.378Z",
           "outcome": {
             "winner": "alpha",
             "decision_rule": "majority",
@@ -1030,11 +1040,13 @@
           "paid_by": {
             "alpha": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "beta": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-          }
+          },
+          "advisory": "Advisory only: AI judges give this match's verdict as advice, not a binding decision or legal arbitration, and AI can be wrong. A person should review it before acting on it.",
+          "human_review": "required"
         },
-        "signature": "Id5mgr8PkMML1VZz6IJ1ksok9bDHxPnpLOa5WSirpUjU3KFIA+8Y5+/lwE/3fxOQP2JwF1/AMbB00gtpKlLYAA==",
+        "signature": "0OuSFAZr+JohDIyVGWvhh3Lp6gnoXnmhuszTRbs49ZhrF8Us30xGWzsZUySGujfeoHdcY/SZRYUZg8A2Eix5DA==",
         "algorithm": "Ed25519",
-        "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
+        "public_key": "pigDaZRPQzflmTjJJiATbZ3XihvNtFTl2laXepEtI/w="
       },
       "expect": {
         "ok": false,
@@ -1067,7 +1079,7 @@
             "alpha",
             "beta"
           ],
-          "decided_at": "2026-10-29T05:19:54.178Z",
+          "decided_at": "2026-10-31T02:02:04.378Z",
           "outcome": {
             "winner": "alpha",
             "decision_rule": "majority",
@@ -1174,11 +1186,13 @@
           "paid_by": {
             "alpha": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "beta": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-          }
+          },
+          "advisory": "Advisory only: AI judges give this match's verdict as advice, not a binding decision or legal arbitration, and AI can be wrong. A person should review it before acting on it.",
+          "human_review": "required"
         },
-        "signature": "AfVNF2QasW8ENr1L4IIoKiuCYA/MCovOGUJm1G/nP3phXmvmJdUGnsYudhzc4AyrHJvRBQakfsK0pfY9IlgEAA==",
+        "signature": "cbYE+hpwDKcPHknxshlSC5PQ29NqdQK6qaHEEl1zRspFYXVjFdQD84cvN4Eiyaf4Fc0+eOPGbySgCoHCJQkgAA==",
         "algorithm": "Ed25519",
-        "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
+        "public_key": "pigDaZRPQzflmTjJJiATbZ3XihvNtFTl2laXepEtI/w="
       },
       "expect": {
         "ok": false,
@@ -1213,7 +1227,7 @@
             "alpha",
             "beta"
           ],
-          "decided_at": "2026-10-29T05:19:54.187Z",
+          "decided_at": "2026-10-31T02:02:04.392Z",
           "outcome": {
             "winner": "beta",
             "decision_rule": "majority",
@@ -1330,11 +1344,13 @@
           "paid_by": {
             "alpha": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "beta": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-          }
+          },
+          "advisory": "Advisory only: AI judges give this match's verdict as advice, not a binding decision or legal arbitration, and AI can be wrong. A person should review it before acting on it.",
+          "human_review": "required"
         },
-        "signature": "awUvGuMD+qLFZOPqhlSjG6wgNPmwY2E1tN7CjuLu5+fskhq0rLGMH+GIc7CZ1/xzpveS2ql2MOs535UhDUe+CQ==",
+        "signature": "XIn8GqJ9jRxmqxxvkqmu5gyPUu7RSSSGRg6uqPHULuCykYidGbQnrvSAW4eGPIZS8z4CSw8lDtW2j8BDgielCQ==",
         "algorithm": "Ed25519",
-        "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
+        "public_key": "pigDaZRPQzflmTjJJiATbZ3XihvNtFTl2laXepEtI/w="
       },
       "expect": {
         "ok": false,
@@ -1367,7 +1383,7 @@
             "alpha",
             "beta"
           ],
-          "decided_at": "2026-10-29T05:19:54.178Z",
+          "decided_at": "2026-10-31T02:02:04.378Z",
           "outcome": {
             "winner": "alpha",
             "decision_rule": "majority",
@@ -1461,11 +1477,13 @@
           "paid_by": {
             "alpha": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "beta": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-          }
+          },
+          "advisory": "Advisory only: AI judges give this match's verdict as advice, not a binding decision or legal arbitration, and AI can be wrong. A person should review it before acting on it.",
+          "human_review": "required"
         },
-        "signature": "1jJDchBLA1v7+yoe0L3quO8LamjrmylJBI+PEE4DFJjaew1cRIpbV8/ZimfnubPD9rtEYV32rT9BvflN9/YZBA==",
+        "signature": "Ht+CWtP5wFYbNgmE1CVUvKgFlxqi5dLUiQnC0uczfyVCaJ2ecyrPCNC6Uy8Ua15e4iIf6rb0aVxXiyQrNA4lAg==",
         "algorithm": "Ed25519",
-        "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
+        "public_key": "pigDaZRPQzflmTjJJiATbZ3XihvNtFTl2laXepEtI/w="
       },
       "expect": {
         "ok": false,
@@ -1498,7 +1516,7 @@
             "alpha",
             "beta"
           ],
-          "decided_at": "2026-10-29T05:19:54.178Z",
+          "decided_at": "2026-10-31T02:02:04.378Z",
           "outcome": {
             "winner": "alpha",
             "decision_rule": "majority",
@@ -1609,11 +1627,13 @@
           "paid_by": {
             "alpha": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "beta": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-          }
+          },
+          "advisory": "Advisory only: AI judges give this match's verdict as advice, not a binding decision or legal arbitration, and AI can be wrong. A person should review it before acting on it.",
+          "human_review": "required"
         },
-        "signature": "a7ovGezriiFyknnSaC4NEjmKaX9fJ3T5Lx63F9+PZ8nimdL1619CQ27eH1gF5iEUg4AEk6uXChMamqJYeJbxDw==",
+        "signature": "Lc9cslMijUrKNFV6zdqSkR4na5PpIquSwZMkZJArv9mBlXKMeb4ROkONV33NKt/xjd74ZZqmifiropqPj3gmBw==",
         "algorithm": "Ed25519",
-        "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
+        "public_key": "pigDaZRPQzflmTjJJiATbZ3XihvNtFTl2laXepEtI/w="
       },
       "expect": {
         "ok": false,
@@ -1646,7 +1666,7 @@
             "alpha",
             "beta"
           ],
-          "decided_at": "2026-10-29T05:19:54.178Z",
+          "decided_at": "2026-10-31T02:02:04.378Z",
           "outcome": {
             "winner": "beta",
             "decision_rule": "majority",
@@ -1753,11 +1773,13 @@
           "paid_by": {
             "alpha": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "beta": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-          }
+          },
+          "advisory": "Advisory only: AI judges give this match's verdict as advice, not a binding decision or legal arbitration, and AI can be wrong. A person should review it before acting on it.",
+          "human_review": "required"
         },
-        "signature": "8Lr3w8UB2+otyo2rlIvb0wrTkptcc6hy5w7b9cW7bj9+7sT3VvVPHIVASqWrgdRmVESR3ft4qDdFukod7n3bBQ==",
+        "signature": "SX2pLyU4y1Qhn7yD97JtREFcqCaqUhnOB4xgJo3Ut330bfyDfWuPnS0ERJZe82wQx/aKOgxtx2oup1gM4ur3AA==",
         "algorithm": "Ed25519",
-        "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
+        "public_key": "pigDaZRPQzflmTjJJiATbZ3XihvNtFTl2laXepEtI/w="
       },
       "expect": {
         "ok": false,
@@ -1790,7 +1812,7 @@
             "alpha",
             "beta"
           ],
-          "decided_at": "2026-10-29T05:19:54.178Z",
+          "decided_at": "2026-10-31T02:02:04.378Z",
           "outcome": {
             "winner": "alpha",
             "decision_rule": "majority",
@@ -1897,11 +1919,13 @@
           "paid_by": {
             "alpha": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "beta": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-          }
+          },
+          "advisory": "Advisory only: AI judges give this match's verdict as advice, not a binding decision or legal arbitration, and AI can be wrong. A person should review it before acting on it.",
+          "human_review": "required"
         },
-        "signature": "d97nsh6/fMqWuTjIim7VpBa2FfKoRUM78iOkSpGF6SH0ZjD0a1iEiIW8AZ8FjNgY1Kz+Us+98M3e3JcVoLzcCw==",
+        "signature": "taTWiww/TvAq6Ut42OzbPUtUoSpmMGkOV464O1o9FNOpR8Uv0RdnJ8xMhxTCpGuEvLsqrWvyzGPvE8+Gn6hWDg==",
         "algorithm": "Ed25519",
-        "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
+        "public_key": "pigDaZRPQzflmTjJJiATbZ3XihvNtFTl2laXepEtI/w="
       },
       "expect": {
         "ok": false,
@@ -1934,7 +1958,7 @@
             "alpha",
             "beta"
           ],
-          "decided_at": "2026-10-29T05:19:54.178Z",
+          "decided_at": "2026-10-31T02:02:04.378Z",
           "outcome": {
             "winner": "alpha",
             "decision_rule": "majority",
@@ -2031,11 +2055,13 @@
           "paid_by": {
             "alpha": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "beta": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-          }
+          },
+          "advisory": "Advisory only: AI judges give this match's verdict as advice, not a binding decision or legal arbitration, and AI can be wrong. A person should review it before acting on it.",
+          "human_review": "required"
         },
-        "signature": "E/KFPHxCg++FayBp96tuHIiXgkV8j8PgX1TD8H0hnKPxjtEDRH+hRQPc2lVqqA0JhEF27zc8jQQI4S74P2/gDw==",
+        "signature": "nYGvygsblpEruA9LK2KMwmv1E1OSs7THHCUmb90vpyyN7mHvxNyfO1VVr8f+3Wd2B4l2VvUQFWEUN/iOaqnGCQ==",
         "algorithm": "Ed25519",
-        "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
+        "public_key": "pigDaZRPQzflmTjJJiATbZ3XihvNtFTl2laXepEtI/w="
       },
       "expect": {
         "ok": false,
@@ -2068,7 +2094,7 @@
             "alpha",
             "beta"
           ],
-          "decided_at": "2026-10-29T05:19:54.178Z",
+          "decided_at": "2026-10-31T02:02:04.378Z",
           "outcome": {
             "winner": "alpha",
             "decision_rule": "majority",
@@ -2175,11 +2201,13 @@
           "paid_by": {
             "alpha": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "beta": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-          }
+          },
+          "advisory": "Advisory only: AI judges give this match's verdict as advice, not a binding decision or legal arbitration, and AI can be wrong. A person should review it before acting on it.",
+          "human_review": "required"
         },
-        "signature": "V8ZxI9oPfQen8H79jVTxzhpL7MoqBa7NXg9bLuJ25x+hyseklfNv5v1dGaASvp3nMvZN7VF9kJBnbzsTkpmoAA==",
+        "signature": "qk+wHOLSy86IXqdwijiXetLMTLjMvDRNrb6kRoeiqM7vDUV/+t3v9/iYRs/Y9sQjnhgVBOZzKYwIXqYQNA9BCw==",
         "algorithm": "Ed25519",
-        "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
+        "public_key": "pigDaZRPQzflmTjJJiATbZ3XihvNtFTl2laXepEtI/w="
       },
       "expect": {
         "ok": false,
@@ -2212,7 +2240,7 @@
             "alpha",
             "beta"
           ],
-          "decided_at": "2026-10-29T05:19:54.178Z",
+          "decided_at": "2026-10-31T02:02:04.378Z",
           "outcome": {
             "winner": "alpha",
             "decision_rule": "majority",
@@ -2319,11 +2347,13 @@
           "paid_by": {
             "alpha": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "beta": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-          }
+          },
+          "advisory": "Advisory only: AI judges give this match's verdict as advice, not a binding decision or legal arbitration, and AI can be wrong. A person should review it before acting on it.",
+          "human_review": "required"
         },
-        "signature": "l/xlo8kLuf0QRvdFYrqmrn3VdJ2s1vArDQhL6s2lUa+UP9D9+8crwp8S2I9+fbfxrwjmE+T8NGvMcBAzLdJjAA==",
+        "signature": "IJI3r3VY/TDllMyzlKr4EEQrfpBhotoAgxrwTQPBJ04Ik5/L667PrP0JV6oOB1QkwUBYRsae/Grltmq8KZHfCA==",
         "algorithm": "Ed25519",
-        "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
+        "public_key": "pigDaZRPQzflmTjJJiATbZ3XihvNtFTl2laXepEtI/w="
       },
       "expect": {
         "ok": false,
@@ -2356,7 +2386,7 @@
             "alpha",
             "beta"
           ],
-          "decided_at": "2026-10-29T05:19:54.178Z",
+          "decided_at": "2026-10-31T02:02:04.378Z",
           "outcome": {
             "winner": "alpha",
             "decision_rule": "majority",
@@ -2463,11 +2493,13 @@
           "paid_by": {
             "alpha": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "beta": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-          }
+          },
+          "advisory": "Advisory only: AI judges give this match's verdict as advice, not a binding decision or legal arbitration, and AI can be wrong. A person should review it before acting on it.",
+          "human_review": "required"
         },
-        "signature": "kVaNb5+piNcAin5u0YFFtFECaIFSlsMmk7FD1F5CxpncoQU3D6C5DmdY5/aUXSRHNjb2WbDzlM/bOJNSwHXLAQ==",
+        "signature": "px8CbO2SjPnlEhx4vk9MQuWERHqPxWttNdW+stciloITSXC0za5W7+CRWRYe3hs51JlUVYkc/tXYhmw6HgwfBg==",
         "algorithm": "Ed25519",
-        "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
+        "public_key": "pigDaZRPQzflmTjJJiATbZ3XihvNtFTl2laXepEtI/w="
       },
       "expect": {
         "ok": false,
@@ -2500,7 +2532,7 @@
             "alpha",
             "beta"
           ],
-          "decided_at": "2026-10-29T05:19:54.178Z",
+          "decided_at": "2026-10-31T02:02:04.378Z",
           "outcome": {
             "winner": "alpha",
             "decision_rule": "majority",
@@ -2607,11 +2639,13 @@
           "paid_by": {
             "alpha": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "beta": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-          }
+          },
+          "advisory": "Advisory only: AI judges give this match's verdict as advice, not a binding decision or legal arbitration, and AI can be wrong. A person should review it before acting on it.",
+          "human_review": "required"
         },
-        "signature": "LB2KlmEal6QZpfCRu1azsNwEZH8JC1uL7E6AfIY8eDOZ7dBo9v2dubH0uy3FCJnpQNqQLKzCEgWVTgrYm4dVDA==",
+        "signature": "SH2Z3kQnHQd9/szVl3FIyEnfzEFQtbcYyC3QtTYmje8PqaLF0a6EJ/+uSgkjQBjraI4d/uAp71qE2ikEpeOMDQ==",
         "algorithm": "Ed25519",
-        "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
+        "public_key": "pigDaZRPQzflmTjJJiATbZ3XihvNtFTl2laXepEtI/w="
       },
       "expect": {
         "ok": false,
@@ -2644,7 +2678,7 @@
             "alpha",
             "beta"
           ],
-          "decided_at": "2026-10-29T05:19:54.178Z",
+          "decided_at": "2026-10-31T02:02:04.378Z",
           "outcome": {
             "winner": "beta",
             "decision_rule": "majority",
@@ -2751,11 +2785,13 @@
           "paid_by": {
             "alpha": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "beta": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-          }
+          },
+          "advisory": "Advisory only: AI judges give this match's verdict as advice, not a binding decision or legal arbitration, and AI can be wrong. A person should review it before acting on it.",
+          "human_review": "required"
         },
-        "signature": "Id5mgr8PkMML1VZz6IJ1ksok9bDHxPnpLOa5WSirpUjU3KFIA+8Y5+/lwE/3fxOQP2JwF1/AMbB00gtpKlLYAA==",
+        "signature": "0OuSFAZr+JohDIyVGWvhh3Lp6gnoXnmhuszTRbs49ZhrF8Us30xGWzsZUySGujfeoHdcY/SZRYUZg8A2Eix5DA==",
         "algorithm": "Ed25519",
-        "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
+        "public_key": "pigDaZRPQzflmTjJJiATbZ3XihvNtFTl2laXepEtI/w="
       },
       "expect": {
         "ok": false,
@@ -2776,7 +2812,7 @@
               "tier": "judge-3x2",
               "seat": "alpha",
               "step": "submit",
-              "accepted_at": "2026-10-29T05:19:54.171Z",
+              "accepted_at": "2026-10-31T02:02:04.372Z",
               "receipt_format": "judge-multi-v1",
               "pieces": [
                 {
@@ -2792,9 +2828,9 @@
               ],
               "pieces_sha256": "1111111111111111111111111111111111111111111111111111111111111111"
             },
-            "signature": "JRkvIIIqwa2UnTaoNfFei8+LqYcSp/kDTgtYqQAU80fE+M6bpvnxAetOD7hWZ94XL4AERRRMavLzDocoy6eeBw==",
+            "signature": "D+JjtEIjhDv+T3SH4o2OHOjCO3zD8HJZpZKubHr3z9LdzHEL30jFn7QJihXwndOBuFNiHEiZuAXzd7FoM7IpCA==",
             "algorithm": "Ed25519",
-            "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
+            "public_key": "pigDaZRPQzflmTjJJiATbZ3XihvNtFTl2laXepEtI/w="
           }
         ]
       },
@@ -2809,7 +2845,7 @@
             "alpha",
             "beta"
           ],
-          "decided_at": "2026-10-29T05:19:54.178Z",
+          "decided_at": "2026-10-31T02:02:04.378Z",
           "outcome": {
             "winner": "alpha",
             "decision_rule": "majority",
@@ -2916,11 +2952,13 @@
           "paid_by": {
             "alpha": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "beta": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-          }
+          },
+          "advisory": "Advisory only: AI judges give this match's verdict as advice, not a binding decision or legal arbitration, and AI can be wrong. A person should review it before acting on it.",
+          "human_review": "required"
         },
-        "signature": "Id5mgr8PkMML1VZz6IJ1ksok9bDHxPnpLOa5WSirpUjU3KFIA+8Y5+/lwE/3fxOQP2JwF1/AMbB00gtpKlLYAA==",
+        "signature": "0OuSFAZr+JohDIyVGWvhh3Lp6gnoXnmhuszTRbs49ZhrF8Us30xGWzsZUySGujfeoHdcY/SZRYUZg8A2Eix5DA==",
         "algorithm": "Ed25519",
-        "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
+        "public_key": "pigDaZRPQzflmTjJJiATbZ3XihvNtFTl2laXepEtI/w="
       },
       "expect": {
         "ok": false,
@@ -2946,7 +2984,7 @@
               "tier": "judge-3x2",
               "seat": "alpha",
               "step": "submit",
-              "accepted_at": "2026-10-29T05:19:54.191Z",
+              "accepted_at": "2026-10-31T02:02:04.395Z",
               "receipt_format": "judge-multi-v1",
               "pieces": [
                 {
@@ -2962,9 +3000,9 @@
               ],
               "pieces_sha256": "e9f5507dcab94a8f8b8a33a6aaeb1e2752648008f51999a889e5a8b4d60d16f5"
             },
-            "signature": "ZQ78l/xjQR/m+AbYW8PbbfzZgRcSGrKBtMnVlOG57SscBd/8QMlGyYUIDaNGbDBS7htbBxxH68W1+hKlSSDpBQ==",
+            "signature": "SoxED/7aAvyMKvgl6V7Rtb7NQBmegFkq4u6G7QlxGDW4x5frwbFsQc7IGzCxqrP38eIDDHl6q0gEcOSKjU8EBg==",
             "algorithm": "Ed25519",
-            "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
+            "public_key": "pigDaZRPQzflmTjJJiATbZ3XihvNtFTl2laXepEtI/w="
           },
           {
             "payload": {
@@ -2974,7 +3012,7 @@
               "tier": "judge-3x2",
               "seat": "beta",
               "step": "submit",
-              "accepted_at": "2026-10-29T05:19:54.171Z",
+              "accepted_at": "2026-10-31T02:02:04.372Z",
               "receipt_format": "judge-multi-v1",
               "pieces": [
                 {
@@ -2990,9 +3028,9 @@
               ],
               "pieces_sha256": "1de523c62eb8fe6c7f97935fff74acc66af36db57f7f34dfa1b8c49d37b14b69"
             },
-            "signature": "hBW+uR5IoCGQuPRdypGZZ0msDYNOwyOdN2nCigLyveafvLja+Ds4cLbDIKZjCFvmL8oV8To/F6U9Neeac6BhAg==",
+            "signature": "WO7efekuU4vKuPeXMsiDjHuvKXjREg6alrvI238ht6nl0HUssV/XBPSI/SN9iOPloUjUrYBoZ5Z8mFOmDhhlAQ==",
             "algorithm": "Ed25519",
-            "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
+            "public_key": "pigDaZRPQzflmTjJJiATbZ3XihvNtFTl2laXepEtI/w="
           }
         ]
       },
@@ -3007,7 +3045,7 @@
             "alpha",
             "beta"
           ],
-          "decided_at": "2026-10-29T05:30:54.192Z",
+          "decided_at": "2026-10-31T02:13:04.396Z",
           "outcome": {
             "winner": "alpha",
             "by_forfeit": true,
@@ -3067,11 +3105,13 @@
           "paid_by": {
             "alpha": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "beta": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-          }
+          },
+          "advisory": "Advisory only: AI judges give this match's verdict as advice, not a binding decision or legal arbitration, and AI can be wrong. A person should review it before acting on it.",
+          "human_review": "required"
         },
-        "signature": "pB8cjO/sFI3w7zQjfgDMpU2gmVyFAQJ+RR8gxTiVMGbGpGnpdo8AoozTFWBa8SOarFjKxNbVNxHR21xsBKGbDg==",
+        "signature": "SSK0OG4MOtmMORuPzNvacXru1vbtkwXUAbqPKi3U0PcG0cTMYmOXShj1Y7jHyHcdCqz3sL84xc/IrAbxtCztDQ==",
         "algorithm": "Ed25519",
-        "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
+        "public_key": "pigDaZRPQzflmTjJJiATbZ3XihvNtFTl2laXepEtI/w="
       },
       "expect": {
         "ok": false,

@@ -138,10 +138,13 @@ export function multiModels(env: MultiEnv & JudgeEnv, who: "review" | "judge" = 
   const light = longReviewRule(env).light_models;
   const exclude = multiExcluded(env);
   const ok = (m: string) => !light.includes(m) && !exclude.includes(m);
-  const pool = who === "judge" ? judgePool(env) : modelPool(env);
+  const checked = (m: string) => Number.isInteger(MODEL_OUTPUT_LIMITS[m]) && (MODEL_OUTPUT_LIMITS[m] as number) > 0;
+  // A pool model needs a checked output limit too: a model added to a pool (Mistral, in the judge pool) only joins these
+  // tiers once its limit is recorded here and their cost check is redone (judge-tier spec v2.1, §8). Until then these
+  // tiers treat it as outside their pool.
+  const pool = (who === "judge" ? judgePool(env) : modelPool(env)).filter(checked);
   const allowed = who === "judge" ? judgeAllowed(env) : allowedModels(env);
   const drawable = pool.filter(ok);
-  const checked = (m: string) => Number.isInteger(MODEL_OUTPUT_LIMITS[m]) && (MODEL_OUTPUT_LIMITS[m] as number) > 0;
   const optIn = list(env.MULTI_PART_OPT_IN).filter((m) => optInModels(env).includes(m) && allowed.includes(m) && ok(m) && checked(m));
   const eligible = [...new Set([...drawable, ...optIn])];
   const have = new Set(drawable.map(companyOf));

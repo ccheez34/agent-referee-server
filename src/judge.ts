@@ -405,7 +405,7 @@ export const commitsClaudeWhileOff = (env: JudgeEnv, models: string[]) => !claud
 
 /** The advisory sentence: in every judge-tier receipt (signed), every judge-tier reply, the 402s and the docs. */
 export const JUDGE_ADVISORY =
-  "Advisory only: AI judges decide this kind of match. A verdict is advice, not a binding decision or legal arbitration, and AI can be wrong. A person should review it before acting on it.";
+  "Advisory only: AI judges give this match's verdict as advice, not a binding decision or legal arbitration, and AI can be wrong. A person should review it before acting on it.";
 /** The signed human-review marker beside it (D4): an integrator's code can hold a verdict for a person. */
 export const JUDGE_HUMAN_REVIEW = "required" as const;
 
