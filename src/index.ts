@@ -1282,7 +1282,8 @@ app.post("/team/proof", teamAuth, async (c: any) => {
     q = await ledgerJson(c.env, undefined, "proof-quota", { member: team.member, level: request.level, limit }, true);
   } catch (e: any) {
     await recordEvent(c.env, "ledger_error", `proof-quota: ${String(e?.message ?? e)}`);
-    return err(503, "The proof limit can't be checked right now. Nothing was issued; try again shortly.");
+    // A timeout may come after the ledger counted the attempt (as on /team/review), so don't promise it wasn't counted.
+    return err(503, "The proof limit can't be checked right now. Nothing was issued, but this attempt may have been counted against today's limit.");
   }
   if (q.__status === 429) return err(429, `${q.error ?? "Today's proof receipts are used up."} Nothing was issued.`);
   let observation: { repo: string; observed: Record<string, unknown> } | undefined;
@@ -1301,8 +1302,8 @@ app.post("/team/proof", teamAuth, async (c: any) => {
     receipt,
     what_it_proves:
       request.level === "L0"
-        ? "That this claim and hash reached Agent Referee from this team member at issued_at. Not that the claim is true."
-        : "That Agent Referee itself saw these facts on GitHub at observed_at. Not that the work is good.",
+        ? "That this claim and hash reached Agent Referee at issued_at from a holder of the team token (the member name is declared, not verified). Not that the claim is true."
+        : "That Agent Referee itself read these facts from GitHub at observed_at (the member name is declared, not verified). Not that the work is good.",
     never_an_approval: NEVER_AN_APPROVAL,
   });
 });
