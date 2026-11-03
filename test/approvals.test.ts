@@ -11,14 +11,23 @@ import { canonicalJson as agentRefereeCanonical } from "../src/logic.ts";
 const mem = () => {
   const d = new Map<string, unknown>();
   let chain: Promise<unknown> = Promise.resolve();
-  return {
-    storage: { async get(k: string) { return structuredClone(d.get(k)); }, async put(k: string, v: unknown) { d.set(k, structuredClone(v)); } },
+  const st = {
+    puts: [] as string[][],
+    storage: {
+      async get(k: string) { return structuredClone(d.get(k)); },
+      async put(k: string | Record<string, unknown>, v?: unknown) {
+        const entries = typeof k === "string" ? { [k]: v } : k; // the object form is one atomic write
+        (st as any).puts.push(Object.keys(entries));
+        for (const [kk, vv] of Object.entries(entries)) d.set(kk, structuredClone(vv));
+      },
+    },
     blockConcurrencyWhile<T>(f: () => Promise<T>): Promise<T> {
       const run = chain.then(f);
       chain = run.catch(() => {});
       return run;
     },
   };
+  return st;
 };
 const OWNER = "o".repeat(40);
 async function env(extra: Record<string, unknown> = {}) {
@@ -259,10 +268,11 @@ test("revoke-all signs and stores every revocation in one turn and one write; a 
       failPut: false,
       storage: {
         async get(k: string) { return structuredClone(d.get(k)); },
-        async put(k: string, v: unknown) {
-          if (s.failPut && k === "records") throw new Error("storage unavailable");
-          if (k === "records") s.puts++;
-          d.set(k, structuredClone(v));
+        async put(k: string | Record<string, unknown>, v?: unknown) {
+          const entries = typeof k === "string" ? { [k]: v } : k;
+          if (s.failPut && "records" in entries) throw new Error("storage unavailable");
+          if ("records" in entries) s.puts++;
+          for (const [kk, vv] of Object.entries(entries)) d.set(kk, structuredClone(vv));
         },
       },
       blockConcurrencyWhile<T>(f: () => Promise<T>): Promise<T> {
@@ -364,24 +374,40 @@ test("review 2: the store never drops a record to make room; it refuses new appr
   await go(e, "/policy", POL, OWNER);
   // Fill the store close to the cap through its own door, 20 at a time, then revoke one of the first.
   const first = (await go(e, "/approve", { ...deploy, count: 20 }, OWNER)).body.approvals[0].payload.nonce;
-  for (let i = 1; i < 99; i++) assert.equal((await go(e, "/approve", { ...deploy, count: 20, target: `npm:fill@${i}` }, OWNER)).status, 200, `batch ${i}`);
+  for (let i = 1; i < 49; i++) assert.equal((await go(e, "/approve", { ...deploy, count: 20, target: `npm:fill@${i}` }, OWNER)).status, 200, `batch ${i}`);
   assert.equal((await go(e, "/revoke", { nonce: first }, OWNER)).status, 200);
   const before = (await go(e, "/approvals")).body.approvals;
-  assert.equal(before.length, 1981);
-  // 20 more would pass 2000: refused, nothing dropped, the revocation still there.
+  assert.equal(before.length, 981);
+  // 20 more would pass 1000: refused, nothing dropped, the revocation still there.
   const full = await go(e, "/approve", { ...deploy, count: 20, target: "npm:one-too-many" }, OWNER);
   assert.deepEqual([full.status, /nothing is dropped/i.test(full.body.error)], [409, true]);
   const after = (await go(e, "/approvals")).body.approvals;
-  assert.equal(after.length, 1981);
+  assert.equal(after.length, 981);
   assert.ok(after.some((r: any) => r.payload.type === "revocation" && r.payload.nonce === first), "the revocation is still on file");
   assert.equal((await go(e, "/approve", { ...deploy, count: 19, target: "npm:fits" }, OWNER)).status, 200, "what fits is signed");
   assert.equal((await go(e, "/revoke", { all: true }, OWNER)).status, 200, "revoking never needs room");
-  assert.ok((await go(e, "/approvals")).body.approvals.length > 2000, "revocations are stored past the cap");
+  const full2 = (await go(e, "/approvals")).body.approvals;
+  assert.ok(full2.length > 1000, "revocations are stored past the cap");
+  // The re-check (Opus): the whole list is one stored value; at the cap with every approval revoked it stays far
+  // under a SQLite-backed Durable Object's 2 MiB for one value.
+  assert.ok(full2.length <= 2000, `at most twice the cap: ${full2.length}`);
+  const bytes = new TextEncoder().encode(JSON.stringify(full2)).length;
+  assert.ok(bytes < 1.5 * 1024 * 1024, `the stored list at its largest: ${bytes} bytes`);
   const s = (await go(e, "/status", {}, OWNER)).body;
-  assert.deepEqual([s.max_records, typeof s.records], [2000, "number"]);
+  assert.deepEqual([s.max_records, typeof s.records], [1000, "number"]);
   // Old records leave by age, never by count: 8 days on, the store is empty again.
   store.now = () => Date.now() + 9 * 86_400_000;
   assert.equal((await go(e, "/approvals")).body.approvals.length, 0);
+});
+
+test("the re-check: an approval's records and its request id are stored in one atomic write", async () => {
+  const { e, store } = await env();
+  await go(e, "/policy", POL, OWNER);
+  const puts = (store.state as any).puts as string[][];
+  puts.length = 0;
+  assert.equal((await go(e, "/approve", { ...deploy, count: 2, request_id: "atom-0001-abcd" }, OWNER)).status, 200);
+  const writes = puts.filter((keys) => keys.includes("records") || keys.includes("rids"));
+  assert.deepEqual(writes, [["records", "rids"]], "one write with both keys, not two");
 });
 
 test("review 2: a request id seen today whose approvals are gone never makes new ones", async () => {
@@ -409,7 +435,10 @@ test("review 2: every store action answers in words when storage fails; the key 
       failGet: false,
       storage: {
         async get(k: string) { if (s.failGet) throw new Error("storage unavailable"); return structuredClone(d.get(k)); },
-        async put(k: string, v: unknown) { if (s.failGet) throw new Error("storage unavailable"); d.set(k, structuredClone(v)); },
+        async put(k: string | Record<string, unknown>, v?: unknown) {
+          if (s.failGet) throw new Error("storage unavailable");
+          for (const [kk, vv] of Object.entries(typeof k === "string" ? { [k]: v } : k)) d.set(kk, structuredClone(vv));
+        },
       },
       blockConcurrencyWhile<T>(f: () => Promise<T>): Promise<T> {
         const run = chain.then(f);

@@ -28,7 +28,10 @@ const KEEP_MS = 7 * 86_400_000; // approvals: 7 days past their expiry
 const KEEP_REVOCATION_MS = 8 * 86_400_000;
 // The store refuses new approvals past this many records on file (a record is on file until its keep time ends), so a
 // revocation is never dropped to make room: the owner revokes or waits instead (review 2, Sonnet, Luna and Argon).
-const MAX_RECORDS = 2000;
+// Revocations aren't capped, but each needs an approval on file and an approval gets one revocation, so the list holds
+// at most twice this; at about 600 bytes a record that's about 1.2 MB, under a SQLite-backed Durable Object's 2 MiB
+// for one stored value (the re-check, Opus; the size is tested).
+const MAX_RECORDS = 1000;
 const REQUEST_ID_MS = 86_400_000;
 
 export interface Env {
@@ -222,10 +225,11 @@ export class ApprovalStore {
           const records: Envelope[] = [];
           for (let i = 0; i < v.count; i++)
             records.push(await signRecord({ format: APPROVAL_FORMAT, type: "approval", member: v.member, action: v.action, target: v.target, target_sha256: v.target_sha256, policy_version: policy.version, issued_at, expires_at, nonce: hex(16), max_uses: 1 }, signer));
-          // All signed before anything is stored: a failure partway stores none of them.
+          // All signed before anything is stored, and the records and the request id stored in one atomic write: a
+          // failure stores none of them, so "Nothing was approved" is true and a retry can't mint a second set (the
+          // re-check, Opus and Luna).
           list.push(...records);
-          await st.put("records", list);
-          if (v.request_id) await st.put("rids", { ...rids, [v.request_id]: { nonces: records.map((r) => String(r.payload.nonce)), at: now } });
+          await st.put({ records: list, rids: v.request_id ? { ...rids, [v.request_id]: { nonces: records.map((r) => String(r.payload.nonce)), at: now } } : rids });
           return { status: 200, body: { approval: records[0], approvals: records } };
         } catch (e: any) {
           return { status: 503, body: { error: `Couldn't sign or store the approval: ${String(e?.message ?? e).slice(0, 200)}. Nothing was approved.` } };
