@@ -11,6 +11,13 @@ import { signReceipt, type Receipt } from "./receipt.ts";
 
 export type ScreenMode = "off" | "shadow" | "enforce";
 
+// What customers are told before they pay, while the screen is on (ccheez34, Nov 3 08:58: a refused submission ends with
+// no refund "as long as they are made aware that they cant send certain content before"). Shown on every judge tier's
+// payment request, in every match view, in GET /judge, GET / and /llms.txt.
+export const SECRET_KINDS = "a private key, an API key or access token, a password inside a URL, or a bearer token";
+export const SUBMIT_RULE = `Submissions holding a secret (${SECRET_KINDS}) are refused before any AI sees them. A refused submission counts as not submitted: send it again without the secret before the step deadline. If no submission from a seat is accepted by then, that seat forfeits, with no refund.`;
+export const REQUEST_RULE = `Reviews and new matches holding a secret (${SECRET_KINDS}) are refused before any AI sees them, and a refused request isn't charged.`;
+
 /** CONTENT_SCREEN: "off" (default), "shadow" (2b labels only; 2a still refuses) or "enforce". Anything else is "off". */
 export function screenMode(env: { CONTENT_SCREEN?: string }): ScreenMode {
   const v = String(env.CONTENT_SCREEN ?? "").trim().toLowerCase();

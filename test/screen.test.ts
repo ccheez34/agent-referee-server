@@ -6,7 +6,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { INTAKE_PATTERNS, intakeCheck, screenMode, REFUSAL_RECEIPT_FORMAT } from "../src/screen.ts";
+import { INTAKE_PATTERNS, intakeCheck, screenMode, REFUSAL_RECEIPT_FORMAT, REQUEST_RULE, SUBMIT_RULE } from "../src/screen.ts";
 import { verifyReceipt } from "../src/receipt.ts";
 import { scrubText } from "./fixtures/find-scrub-v1.mjs";
 import { Gate } from "../src/gate.ts";
@@ -274,4 +274,38 @@ t("a refused match submission: not submitted, the forfeit rule stated, receipt s
   // A clean submit goes on to the match as before (an unknown match answers as it always has, not 422).
   const ok = await call(env(), `/matches/${"0".repeat(24)}/submit`, { seat: "a", seat_token: "b".repeat(64), position: "My plan." });
   assert.notEqual(ok.status, 422);
+});
+
+const get = async (e: any, path: string) => {
+  const res = await app.fetch(new Request(`https://x${path}`, { headers: { accept: "application/json", "cf-connecting-ip": "203.0.113.7" } }), e, ctx);
+  const text = await res.text();
+  return { status: res.status, text, body: (() => { try { return JSON.parse(text); } catch { return null; } })() as any };
+};
+const RULES = "Pick the plan with fewer steps that still meets every requirement; on a tie, pick alpha.";
+
+t("customers are told before they pay: the submission rule in the judge 402, every judge match view, GET /judge, GET / and /llms.txt, only while the screen is on", async () => {
+  const on = env({ PAYMENTS_ENABLED: "true" });
+  assert.equal((await get(on, "/judge")).body.content_rule, SUBMIT_RULE);
+  const root = await get(on, "/");
+  assert.ok(root.text.includes(SUBMIT_RULE) && root.text.includes(REQUEST_RULE), root.text.slice(0, 200));
+  assert.ok((await get(on, "/llms.txt")).text.includes(SUBMIT_RULE));
+  const c = await call(on, "/matches", { tier: "judge", seats: ["alpha", "beta"], rules: RULES });
+  assert.equal(c.status, 201, c.text);
+  assert.equal(c.body.content_rule, SUBMIT_RULE, "the create answer says it");
+  const id = c.body.match_id;
+  assert.equal((await get(on, `/matches/${id}`)).body.content_rule, SUBMIT_RULE, "so does the match view");
+  const challenge = await call(on, "/join/judge", { match_id: id, seat: "alpha" });
+  assert.equal(challenge.status, 402, challenge.text);
+  assert.ok(challenge.text.includes(SUBMIT_RULE), "the payment request carries it, before anyone pays");
+  const rps = await call(on, "/matches", { tier: "rps", seats: ["alpha", "beta"] });
+  assert.equal(rps.status, 201, rps.text);
+  assert.equal(rps.body.content_rule, undefined, "not on tiers with no text");
+  // Off: none of it (the 402 text is built once per process, so it's checked with the screen on only).
+  const off = env({ CONTENT_SCREEN: "off" });
+  assert.equal((await get(off, "/judge")).body.content_rule, undefined);
+  assert.ok(!(await get(off, "/")).text.includes(SUBMIT_RULE));
+  assert.ok(!(await get(off, "/llms.txt")).text.includes("Secrets in what you send"));
+  const c2 = await call(off, "/matches", { tier: "judge", seats: ["alpha", "beta"], rules: RULES });
+  assert.equal(c2.status, 201, c2.text);
+  assert.equal(c2.body.content_rule, undefined);
 });

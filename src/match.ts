@@ -69,6 +69,7 @@ import { fakeAiConfig } from "./fakeai.ts";
 import { addUnjudged, recordAccountProblem } from "./health.ts";
 import { recordCutOff } from "./cutoffs.ts";
 import { GATE_MAX_WAIT_MS } from "./gate.ts";
+import { SUBMIT_RULE, screenMode } from "./screen.ts";
 
 type Phase = "joining" | "commit" | "reveal" | "submit" | "judging" | "done" | "expired" | "error";
 
@@ -1190,6 +1191,8 @@ export class MatchRoom {
       // Judge tiers, from creation on: the advisory sentence and the human-review marker (judge-tier spec v2.1, §4).
       advisory: judgeTier ? JUDGE_ADVISORY : undefined,
       human_review: judgeTier ? JUDGE_HUMAN_REVIEW : undefined,
+      // While the content screen is on: what a refused submission means, from creation on (customers told before paying).
+      content_rule: judgeTier && screenMode(this.env) !== "off" ? SUBMIT_RULE : undefined,
       seat_wallets: m.seat_wallets,
       host_pays: m.host_pays,
       round: judgeTier ? undefined : m.rounds.length || undefined,

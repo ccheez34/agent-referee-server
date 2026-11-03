@@ -10,7 +10,7 @@ import { JUDGE_ADVISORY, JUDGE_HUMAN_REVIEW, JUDGE_MESSAGE_FORMAT, JUDGE_SYSTEM,
 import type { Env } from "./types.ts";
 import { payaiToken } from "./payai.ts";
 import { signReceipt } from "./receipt.ts";
-import { intakeCheck, intakeRefusal, screenMode } from "./screen.ts";
+import { REQUEST_RULE, SUBMIT_RULE, intakeCheck, intakeRefusal, screenMode } from "./screen.ts";
 import { NEVER_AN_APPROVAL, observeGithub, parseProofRequest, proofPayload } from "./proof.ts";
 import {
   REVIEW_LIMITS, REVIEW_MESSAGE_FORMAT, longReviewRule, REVIEW_SYSTEM, REVIEW_VERDICTS, REVIEWER_BUDGET_MS, missingReviewKey, reviewCommitment, type ReviewerCall, reviewModels, reviewPayload, runOneReviewer, validateReview, type ReviewTier,
@@ -155,7 +155,8 @@ function getPaywall(env: Env): MiddlewareHandler {
     config: { description: description + how, mimeType: "application/json", inputSchema: joinInput(seatDesc), outputSchema: joinOutput, discoverable },
   });
   // Every judge route's payment request carries the advisory sentence, before the "how" text (judge-tier spec v2.1, §4).
-  const judged = (d: string) => `${d} ${JUDGE_ADVISORY}`;
+  // While the content screen is on, the submission rule goes with it (customers are told before they pay).
+  const judged = (d: string) => `${d} ${JUDGE_ADVISORY}${screenMode(env) !== "off" ? ` ${SUBMIT_RULE}` : ""}`;
   const multiJudgeText = (n: number) =>
     `Agent Referee — a panel of 3 independent AI judges from three different companies decides between two AI agents by rules both agreed to; each side submits ${n} pieces of up to ${MULTI_JUDGE_LIMITS.maxPiece} characters, and every judge reads all of them. Majority wins; every vote is in the signed receipt. Each agent pays this to join; the payment settles once both seats are filled. A paid match that can't be judged is refunded by hand from the operator's refund list.`;
   // x402.org is testnet-only. For real money set FACILITATOR_URL to a mainnet facilitator (see README).
@@ -674,8 +675,7 @@ async function forward(env: Env, id: string, action: string, body?: unknown) {
 
 // The content screen's layer 2a (screen.ts): a secret in customer text is refused before any AI provider sees it.
 // Off unless CONTENT_SCREEN is "shadow" or "enforce". Logs the route and kinds only, never the text.
-const SUBMIT_REFUSED =
-  "Nothing was submitted: send it again without that before the deadline. A refused submission counts as not submitted; if no submission from this seat is accepted by the deadline, the seat forfeits, with no refund (the terms say so before you pay).";
+const SUBMIT_REFUSED = `Nothing was submitted. ${SUBMIT_RULE.slice(SUBMIT_RULE.indexOf("A refused submission"))}`;
 async function screenIntake(c: any, body: unknown, after: string, charged: false | "already_settled" = false): Promise<Response | null> {
   if (screenMode(c.env) === "off") return null;
   const hits = intakeCheck(body);
@@ -720,6 +720,7 @@ function docPrices(env: Env): Record<string, string> {
     free_reviews: freeReviewsLabel(env),
     ...(multiOnForAll(env) ? { ...multiPrices(env), multi_reviews: "on" } : {}),
     ...(multiJudgeOnForAll(env) ? { multi_judges: "on" } : {}),
+    ...(screenMode(env) !== "off" ? { content_rule: `${REQUEST_RULE} ${SUBMIT_RULE}` } : {}),
     // judge-3's default panel closed (waiting for a third company, or Claude judges off): the docs say so, once. The
     // wait's own reason already says agents can name a company (re-read R3).
     ...(judgeTierClosed(env, "judge-3")
@@ -755,6 +756,7 @@ app.get("/", (c) => {
       "A neutral third party that settles disagreements between AI agents. Every random outcome uses commit-reveal so no agent (and not this server) can rig it, and every result comes with an Ed25519-signed receipt.",
     payment: { protocol: "x402", network: c.env.NETWORK, asset: "USDC", pay_to: c.env.PAY_TO },
     ...(paidPaused(c.env) ? { notice: PAUSED_MSG } : {}),
+    ...(screenMode(c.env) !== "off" ? { content_rule: `${REQUEST_RULE} ${SUBMIT_RULE}` } : {}),
     tiers: {
       "1 rps": { tier: "rps", seats: 2, price_per_seat: p.rps, what: "Rock-paper-scissors; ties replay free." },
       "2 rps-bo3": { tier: "rps-bo3", seats: 2, price_per_seat: p["rps-bo3"], what: "Best of 3 rock-paper-scissors; ties don't count." },
@@ -1077,6 +1079,7 @@ app.get("/judge", async (c) => {
   return c.json({
     advisory: JUDGE_ADVISORY,
     human_review: JUDGE_HUMAN_REVIEW,
+    ...(screenMode(c.env) !== "off" ? { content_rule: SUBMIT_RULE } : {}),
     claude_judges_enabled: claudeJudgesOn(c.env),
     ...commit,
     panels: {
