@@ -6,7 +6,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { INTAKE_PATTERNS, intakeCheck, screenMode, REFUSAL_RECEIPT_FORMAT, REQUEST_RULE, SUBMIT_RULE } from "../src/screen.ts";
+import { BUILT_IN_POLICY, INTAKE_PATTERNS, intakeCheck, screenMode, REFUSAL_RECEIPT_FORMAT, REQUEST_RULE, SUBMIT_RULE } from "../src/screen.ts";
+import { canonicalJson } from "../src/logic.ts";
 import { verifyReceipt } from "../src/receipt.ts";
 import { scrubText } from "./fixtures/find-scrub-v1.mjs";
 import { Gate } from "../src/gate.ts";
@@ -34,50 +35,85 @@ const fake = {
 
 // ---------- the check itself ----------
 
+const cp = (...c: number[]) => c.map((x) => String.fromCodePoint(x)).join("");
+const hex64 = "4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318";
+const keyBody = () => Buffer.from(crypto.getRandomValues(new Uint8Array(48))).toString("base64");
+
 test("each kind of secret is found, by field and line, never echoing the text", () => {
+  const body = keyBody();
   const cases: Array<[string, string]> = [
-    [fake.openai, "api_key"], [fake.stripe, "api_key"], [fake.aws, "api_key"], [fake.github, "api_key"], [fake.slack, "api_key"],
-    [fake.google, "api_key"], [fake.pem, "private_key"], [fake.url, "url_credentials"], [fake.bearer, "bearer_token"],
+    [fake.openai, "api_key"], [fake.stripe, "api_key"], [fake.aws, "api_key"], [fake.github, "api_key"], [fake.slack, "api_key"], [fake.google, "api_key"],
+    [`${fake.pem}\n${body}\n-----END RSA PRIVATE KEY-----`, "private_key"],
+    [`${fake.pem}\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,ABCD\n\n${body}`, "private_key"],
+    [`"private_key": "${fake.pem}\\n${body}\\n-----END RSA PRIVATE KEY-----\\n"`, "private_key"],
+    [fake.url, "url_credentials"], ["redis://:" + "Tr0ub4dor3xQ" + "@cache:6379", "url_credentials"],
+    [`{"a":"http://localhost:5173/x","b":"postgres://u:${"r3alPassW"}@db"}`, "url_credentials"],
+    [`postgres://u:<password>@h,postgres://u:${"r3alPassW"}@h2`, "url_credentials"],
+    ["https://u:pa$word123@db", "url_credentials"],
+    ["https://u:$ecretP4ss@db", "url_credentials"], // a real password starting with "$" isn't a $VAR
+    [`postgres://u:${"r3alPassW"}@db.example.com/app?admin=ops@corp`, "url_credentials"], // a later "@" and "example" don't hide it
+    [fake.bearer, "bearer_token"],
+    [`const PRIVATE_KEY = "0x${hex64}";`, "wallet_key"],
+    [`mnemonic: "${"abandon ability able about above absent absorb abstract absurd abuse access accident"}"`, "seed_phrase"],
+    ["client-key-data: " + Buffer.from(`${fake.pem}\n${body}${body}${body}${body}\n`).toString("base64"), "encoded_private_key"],
   ];
   for (const [secret, kind] of cases) {
     const hits = intakeCheck({ task: "Review this config file for mistakes.", output: `line one\nconst x = 1;\n${secret}\n` });
-    assert.deepEqual(hits, [{ field: "output", line: 3, kind }], secret.slice(0, 6));
+    assert.deepEqual(hits, [{ field: "output", line: 3, kind }], `${kind}: ${secret.slice(0, 12)}`);
     assert.ok(!JSON.stringify(hits).includes(secret.slice(4, 14)), "the hit holds no part of the secret");
   }
-  // Nested fields: pieces, criteria, rules.
+  // Nested fields: pieces, criteria names, rules.
   assert.deepEqual(intakeCheck({ pieces: [{ text: "ok" }, { name: "env", text: `a\nb\n${fake.github}` }] }), [{ field: "pieces[1].text", line: 3, kind: "api_key" }]);
   assert.deepEqual(intakeCheck({ rules: `Judge fairly.\n${fake.stripe}` }), [{ field: "rules", line: 2, kind: "api_key" }]);
+  assert.deepEqual(intakeCheck({ criteria: [{ name: fake.github, weight: 1 }] }), [{ field: "criteria[0].name", line: 1, kind: "api_key" }]);
 });
 
-test("a zero-width character can't split a key past the check", () => {
-  const split = fake.github.slice(0, 10) + "​" + fake.github.slice(10);
-  assert.equal(intakeCheck({ output: split })[0]?.kind, "api_key");
+test("invisible characters can't split a key past the check: format characters, tags, the line separator, joiners", () => {
+  for (const c of [0x200b, 0x180e, 0xe0041, 0x2028, 0x34f, 0xfe0f, 0xad, 0x2060, 0xfeff])
+    assert.equal(intakeCheck({ output: fake.github.slice(0, 10) + cp(c) + fake.github.slice(10) })[0]?.kind, "api_key", `U+${c.toString(16)}`);
 });
 
-test("ordinary code and documentation pass: hashes, base64, the word token, placeholders", () => {
+test("ordinary code and documentation pass: hashes, base64, the word token, placeholders, headers without a key, dev URLs", () => {
   const ok = [
     "sha256 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    `tx hash 0x${hex64} (the private key signed it)`,
+    `public key 0x${hex64}`,
     "const token = await getToken(); // the session token from the login step",
     "password = process.env.DB_PASSWORD",
     "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
     "Authorization: Bearer YOUR_API_KEY_HERE",
+    "Authorization: Bearer ACCESS_TOKEN_GOES_HERE",
     "Authorization: Bearer <token>",
     "Authorization: Bearer ${process.env.TOKEN}",
+    "authorization: Bearer wrong-token-wrong-token-wrong-token",
     "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE",
     "OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxx",
     "postgres://user:<password>@localhost:5432/db",
     "https://user:${PASS}@example.com",
-    "-----BEGIN PUBLIC KEY-----",
+    "https://user:$DB_PASS@example.com",
+    "https://user:%DB_PASS%@example.com",
+    "http://localhost:5173/@vite/client",
+    '{"registry":"http://localhost:4873/@scope%2fpkg","email":"a@b.c"}',
+    'const pemHeader = "-----BEGIN PRIVATE KEY-----";\nconst pemFooter = "-----END PRIVATE KEY-----";',
+    "-----BEGIN RSA PRIVATE KEY-----\nXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX\n-----END RSA PRIVATE KEY-----",
+    "-----BEGIN PUBLIC KEY-----\n" + keyBody(),
     "-----BEGIN CERTIFICATE-----",
+    'mnemonic = "test test test test test test test test test test test junk"',
     "The skin-deep tasks: risk assessment, asking for 12 apples.",
   ];
   for (const line of ok) assert.deepEqual(intakeCheck({ output: line }), [], line);
 });
 
-test("the server's own tokens and ids are never screened as customer text", () => {
-  assert.deepEqual(intakeCheck({ seat: "a", seat_token: fake.github, match_id: fake.github, key: fake.github, pieces: [{ text: "fine" }] }), []);
-  // ...but only at the top level: a customer field with the same name inside the text still counts.
-  assert.equal(intakeCheck({ pieces: [{ text: "x", seat_token: fake.github }] }).length, 1);
+test("a crafted long line costs milliseconds, not seconds, at the field limit", () => {
+  const line = "a://b:".repeat(2000); // 12,000 characters, the longest validated field
+  const t0 = Date.now();
+  intakeCheck({ output: line });
+  intakeCheck({ output: "x@" + line });
+  assert.ok(Date.now() - t0 < 400, `${Date.now() - t0} ms`);
+});
+
+test("an input with more strings than any validated field set can hold is refused, not passed unscreened", () => {
+  assert.deepEqual(intakeCheck({ pad: Array(300).fill(""), output: "fine" }), [{ field: "(input)", line: 0, kind: "too_complex" }]);
 });
 
 test("CONTENT_SCREEN: off unless shadow or enforce", () => {
@@ -197,13 +233,19 @@ async function logsOf(fn: () => Promise<void>): Promise<string> {
   try { await fn(); } finally { Object.assign(console, saved); }
   return lines.join("\n");
 }
+const get = async (e: any, path: string) => {
+  const res = await app.fetch(new Request(`https://x${path}`, { headers: { accept: "application/json", "cf-connecting-ip": "203.0.113.7" } }), e, ctx);
+  const text = await res.text();
+  return { status: res.status, text, body: (() => { try { return JSON.parse(text); } catch { return null; } })() as any };
+};
 const withSecret = { task: "Check this deploy script for mistakes.", output: `#!/bin/sh\nexport KEY=${fake.github}\nwrangler deploy` };
 const clean = { task: "Check this deploy script for mistakes.", output: "#!/bin/sh\nwrangler deploy" };
+const RULES = "Pick the plan with fewer steps that still meets every requirement; on a tie, pick alpha.";
 
-function assertRefusal(r: { status: number; text: string; body: any }, field: string, line: number) {
+function assertRefusal(r: { status: number; text: string; body: any }, field: string, line: number, kind = "an API key or access token") {
   assert.equal(r.status, 422, r.text);
   assert.equal(r.body.code, "secret_in_input");
-  assert.match(r.body.error, new RegExp(`${field.replace(/[[\].]/g, "\\$&")} line ${line} \\(an API key or access token\\)`));
+  assert.match(r.body.error, new RegExp(`${field.replace(/[[\].]/g, "\\$&")} line ${line} \\(${kind}\\)`));
   assert.ok(!r.text.includes(fake.github.slice(4)), "the response never holds the secret");
   assert.equal(r.body.receipt.payload.receipt_format, REFUSAL_RECEIPT_FORMAT);
   assert.equal(r.body.receipt.payload.label, "secrets");
@@ -215,12 +257,13 @@ t("off: nothing is screened (today's behaviour)", async () => {
   assert.equal(r.status, 200, r.text);
 });
 
-t("a paid review with a secret: refused 422 with a signed refusal-v1 receipt, never settled, no AI call, nothing logged", async () => {
+t("a paid review with a secret: refused 422 with a signed refusal-v1 receipt, never settled, no provider call, nothing logged", async () => {
   const f = fakeFacilitator();
   let r: any;
   try {
+    // FAKE_AI off: a reviewer that ran would really call its provider (and be counted in f.calls.other).
     const logs = await logsOf(async () => {
-      r = await call(env({ PAYMENTS_ENABLED: "true" }), "/review-3", withSecret, { "x-payment": payHeader("0x" + "a".repeat(40), "200000") });
+      r = await call(env({ PAYMENTS_ENABLED: "true", FAKE_AI: "false" }), "/review-3", withSecret, { "x-payment": payHeader("0x" + "a".repeat(40), "200000") });
     });
     assertRefusal(r, "output", 2);
     assert.match(r.body.error, /Nothing was charged\./);
@@ -255,33 +298,107 @@ t("enforce refuses the same way (2a is the same in shadow and enforce)", async (
   assertRefusal(await call(env({ CONTENT_SCREEN: "enforce" }), "/review", withSecret), "output", 2);
 });
 
-t("multi-part review, free review and match creation are screened too", async () => {
-  const multi = { task: "Check the handoff: every fact is right.", pieces: [{ text: "Piece one." }, { name: "env", text: `a\n${fake.github}` }] };
-  assertRefusal(await call(env({ MULTI_PART_ENABLED: "true" }), "/review-3x2", multi), "pieces[1].text", 2);
-  const free = await call(env({ FREE_REVIEW_DAILY_BUDGET_USD: "3.00" }), "/free/review", withSecret);
-  assertRefusal(free, "output", 2);
-  assert.match(free.body.error, /Your free review wasn't used\./);
-  const m = await call(env(), "/matches", { tier: "judge", rules: `Pick the better plan.\nDeploy with ${fake.github}` });
-  assertRefusal(m, "rules", 2);
-  assert.match(m.body.error, /No match was created and nothing was charged\./);
+t("the screen answers after the region and sanctions checks: a sanctioned caller gets the region refusal, no signed receipt", async () => {
+  for (const path of ["/review", "/free/review"]) {
+    const r = await call(env({ FREE_REVIEW_DAILY_BUDGET_USD: "3.00" }), path, withSecret, { "cf-ipcountry": "CU" });
+    assert.equal(r.status, 451, `${path}: ${r.text}`);
+    assert.equal(r.body.receipt, undefined);
+  }
 });
 
-t("a refused match submission: not submitted, the forfeit rule stated, receipt says already settled", async () => {
-  const r = await call(env(), `/matches/${"0".repeat(24)}/submit`, { seat: "a", seat_token: "b".repeat(64), position: `My plan.\n\nUse ${fake.github}` });
+t("without a configured policy hash the receipt signs the built-in policy's hash and says so", async () => {
+  const r = await call(env({ CONTENT_POLICY_SHA256: undefined }), "/review", withSecret);
+  assert.equal(r.status, 422, r.text);
+  assert.equal(r.body.receipt.payload.policy_sha256, createHash("sha256").update(canonicalJson(BUILT_IN_POLICY)).digest("hex"));
+  assert.equal(r.body.receipt.payload.policy_source, BUILT_IN_POLICY.version);
+});
+
+t("every route that carries customer text is screened, in every text field: review tiers, team, free, internal free, multi-part, match creation", async () => {
+  const TEAM = { TEAM_TOKEN: "t".repeat(40), TEAM_MEMBERS: "5.0", TEAM_MEMBER_DAILY_USD: "0.50", TEAM_DAILY_USD: "0.80" };
+  const INTERNAL = "i".repeat(40);
+  const inTitle = { ...clean, title: `deploy ${fake.github}` };
+  const inCriteria = { ...clean, criteria: [{ name: "accuracy", weight: 2 }, { name: fake.github, weight: 1 }] };
+  const multi = (n: number) => ({ task: "Check the handoff: every fact is right.", pieces: Array.from({ length: n }, (_, i) => ({ text: i === 1 ? `a\n${fake.github}` : `Piece ${i + 1}.` })) });
+  const cases: Array<[Record<string, unknown>, string, unknown, Record<string, string>, string, number, string]> = [
+    [{}, "/review", withSecret, {}, "output", 2, "Nothing was charged."],
+    [{}, "/review-3", inTitle, {}, "title", 1, "Nothing was charged."],
+    [{}, "/review-3", inCriteria, {}, "criteria[1].name", 1, "Nothing was charged."],
+    [{ MULTI_PART_ENABLED: "true" }, "/review-3x2", multi(2), {}, "pieces[1].text", 2, "Nothing was charged."],
+    [{ MULTI_PART_ENABLED: "true" }, "/review-3x3", multi(3), {}, "pieces[1].text", 2, "Nothing was charged."],
+    [TEAM, "/team/review", withSecret, { "x-team-token": TEAM.TEAM_TOKEN, "x-team-member": "5.0" }, "output", 2, "Nothing was charged."],
+    [{ ...TEAM, MULTI_PART_ENABLED: "true" }, "/team/review-3x2", multi(2), { "x-team-token": TEAM.TEAM_TOKEN, "x-team-member": "5.0" }, "pieces[1].text", 2, "Nothing was charged."],
+    [{ FREE_REVIEW_DAILY_BUDGET_USD: "3.00" }, "/free/review", withSecret, {}, "output", 2, "Your free review wasn't used."],
+    [{ FREE_REVIEW_DAILY_BUDGET_USD: "3.00" }, "/free/review-3", inTitle, {}, "title", 1, "Your free review wasn't used."],
+    [{ INTERNAL_TOKEN: INTERNAL, EXT_FREE_DAILY_BUDGET_USD: "1.00" }, "/internal/free/review", withSecret, { "x-internal-auth": INTERNAL, "x-caller-id": "user-1" }, "output", 2, "Your free review wasn't used."],
+    [{}, "/matches", { tier: "judge", seats: ["alpha", "beta"], rules: `${RULES}\nDeploy with ${fake.github}` }, {}, "rules", 2, "No match was created and nothing was charged."],
+    [{}, "/matches", { tier: "judge", seats: ["alpha", "beta"], rules: RULES, title: fake.github }, {}, "title", 1, "No match was created and nothing was charged."],
+    [{}, "/matches", { tier: "judge", seats: ["alpha", "beta"], rules: RULES, criteria: [{ name: fake.github, weight: 1 }] }, {}, "criteria[0].name", 1, "No match was created and nothing was charged."],
+  ];
+  for (const [extra, path, body, headers, field, line, after] of cases) {
+    const r = await call(env(extra), path, body, headers);
+    assertRefusal(r, field, line);
+    assert.ok(r.body.error.endsWith(after), `${path}: ${r.body.error.slice(-60)}`);
+  }
+});
+
+t("a refused match creation creates nothing: the same key then creates a fresh match", async () => {
+  const e = env();
+  const key = "screen-" + "k".repeat(20);
+  const refused = await call(e, "/matches", { tier: "judge", seats: ["alpha", "beta"], rules: `${RULES}\n${fake.github}`, key });
+  assertRefusal(refused, "rules", 2);
+  const again = await call(e, "/matches", { tier: "judge", seats: ["alpha", "beta"], rules: RULES, key });
+  assert.equal(again.status, 201, again.text);
+  assert.equal(again.body.existing, undefined, "no match existed under that key");
+  // Input the match object would refuse anyway isn't screened here: it gets the same error as before.
+  const bad = await call(e, "/matches", { tier: "judge", seats: ["alpha"], rules: fake.github });
+  assert.notEqual(bad.status, 422);
+  assert.ok(bad.status >= 400 && bad.status < 500, bad.text);
+});
+
+t("a refused submission, after the seat check, changes nothing: the seat is still waited on and can submit again; the receipt names match, seat and tier", async () => {
+  const e = env();
+  const c = await call(e, "/matches", { tier: "judge", seats: ["alpha", "beta"], rules: RULES });
+  assert.equal(c.status, 201, c.text);
+  const id = c.body.match_id;
+  const tok: Record<string, string> = {};
+  for (const s of ["alpha", "beta"]) {
+    const j = await call(e, "/join/judge", { match_id: id, seat: s });
+    assert.equal(j.status, 200, j.text);
+    tok[s] = j.body.seat_token;
+  }
+  // The seat check comes first: a secret with a bad token is a 403, and the token itself is never screened.
+  const wrongToken = await call(e, `/matches/${id}/submit`, { seat: "alpha", seat_token: fake.github, position: `Plan A.\n${fake.github}` });
+  assert.equal(wrongToken.status, 403, wrongToken.text);
+  const r = await call(e, `/matches/${id}/submit`, { seat: "alpha", seat_token: tok.alpha, position: `My plan.\n\nUse ${fake.github}` });
   assertRefusal(r, "position", 3);
   assert.match(r.body.error, /Nothing was submitted.*forfeits, with no refund/);
-  assert.equal(r.body.receipt.payload.charged, "already_settled");
-  // A clean submit goes on to the match as before (an unknown match answers as it always has, not 422).
-  const ok = await call(env(), `/matches/${"0".repeat(24)}/submit`, { seat: "a", seat_token: "b".repeat(64), position: "My plan." });
-  assert.notEqual(ok.status, 422);
+  const p = r.body.receipt.payload;
+  assert.equal(p.charged, "already_settled");
+  assert.deepEqual([p.match_id, p.seat, p.tier], [id, "alpha", "judge"]);
+  const st = await get(e, `/matches/${id}`);
+  assert.equal(st.body.phase, "submit");
+  assert.deepEqual(st.body.waiting_on.sort(), ["alpha", "beta"], "alpha is still waited on");
+  assert.equal((await call(e, `/matches/${id}/submit`, { seat: "alpha", seat_token: tok.alpha, position: "My plan." })).status, 200);
+  assert.deepEqual((await get(e, `/matches/${id}`)).body.waiting_on, ["beta"]);
 });
 
-const get = async (e: any, path: string) => {
-  const res = await app.fetch(new Request(`https://x${path}`, { headers: { accept: "application/json", "cf-connecting-ip": "203.0.113.7" } }), e, ctx);
-  const text = await res.text();
-  return { status: res.status, text, body: (() => { try { return JSON.parse(text); } catch { return null; } })() as any };
-};
-const RULES = "Pick the plan with fewer steps that still meets every requirement; on a tie, pick alpha.";
+t("multi-part judge submissions are screened piece by piece, after the seat check", async () => {
+  const e = env({ MULTI_JUDGE_ENABLED: "true" });
+  const c = await call(e, "/matches", { tier: "judge-3x2", seats: ["alpha", "beta"], rules: RULES });
+  assert.equal(c.status, 201, c.text);
+  const id = c.body.match_id;
+  const tok: Record<string, string> = {};
+  for (const s of ["alpha", "beta"]) {
+    const j = await call(e, "/join/judge-3x2", { match_id: id, seat: s });
+    assert.equal(j.status, 200, j.text);
+    tok[s] = j.body.seat_token;
+  }
+  const r = await call(e, `/matches/${id}/submit`, { seat: "alpha", seat_token: tok.alpha, pieces: [{ text: "Piece one." }, { text: `Piece two.\n${fake.github}` }] });
+  assertRefusal(r, "pieces[1].text", 2);
+  assert.equal(r.body.receipt.payload.seat, "alpha");
+  const st = await get(e, `/matches/${id}`);
+  assert.ok(st.body.waiting_on.includes("alpha"), st.text);
+});
 
 t("customers are told before they pay: the submission rule in the judge 402, every judge match view, GET /judge, GET / and /llms.txt, only while the screen is on", async () => {
   const on = env({ PAYMENTS_ENABLED: "true" });
