@@ -14,6 +14,7 @@
 
 import { canonicalJson, sha256Hex } from "./logic.ts";
 import { signReceipt, type Receipt } from "./receipt.ts";
+import { BIP39_ENGLISH } from "./bip39-english.ts";
 
 export type ScreenMode = "off" | "shadow" | "enforce";
 
@@ -65,7 +66,7 @@ const DEV_MNEMONICS = new Set([
 ]);
 const PHRASE = /(?<![A-Za-z0-9])(mnemonic|seed|passphrase|pass[ _-]phrase|(?:seed|recovery)[ _-]?phrase)(["']?\s*[:=]\s*)(.{8,})$/i; // find's PHRASE, one match per line
 const URL_NO_USER = /\b[a-z][a-z0-9+.-]*:\/\/:([^\s@]+)@/gi; // "redis://:password@host", which find's pattern misses
-const B64_PEM = /(?<![A-Za-z0-9+/])LS0tLS1CRUdJTi[A-Za-z0-9+/]{60,}={0,2}/g; // base64 of "-----BEGIN" and more (wrapped at 64 or 76 too)
+const B64_PEM = /(?<![A-Za-z0-9+/])LS0tLS1CRUdJTi[A-Za-z0-9+/]{50,}={0,2}/g; // base64 of "-----BEGIN" and more: 64+ characters, so a line wrapped at 64 or 76 counts
 const SEED_LABEL = /mnemonic|seed|recovery[ _-]?(?:phrase|words)|pass[ _-]?phrase|secret[ _-]?(?:phrase|words)|backup[ _-]?phrase/i;
 const SERVER_KINDS: Record<string, string> = { wallet_key: "a wallet private key", seed_phrase: "a seed phrase", encoded_private_key: "a base64-encoded private key" };
 
@@ -132,7 +133,7 @@ function realMatch(kind: string, m: RegExpExecArray, lines: string[], i: number)
     const authority = slash === -1 ? after : after.slice(0, slash);
     const firstAt = after.indexOf("@"), lastAt = authority.lastIndexOf("@");
     // The host after a given "@", read from the line itself (the match ends at the run's last "@").
-    const hostAfter = (at: number) => lines[i].slice(m.index + m[1].length + at + 1).match(/^[^/:\s"'?#,]*/)?.[0] ?? "";
+    const hostAfter = (at: number) => hostAt(lines[i], m.index + m[1].length + at + 1);
     return realUrlPassword(after.slice(0, firstAt), user, hostAfter(firstAt)) || (lastAt > firstAt && realUrlPassword(authority.slice(0, lastAt), user, hostAfter(lastAt), true));
   }
   if (kind === "bearer_token") {
@@ -145,6 +146,8 @@ function realMatch(kind: string, m: RegExpExecArray, lines: string[], i: number)
   return !plainPlaceholder(m[0]) && !ascending(body) && distinct(body) >= 8;
 }
 
+/** The host that starts at `at`: a bracketed IPv6 address whole ("[::1]"), else up to the port, path or query. */
+const hostAt = (line: string, at: number) => /^(?:\[[^\]\s]*\]|[^/:\s"'?#,]*)/.exec(line.slice(at))?.[0] ?? "";
 const DEV_HOSTS = /^(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|host\.docker\.internal)$/i;
 const DEV_PASSWORDS = /^(?:postgres|guest|root|admin|test|foobared|mysql|redis|rabbitmq|minio(?:admin)?|dev)$/i;
 /** A URL password: valid userinfo (no "/", quotes, spaces or brackets; a raw "@" only when `withAt`), not a placeholder,
@@ -163,10 +166,10 @@ const TOO_COMPLEX = Symbol("too complex");
 function* everyMatch(re: RegExp, line: string): Generator<RegExpExecArray | typeof TOO_COMPLEX> {
   const r = new RegExp(re.source, re.flags.includes("g") ? re.flags : re.flags + "g");
   for (let from = 0, n = 0; from <= line.length; n++) {
-    if (n >= MAX_STARTS) { yield TOO_COMPLEX; return; }
     r.lastIndex = from;
     const m = r.exec(line);
     if (!m) return;
+    if (n >= MAX_STARTS) { yield TOO_COMPLEX; return; } // a 201st match: past the cap
     yield m;
     from = m.index + 1;
   }
@@ -190,17 +193,18 @@ function urlScanLine(line: string): string | null {
   return any ? out : null;
 }
 
-/** 12 to 24 BIP39-shaped words (lowercase, 3 to 8 letters, at least 8 different), not a published dev mnemonic. */
+/** 12 to 24 words, every one on the BIP39 English list (which leaves out "the", "and", "for", "with", so prose fails),
+ * at least 8 different, and not a published dev mnemonic. */
 function seedWords(text: string): boolean {
   const words = text.trim().replace(/^["'`]|["'`,;]+$/g, "").trim().split(/\s+/);
-  return [12, 15, 18, 21, 24].includes(words.length) && words.every((w) => /^[a-z]{3,8}$/.test(w)) && new Set(words).size >= 8 && !DEV_MNEMONICS.has(words.join(" "));
+  return [12, 15, 18, 21, 24].includes(words.length) && words.every((w) => BIP39_ENGLISH.has(w)) && new Set(words).size >= 8 && !DEV_MNEMONICS.has(words.join(" "));
 }
 
 function serverHits(line: string, prev: string): string[] {
   const kinds: string[] = [];
   for (const m of line.matchAll(WALLET_KEY)) {
     const hex = m[0].replace(/^0x/, "").toLowerCase();
-    if (distinct(hex) < 10 || DEV_KEYS.has(hex)) continue;
+    if (distinct(hex) < 10 || DEV_KEYS.has(hex) || ascending(hex) || repeated(hex)) continue; // typed and repeated values are placeholders
     const labels = [...line.slice(Math.max(0, m.index! - 80), m.index).matchAll(WALLET_LABEL)];
     const near = labels[labels.length - 1];
     if (near && near[2] && !near[1] && !near[3]) { kinds.push("wallet_key"); break; }
@@ -213,7 +217,7 @@ function serverHits(line: string, prev: string): string[] {
     kinds.push("seed_phrase");
   if (line.includes("://:"))
     for (const m of line.matchAll(URL_NO_USER)) {
-      const host = line.slice(m.index! + m[0].length).match(/^[^/:\s"'?#,]*/)?.[0] ?? "";
+      const host = hostAt(line, m.index! + m[0].length);
       if (realUrlPassword(m[1], "", host)) { kinds.push("url_credentials"); break; }
     }
   if (line.includes("LS0tLS1CRUdJTi")) for (const m of line.matchAll(B64_PEM)) {

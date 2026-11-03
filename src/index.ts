@@ -2032,9 +2032,11 @@ for (const action of ["commit", "reveal", "submit", "retry-judge", "rematch"]) {
       const res = await forward(c.env, id, action, body ?? {});
       if (res.headers.get("x-content-screen") === "refused") stat(c, "screen_2a_refused");
       else if (res.status < 300 && (body as any)?.allow_secrets === true && screenMode(c.env) !== "off") {
+        // Only where the match screens submissions: its view carries content_rule (created while the screen was on).
+        const shown = !!((await res.clone().json().catch(() => null)) as any)?.match?.content_rule;
         const b: any = body;
         const fields = Array.isArray(b.pieces) ? { pieces: b.pieces.map((p: any) => ({ text: String(p?.text ?? "") })) } : { position: String(b.position ?? "") };
-        if (intakeCheck(fields).length) stat(c, "screen_2a_allowed");
+        if (shown && intakeCheck(fields).length) stat(c, "screen_2a_allowed");
       }
       return res;
     }

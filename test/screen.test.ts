@@ -67,6 +67,7 @@ test("each kind of secret is found, by field and line, never echoing the text", 
     [`DEPLOYER_KEY=0x${hex64}`, "wallet_key"],
     [`Mnemonic phrase: ${"abandon ability able about above absent absorb abstract absurd abuse access accident"}`, "seed_phrase"],
     ["client-key-data: " + Buffer.from(`${fake.pem}\n${body}${body}${body}${body}\n`).toString("base64").slice(0, 76), "encoded_private_key"], // wrapped at 76
+    [Buffer.from(`${fake.pem}\n${body}${body}${body}${body}\n`).toString("base64").slice(0, 64), "encoded_private_key"], // wrapped at 64 (openssl base64)
     [fake.bearer, "bearer_token"],
     [`const PRIVATE_KEY = "0x${hex64}";`, "wallet_key"],
     [`mnemonic: "${"abandon ability able about above absent absorb abstract absurd abuse access accident"}"`, "seed_phrase"],
@@ -126,6 +127,12 @@ test("ordinary code and documentation pass: hashes, base64, the word token, plac
     `mysql://root:root@127.0.0.1:3306/db`,
     `redis://:foobared@localhost:6379/0`,
     `${pg}app:${pw}@localhost:5432/dev`,
+    `redis://:${pw}@[::1]:6379`, // a bracketed IPv6 local host
+    `${pg}u:${pw}@[::1]:5432/db`,
+    `PRIVATE_KEY=0x${"0123456789abcdef".repeat(4)}`, // a typed run, not a key
+    `WALLET_KEY=0x${"ab12".repeat(16)}`, // a repeated unit
+    "Seed the database:\nthe quick brown fox jumps over the lazy dog and then runs", // prose: "the" and "and" aren't BIP39 words
+    "recovery phrase: please write down all twelve of the words shown on your screen", // 12 words of prose after a label
     "OPENAI_API_KEY=sk-abcdef1234567890abcdef", // a typed run: a docs fake
     "const tx = await wallet.sendTransaction(tx); // hash 0x" + "4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318",
     "The skin-deep tasks: risk assessment, asking for 12 apples.",
@@ -149,6 +156,9 @@ test("a crafted long line costs milliseconds, not seconds, at the field limit", 
     intakeCheck({ output: line.slice(0, 12000) });
     assert.ok(performance.now() - t0 < 12, `${line.slice(0, 12)}: ${(performance.now() - t0).toFixed(1)} ms warm`);
   }
+  // The cap: 200 URL matches on a line are examined; a 201st makes the line too complex (fail closed).
+  assert.deepEqual(intakeCheck({ output: "a://u:p@".repeat(200) }), []);
+  assert.deepEqual(intakeCheck({ output: "a://u:p@".repeat(201) }).map((h) => h.kind), ["too_complex"]);
   // Same matches as the full line: a placeholder URL then a real one, in one word and in two.
   assert.equal(intakeCheck({ output: `${pg}u:<password>@h,${pg}u:${pw}@h2` })[0]?.kind, "url_credentials");
   assert.equal(intakeCheck({ output: `see ${pg}u:<password>@h and ${pg}u:${pw}@h2 too` })[0]?.kind, "url_credentials");
@@ -156,6 +166,19 @@ test("a crafted long line costs milliseconds, not seconds, at the field limit", 
 
 test("an input with more strings than any validated field set can hold is refused, not passed unscreened", () => {
   assert.deepEqual(intakeCheck({ pad: Array(300).fill(""), output: "fine" }), [{ field: "(input)", line: 0, kind: "too_complex" }]);
+});
+
+test("the vendored BIP39 English list is the 2048 words pinned, and equals @scure/bip39's where installed", async () => {
+  const { BIP39_ENGLISH, BIP39_ENGLISH_SHA256 } = await import("../src/bip39-english.ts");
+  assert.equal(BIP39_ENGLISH.size, 2048);
+  assert.equal(createHash("sha256").update([...BIP39_ENGLISH].join(" ")).digest("hex"), BIP39_ENGLISH_SHA256);
+  assert.equal(BIP39_ENGLISH_SHA256, "f18b9a84c83e38e98eceb0102b275e26438af83ab08f080cdb780a2caa9f3a6d", "the pinned list");
+  try {
+    const { wordlist } = await import("@scure/bip39/wordlists/english" as string);
+    assert.deepEqual([...BIP39_ENGLISH], wordlist);
+  } catch (e: any) {
+    if (!/Cannot find|ERR_MODULE_NOT_FOUND|ERR_PACKAGE_PATH/.test(String(e?.code ?? e?.message ?? e))) throw e;
+  }
 });
 
 test("CONTENT_SCREEN: off unless shadow or enforce", () => {
@@ -426,8 +449,12 @@ t("turning the screen on never forfeits a match whose seats weren't told: submis
   e.CONTENT_SCREEN = "shadow"; // the switch, after creation
   const j = await call(e, "/join/judge", { match_id: c.body.match_id, seat: "alpha" });
   assert.equal((await call(e, "/join/judge", { match_id: c.body.match_id, seat: "beta" })).status, 200);
-  const r = await call(e, `/matches/${c.body.match_id}/submit`, { seat: "alpha", seat_token: j.body.seat_token, position: `Plan.\n${fake.github}` });
+  const r = await call(e, `/matches/${c.body.match_id}/submit`, { seat: "alpha", seat_token: j.body.seat_token, position: `Plan.\n${fake.github}`, allow_secrets: true });
   assert.equal(r.status, 200, r.text);
+  // Nothing was screened, so nothing is counted as an allowed pass either.
+  await new Promise((ok) => setTimeout(ok, 50));
+  const res = await app.fetch(new Request("https://x/admin/stats", { headers: { authorization: `Bearer ${"a".repeat(40)}` } }), e, ctx);
+  assert.doesNotMatch(JSON.stringify(await res.json()), /"screen_2a_allowed":\d/);
 });
 
 t("allow_secrets: true passes fake keys on purpose, counted; the team's own routes count without refusing", async () => {
