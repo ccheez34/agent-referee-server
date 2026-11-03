@@ -319,7 +319,7 @@ test("revocations name the approval's nonce; revoke-all; the list is open to any
   assert.deepEqual((await go(e, "/status", {}, OWNER)).body.live, []);
   const list = await go(e, "/approvals");
   assert.equal(list.status, 200);
-  assert.deepEqual([list.body.approvals.map((r: any) => r.payload.type), list.body.policy_version], [["approval", "approval", "revocation", "revocation"], POLICY]);
+  assert.deepEqual([list.body.approvals.map((r: any) => r.payload.type), Object.keys(list.body)], [["approval", "approval", "revocation", "revocation"], ["approvals"]], "exactly what the gate reads (review 2)");
   assert.equal((await go(e, "/status", {})).status, 401, "the owner's status needs his token");
   assert.deepEqual((await go(e, "/status", {}, OWNER)).body.policy, { version: POLICY, members: SEATS, actions: DEFAULT_ACTIONS, max_hours: 24 });
 });
@@ -359,6 +359,82 @@ test("the store keeps approvals 7 days past expiry and revocations 8 days past i
   assert.deepEqual(await types(), []);
 });
 
+test("review 2: the store never drops a record to make room; it refuses new approvals when full (a revocation is never lost)", async () => {
+  const { e, store } = await env();
+  await go(e, "/policy", POL, OWNER);
+  // Fill the store close to the cap through its own door, 20 at a time, then revoke one of the first.
+  const first = (await go(e, "/approve", { ...deploy, count: 20 }, OWNER)).body.approvals[0].payload.nonce;
+  for (let i = 1; i < 99; i++) assert.equal((await go(e, "/approve", { ...deploy, count: 20, target: `npm:fill@${i}` }, OWNER)).status, 200, `batch ${i}`);
+  assert.equal((await go(e, "/revoke", { nonce: first }, OWNER)).status, 200);
+  const before = (await go(e, "/approvals")).body.approvals;
+  assert.equal(before.length, 1981);
+  // 20 more would pass 2000: refused, nothing dropped, the revocation still there.
+  const full = await go(e, "/approve", { ...deploy, count: 20, target: "npm:one-too-many" }, OWNER);
+  assert.deepEqual([full.status, /nothing is dropped/i.test(full.body.error)], [409, true]);
+  const after = (await go(e, "/approvals")).body.approvals;
+  assert.equal(after.length, 1981);
+  assert.ok(after.some((r: any) => r.payload.type === "revocation" && r.payload.nonce === first), "the revocation is still on file");
+  assert.equal((await go(e, "/approve", { ...deploy, count: 19, target: "npm:fits" }, OWNER)).status, 200, "what fits is signed");
+  assert.equal((await go(e, "/revoke", { all: true }, OWNER)).status, 200, "revoking never needs room");
+  assert.ok((await go(e, "/approvals")).body.approvals.length > 2000, "revocations are stored past the cap");
+  const s = (await go(e, "/status", {}, OWNER)).body;
+  assert.deepEqual([s.max_records, typeof s.records], [2000, "number"]);
+  // Old records leave by age, never by count: 8 days on, the store is empty again.
+  store.now = () => Date.now() + 9 * 86_400_000;
+  assert.equal((await go(e, "/approvals")).body.approvals.length, 0);
+});
+
+test("review 2: a request id seen today whose approvals are gone never makes new ones", async () => {
+  const { e, store } = await env();
+  await go(e, "/policy", POL, OWNER);
+  const body = { ...deploy, expires_in_hours: 0.25, request_id: "tap-0005-abcd" };
+  assert.equal((await go(e, "/approve", body, OWNER)).status, 200);
+  // The approvals age out of the store (7 days past a 15-minute expiry) while the request id is still remembered: the
+  // store's clock is moved for the records only, so the id stays within its day.
+  const realNow = Date.now();
+  store.now = () => realNow + 7 * 86_400_000 + 3_600_000;
+  const rids = await store.state.storage.get("rids");
+  rids["tap-0005-abcd"].at = store.now() - 60_000; // seen a minute ago, by the store's clock
+  await store.state.storage.put("rids", rids);
+  const again = await go(e, "/approve", body, OWNER);
+  assert.deepEqual([again.status, /no longer on file/.test(again.body.error)], [409, true]);
+  assert.equal((await go(e, "/approvals")).body.approvals.length, 0, "nothing new was signed");
+});
+
+test("review 2: every store action answers in words when storage fails; the key being unreadable is a 503, not a crash", async () => {
+  const state = (() => {
+    const d = new Map<string, unknown>();
+    let chain: Promise<unknown> = Promise.resolve();
+    const s = {
+      failGet: false,
+      storage: {
+        async get(k: string) { if (s.failGet) throw new Error("storage unavailable"); return structuredClone(d.get(k)); },
+        async put(k: string, v: unknown) { if (s.failGet) throw new Error("storage unavailable"); d.set(k, structuredClone(v)); },
+      },
+      blockConcurrencyWhile<T>(f: () => Promise<T>): Promise<T> {
+        const run = chain.then(f);
+        chain = run.catch(() => {});
+        return run;
+      },
+    };
+    return s;
+  })();
+  const store = new ApprovalStore(state);
+  const e = { OWNER_TOKEN: OWNER, APPROVALS: { idFromName: (x: string) => x, get: () => ({ fetch: (u: string, i?: RequestInit) => store.fetch(new Request(u, i)) }) } } as any;
+  await go(e, "/policy", POL, OWNER);
+  state.failGet = true;
+  for (const [path, body] of [["/approve", deploy], ["/revoke", { all: true }], ["/status", {}], ["/freeze", { on: true }], ["/policy", POL]] as const) {
+    const r = await go(e, path, body, OWNER);
+    assert.equal(r.status, 503, `${path}: ${JSON.stringify(r.body)}`);
+    assert.match(String(r.body.error), /storage unavailable/);
+  }
+  assert.equal((await go(e, "/pubkey")).status, 503);
+  const pub = await go(e, "/approvals");
+  assert.deepEqual([pub.status, pub.body.code], [503, "unavailable"], "gates fail closed when the record can't be read");
+  state.failGet = false;
+  assert.equal((await go(e, "/approve", deploy, OWNER)).status, 200, "it works again afterwards");
+});
+
 test("the page needs no token, loads nothing from elsewhere, never stores the token, and never renders HTML from answers", async () => {
   const { e } = await env();
   const r = await go(e, "/");
@@ -368,5 +444,7 @@ test("the page needs no token, loads nothing from elsewhere, never stores the to
   assert.ok(!/localStorage|sessionStorage|document\.cookie|innerHTML|insertAdjacentHTML|document\.write/.test(PAGE));
   assert.match(PAGE, /b\.disabled=on/, "buttons are off while a request is out");
   assert.match(PAGE, /request_id:rid/, "a repeated Sign sends the same request id");
+  assert.ok(!/<option>deploy<\/option>/.test(PAGE), "the actions come from the policy, not a built-in list (review 2)");
+  assert.match(PAGE, /else rid=crypto\.randomUUID\(\)/, "a policy load that changes the chosen seat or action makes a new request id (review 2)");
   assert.equal((await go(e, "/nope")).status, 404);
 });

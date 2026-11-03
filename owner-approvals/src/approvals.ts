@@ -26,7 +26,9 @@ const MAX_HOURS = 24; // at most a day here, even when the gate policy's approva
 const KEEP_MS = 7 * 86_400_000; // approvals: 7 days past their expiry
 // Revocations: 8 days past issue. An approval lasts at most a day, so its revocation is always kept at least as long.
 const KEEP_REVOCATION_MS = 8 * 86_400_000;
-const MAX_RECORDS = 500;
+// The store refuses new approvals past this many records on file (a record is on file until its keep time ends), so a
+// revocation is never dropped to make room: the owner revokes or waits instead (review 2, Sonnet, Luna and Argon).
+const MAX_RECORDS = 2000;
 const REQUEST_ID_MS = 86_400_000;
 
 export interface Env {
@@ -175,13 +177,18 @@ export class ApprovalStore {
     const body: any = req.method === "POST" ? await req.json().catch(() => ({})) : {};
     const fresh = (list: Envelope[], now: number) =>
       list.filter((r) => (r.payload.type === "revocation" ? Date.parse(String(r.payload.issued_at)) > now - KEEP_REVOCATION_MS : Date.parse(String(r.payload.expires_at)) > now - KEEP_MS));
-    if (action === "pubkey") return json(200, { public_key: (await storeKey(this.state)).publicKey });
+    if (action === "pubkey") return storeKey(this.state).then((s) => json(200, { public_key: s.publicKey }), (e) => json(503, { error: `Couldn't read the approvals key: ${String(e?.message ?? e).slice(0, 200)}.` }));
     // The store builds and signs every record itself: it never signs a payload it's handed, so no caller can get an
     // approval past the limits, the freeze or the policy version (fresh read of 1091ea5, #3). Each action runs as one
     // turn (blockConcurrencyWhile), so approvals, revocations and the freeze never interleave (#2). The key is fetched
     // first, because storeKey takes a turn of its own. Nothing throws out of a turn: an error there would reset the store.
     if (action === "approve") {
-      const signer = await storeKey(this.state);
+      let signer: Signer;
+      try {
+        signer = await storeKey(this.state);
+      } catch (e: any) {
+        return json(503, { error: `Couldn't read the approvals key: ${String(e?.message ?? e).slice(0, 200)}. Nothing was approved.` });
+      }
       const out = await this.state.blockConcurrencyWhile(async () => {
         try {
           if (await st.get("frozen")) return { status: 409, body: { error: "Approvals are frozen. Unfreeze them first. Nothing was approved." } };
@@ -196,6 +203,8 @@ export class ApprovalStore {
           const rids: Record<string, { nonces?: string[]; nonce?: string; at: number }> = Object.fromEntries(Object.entries((await st.get("rids")) ?? {}).filter(([, x]: any) => now - x.at < REQUEST_ID_MS)) as any;
           const hit = v.request_id ? rids[v.request_id] : undefined;
           const firsts = (hit ? (hit.nonces ?? (hit.nonce ? [hit.nonce] : [])) : []).map((n) => list.find((r) => r.payload.type === "approval" && r.payload.nonce === n)).filter(Boolean) as Envelope[];
+          // A request id seen within the day whose approvals aren't on file any more never makes new ones (review 2).
+          if (hit && !firsts.length) return { status: 409, body: { error: "This request id was already used today and its approvals are no longer on file. Send a new request id. Nothing new was approved." } };
           if (firsts.length) {
             // The same request again (a double tap) gets the first approvals back, but only if every field, the seat,
             // the count, the length and the policy version match, and they're still live; otherwise nothing is
@@ -207,6 +216,7 @@ export class ApprovalStore {
             if (revoked || Date.parse(String(p.expires_at)) <= now) return { status: 409, body: { error: "This request id's approval was revoked or has expired. Send a new request id. Nothing new was approved." } };
             return { status: 200, body: { approval: firsts[0], approvals: firsts, repeat: true } };
           }
+          if (list.length + v.count > MAX_RECORDS) return { status: 409, body: { error: `The store holds ${list.length} records of ${MAX_RECORDS}; nothing is dropped to make room. Revoke or let old approvals age out (7 days past expiry). Nothing was approved.` } };
           const issued_at = new Date(now).toISOString();
           const expires_at = new Date(now + Math.round(v.hours * 3_600_000)).toISOString();
           const records: Envelope[] = [];
@@ -214,7 +224,7 @@ export class ApprovalStore {
             records.push(await signRecord({ format: APPROVAL_FORMAT, type: "approval", member: v.member, action: v.action, target: v.target, target_sha256: v.target_sha256, policy_version: policy.version, issued_at, expires_at, nonce: hex(16), max_uses: 1 }, signer));
           // All signed before anything is stored: a failure partway stores none of them.
           list.push(...records);
-          await st.put("records", list.slice(-MAX_RECORDS));
+          await st.put("records", list);
           if (v.request_id) await st.put("rids", { ...rids, [v.request_id]: { nonces: records.map((r) => String(r.payload.nonce)), at: now } });
           return { status: 200, body: { approval: records[0], approvals: records } };
         } catch (e: any) {
@@ -229,7 +239,12 @@ export class ApprovalStore {
       const all = body?.all === true;
       const one = typeof body?.nonce === "string" ? body.nonce.trim().toLowerCase() : "";
       if (!all && !NONCE.test(one)) return json(400, { error: 'Send {"nonce": "<the approval\'s nonce>"} or {"all": true}.' });
-      const signer = await storeKey(this.state);
+      let signer: Signer;
+      try {
+        signer = await storeKey(this.state);
+      } catch (e: any) {
+        return json(503, { error: `Couldn't read the approvals key: ${String(e?.message ?? e).slice(0, 200)}. Nothing was revoked.` });
+      }
       const out = await this.state.blockConcurrencyWhile(async () => {
         try {
           const now = this.now();
@@ -257,7 +272,7 @@ export class ApprovalStore {
               break;
             }
           }
-          if (added) await st.put("records", list.slice(-MAX_RECORDS));
+          if (added) await st.put("records", list); // never trimmed: a revocation is never dropped to make room
           if (failed) return { status: 503, body: { error: `Couldn't sign: ${failed}. ${revocations.length} of ${nonces.length} revoked.`, revocations } };
           return { status: 200, body: all ? { revoked: revocations.length, revocations } : { revocation: revocations[0] } };
         } catch (e: any) {
@@ -267,31 +282,43 @@ export class ApprovalStore {
       return json(out.status, out.body);
     }
     // The gate reads {"approvals": [...]} and tells approvals and revocations apart by `type`.
-    if (action === "list") {
-      const policy: Policy | undefined = await st.get("policy");
-      return json(200, { approvals: fresh((await st.get("records")) ?? [], this.now()), policy: policy ?? null, policy_version: policy?.version ?? null, frozen: !!(await st.get("frozen")) });
-    }
-    if (action === "set-policy") {
-      const parsed = parsePolicy(body);
-      if (!parsed.ok) return json(400, { error: parsed.error });
-      await st.put("policy", parsed.value);
-      return json(200, { ok: true, policy: parsed.value });
-    }
-    if (action === "freeze") {
-      await st.put("frozen", !!body.on);
-      return json(200, { ok: true });
-    }
+    // The reads and the two settings, each one turn, each answering instead of throwing (review 2, Sonnet).
+    const turn = (what: string, f: () => Promise<{ status: number; body: unknown }>) =>
+      this.state.blockConcurrencyWhile(() => f().catch((e: any) => ({ status: 503, body: { error: `Couldn't ${what}: ${String(e?.message ?? e).slice(0, 200)}.` } }))).then((o: { status: number; body: unknown }) => json(o.status, o.body));
+    if (action === "list")
+      return turn("read the records", async () => {
+        const policy: Policy | undefined = await st.get("policy");
+        return { status: 200, body: { approvals: fresh((await st.get("records")) ?? [], this.now()), policy: policy ?? null, policy_version: policy?.version ?? null, frozen: !!(await st.get("frozen")) } };
+      });
+    if (action === "set-policy")
+      return turn("store the policy", async () => {
+        const parsed = parsePolicy(body);
+        if (!parsed.ok) return { status: 400, body: { error: parsed.error } };
+        await st.put("policy", parsed.value);
+        return { status: 200, body: { ok: true, policy: parsed.value } };
+      });
+    if (action === "freeze")
+      return turn("store the freeze", async () => {
+        await st.put("frozen", !!body.on);
+        return { status: 200, body: { ok: true, frozen: !!body.on } };
+      });
     return json(404, { error: "Unknown action." });
   }
 }
 
 const store = (env: Env) => env.APPROVALS.get(env.APPROVALS.idFromName("global"));
-const call = async (env: Env, action: string, body?: unknown) =>
-  (await store(env).fetch(`https://store/${action}`, body === undefined ? undefined : { method: "POST", body: JSON.stringify(body) })).json() as Promise<any>;
-// The store's own answer, status and all (approve and revoke decide everything inside the store).
+// The store's answer, status and all; a store that can't be reached or answers nothing readable is a 503 in words.
+const ask = async (env: Env, action: string, body?: unknown): Promise<{ status: number; body: any }> => {
+  try {
+    const r = await store(env).fetch(`https://store/${action}`, body === undefined ? undefined : { method: "POST", body: JSON.stringify(body) });
+    return { status: r.status, body: await r.json() };
+  } catch (e: any) {
+    return { status: 503, body: { error: `The approvals store didn't answer: ${String(e?.message ?? e).slice(0, 200)}.` } };
+  }
+};
 const pass = async (env: Env, action: string, body: unknown) => {
-  const r = await store(env).fetch(`https://store/${action}`, { method: "POST", body: JSON.stringify(body) });
-  return json(r.status, await r.json());
+  const r = await ask(env, action, body);
+  return json(r.status, r.body);
 };
 
 const live = (records: Envelope[], now: number) => {
@@ -304,15 +331,17 @@ export async function handle(req: Request, env: Env, page: () => Response): Prom
   const path = url.pathname;
   if (req.method === "GET" && path === "/") return page();
   if (req.method === "GET" && path === "/pubkey") {
-    const { public_key } = await call(env, "pubkey");
-    return json(200, { public_key, key_id: await keyIdOf(public_key), algorithm: "Ed25519" }, { "access-control-allow-origin": "*" });
+    const k = await ask(env, "pubkey");
+    if (k.status !== 200) return json(k.status, k.body);
+    return json(200, { public_key: k.body.public_key, key_id: await keyIdOf(k.body.public_key), algorithm: "Ed25519" }, { "access-control-allow-origin": "*" });
   }
   // Anyone can read the records (DESIGN §3A): their signatures are what count, and gates send no token. While he has
   // frozen approvals, this answers 503, so every gate refuses every owner-only step (they fail closed).
   if (req.method === "GET" && path === "/approvals") {
-    const l = await call(env, "list");
-    if (l.frozen) return json(503, { error: "frozen: the owner has frozen all approvals. Nothing is approved until he unfreezes them.", code: "frozen" });
-    return json(200, { approvals: l.approvals, policy_version: l.policy_version });
+    const l = await ask(env, "list");
+    if (l.status !== 200) return json(503, { error: "The approvals record can't be read right now; gates refuse until it can.", code: "unavailable" });
+    if (l.body.frozen) return json(503, { error: "frozen: the owner has frozen all approvals. Nothing is approved until he unfreezes them.", code: "frozen" });
+    return json(200, { approvals: l.body.approvals }); // exactly what the gate reads (review 2, Sonnet)
   }
   if (req.method !== "POST" || !["/approve", "/revoke", "/policy", "/freeze", "/status"].includes(path)) return json(404, { error: "Not found." });
   // The owner's token, compared in constant time. No lockout: a token of 32 or more random characters can't be guessed,
@@ -321,13 +350,14 @@ export async function handle(req: Request, env: Env, page: () => Response): Prom
   const now = Date.now();
   const body: any = await req.json().catch(() => null);
   if (path === "/status") {
-    const l = await call(env, "list");
-    return json(200, { frozen: l.frozen, policy: l.policy, policy_version: l.policy_version, live: live(l.approvals, now) });
+    const l = await ask(env, "list");
+    if (l.status !== 200) return json(l.status, l.body);
+    return json(200, { frozen: l.body.frozen, policy: l.body.policy, policy_version: l.body.policy_version, live: live(l.body.approvals, now), records: l.body.approvals.length, max_records: MAX_RECORDS });
   }
   if (path === "/freeze") {
     if (typeof body?.on !== "boolean") return json(400, { error: 'Send {"on": true} to freeze every approval, or {"on": false} to unfreeze.' });
-    await call(env, "freeze", { on: body.on });
-    return json(200, { frozen: body.on });
+    const f = await ask(env, "freeze", { on: body.on });
+    return f.status === 200 ? json(200, { frozen: body.on }) : json(f.status, f.body);
   }
   if (path === "/policy") {
     // The gate policy's version (an approval made under another one doesn't count), its seats, its owner-only actions

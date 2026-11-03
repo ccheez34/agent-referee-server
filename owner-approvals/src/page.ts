@@ -2,7 +2,8 @@
 // Answers are shown as plain text (textContent), never as HTML. While a request is out every button is off, and a
 // repeated "Sign" sends the same request id, so a double tap can't make a second approval (fresh read of c3b0b64, #3);
 // changing any field makes a new id (part A review 1). v2 (Nov 3): the seat each approval is for, from the policy's
-// members (loaded with Show them), and how many approvals, since each is used once.
+// members (loaded with Show them), and how many approvals, since each is used once. The seats and the actions both come
+// from the stored policy; a load that changes the chosen one makes a new request id (review 2, Sonnet).
 export const PAGE = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Owner approvals</title><style>
 :root{color-scheme:light dark}body{font:16px/1.4 system-ui,sans-serif;max-width:34rem;margin:1rem auto;padding:0 1rem}
@@ -14,7 +15,7 @@ button{margin-top:.6rem}button:disabled{opacity:.5}pre{white-space:pre-wrap;word
 <label>Your owner token<input id="t" type="password" autocomplete="off"></label>
 <fieldset><legend>Approve</legend>
 <label>For which seat (load them with "Show them" below)<select id="m"><option value="">(press Show them first)</option></select></label>
-<label>Action<select id="a"><option>deploy</option><option>publish</option><option>payment</option><option>delete</option><option>secret</option><option>install</option><option>rule_change</option><option>tag</option><option>rollback</option><option>feature_on</option></select></label>
+<label>Action (from the policy, after "Show them")<select id="a"><option value="">(press Show them first)</option></select></label>
 <label>Target, exactly as the gate will ask for it<input id="g" maxlength="200" placeholder="agent-referee-server:production@&lt;40-hex commit&gt;"></label>
 <label>Its sha256 (64 hex, optional)<input id="v" maxlength="64"></label>
 <label>How many approvals (each is used once; 1-20)<input id="c" type="number" min="1" max="20" value="1"></label>
@@ -34,8 +35,8 @@ let busy=false;
 function lock(on){busy=on;for(const b of document.querySelectorAll("button"))b.disabled=on}
 async function send(path,body){if(busy)return null;lock(true);$("out").textContent="...";try{const r=await fetch(path,{method:"POST",headers:{"content-type":"application/json",authorization:"Bearer "+$("t").value},body:JSON.stringify(body)});const j=await r.json();$("out").textContent=r.status+"\\n"+JSON.stringify(j,null,2);return {status:r.status,body:j}}catch(e){$("out").textContent=String(e);return null}finally{lock(false)}}
 function row(rec){const p=rec.payload;const d=document.createElement("div");d.className="row";const t=document.createElement("div");t.textContent=p.member+" | "+p.action+" | "+p.target+(p.target_sha256?" | sha256 "+p.target_sha256.slice(0,12)+"...":"")+" | until "+p.expires_at+" | nonce "+p.nonce;const b=document.createElement("button");b.textContent="Revoke";b.onclick=async()=>{await send("/revoke",{nonce:p.nonce});await show()};d.append(t,b);return d}
-function fill(sel,items,keep){const old=sel.value;sel.replaceChildren();for(const x of items){const o=document.createElement("option");o.textContent=x;o.value=x;sel.append(o)}if(keep&&items.includes(old))sel.value=old}
-async function show(){const r=await send("/status",{});const l=$("list");l.replaceChildren();if(!r||r.status!==200)return;const pol=r.body.policy;if(pol){fill($("m"),pol.members,true);fill($("a"),pol.actions,true);$("h").max=String(pol.max_hours)}const s=document.createElement("p");s.textContent=(r.body.frozen?"FROZEN. ":"")+"Policy: "+(pol?pol.version+", seats "+pol.members.join(", ")+", at most "+pol.max_hours+" hours":"not set")+". Live approvals: "+r.body.live.length+".";l.append(s);for(const rec of r.body.live)l.append(row(rec))}
+function fill(sel,items){const old=sel.value;sel.replaceChildren();for(const x of items){const o=document.createElement("option");o.textContent=x;o.value=x;sel.append(o)}if(items.includes(old))sel.value=old;else rid=crypto.randomUUID()}
+async function show(){const r=await send("/status",{});const l=$("list");l.replaceChildren();if(!r||r.status!==200)return;const pol=r.body.policy;if(pol){fill($("m"),pol.members);fill($("a"),pol.actions);$("h").max=String(pol.max_hours)}const s=document.createElement("p");s.textContent=(r.body.frozen?"FROZEN. ":"")+"Policy: "+(pol?pol.version+", seats "+pol.members.join(", ")+", at most "+pol.max_hours+" hours":"not set")+". Live approvals: "+r.body.live.length+".";l.append(s);for(const rec of r.body.live)l.append(row(rec))}
 for(const i of ["m","a","g","v","c","h"])$(i).addEventListener("input",()=>{rid=crypto.randomUUID()});
 $("go").onclick=async()=>{const r=await send("/approve",{member:$("m").value,action:$("a").value,target:$("g").value,target_sha256:$("v").value||null,count:Number($("c").value),expires_in_hours:Number($("h").value),request_id:rid});if(r&&r.status===200)rid=crypto.randomUUID()};
 $("ls").onclick=show;
