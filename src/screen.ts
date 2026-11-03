@@ -4,7 +4,7 @@
 // - It screens only VALIDATED fields, the exact text a provider would get, after each route's own size checks
 //   (validated fields are at most 12,000 characters). Screening the raw body let a body padded with thousands of
 //   strings slip a secret past the walk, and gave crafted long lines quadratic regex time (the fresh read, Nov 3).
-// - Only high-confidence kinds refuse. Four patterns are find's own (find/lib/scrub.mjs, the locked v1 build), copied
+// - Only high-confidence kinds refuse. Four patterns are find's own (find/lib/scrub.mjs, the locked round 4 build), copied
 //   exactly; test/screen.test.ts checks them against a vendored copy. Three more are this server's: a wallet private
 //   key, a labelled seed phrase, and a base64-encoded PEM private key (what an agent holding an x402 wallet would leak).
 // - What decides a hit is stricter than find's printing scrub: a PEM header needs a key body after it, a URL

@@ -17,9 +17,9 @@ import { MatchRoom } from "../src/match.ts";
 import { _clearSnapshots } from "../src/gateclient.ts";
 
 const FIXTURE = new URL("./fixtures/find-scrub-v1.mjs", import.meta.url);
-// find/lib/scrub.mjs as locked in SKILLS.lock 1a284b76b663 (skills/find/lib/scrub.mjs). A new find build changes this
-// on purpose: re-vendor it, then this test says whether the server's patterns still match.
-const FIND_SCRUB_SHA256 = "e004d981f9686b94ad991ad86995a480d7059a4836dbac836f9f5a7a8302f4a1";
+// find/lib/scrub.mjs as locked in SKILLS.lock 8375f007fccd (round 4, Nov 3; skills/find/lib/scrub.mjs). A new find build
+// changes this on purpose: re-vendor it, then this test says whether the server's patterns still match.
+const FIND_SCRUB_SHA256 = "703911e197384903b1c29b582d9148d323671a3fbc3c74773b099a382d54f2f0";
 
 const fake = {
   openai: "sk-" + "proj" + "Q7xT2mK9vB4nL8pR3sW6".repeat(2),
