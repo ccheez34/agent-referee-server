@@ -10,6 +10,7 @@ import { JUDGE_ADVISORY, JUDGE_HUMAN_REVIEW, JUDGE_MESSAGE_FORMAT, JUDGE_SYSTEM,
 import type { Env } from "./types.ts";
 import { payaiToken } from "./payai.ts";
 import { signReceipt } from "./receipt.ts";
+import { intakeCheck, intakeRefusal, screenMode } from "./screen.ts";
 import { NEVER_AN_APPROVAL, observeGithub, parseProofRequest, proofPayload } from "./proof.ts";
 import {
   REVIEW_LIMITS, REVIEW_MESSAGE_FORMAT, longReviewRule, REVIEW_SYSTEM, REVIEW_VERDICTS, REVIEWER_BUDGET_MS, missingReviewKey, reviewCommitment, type ReviewerCall, reviewModels, reviewPayload, runOneReviewer, validateReview, type ReviewTier,
@@ -444,6 +445,8 @@ async function reviewGuard(c: any, next: any) {
   const body = await c.req.json().catch(() => null);
   const v = validateReview(body, tier);
   if (!v.ok) return err(400, `${v.error} Nothing was charged.`);
+  const secret = await screenIntake(c, body, "Nothing was charged.");
+  if (secret) return secret;
   let commitment;
   try {
     commitment = await reviewCommitment(tier, c.env, v.value.panel, undefined, v.value.task.length + v.value.output.length);
@@ -558,6 +561,8 @@ async function multiGuard(c: any, next: any) {
   if (body === TOO_BIG) return err(413, `The request body is over ${MULTI_LIMITS.maxBodyBytes / 1024} KB. Nothing was charged.`);
   const v = validateMultiReview(body, tier);
   if (!v.ok) return err(400, `${v.error} Nothing was charged.`);
+  const secret = await screenIntake(c, body, "Nothing was charged.");
+  if (secret) return secret;
   let commitment;
   try {
     commitment = await multiCommitment(tier, c.env, v.value.panel);
@@ -665,6 +670,18 @@ async function forward(env: Env, id: string, action: string, body?: unknown) {
   // Responses from a Durable Object have locked headers. Copy into a fresh Response
   // so the payment middleware can attach its X-PAYMENT-RESPONSE receipt header.
   return new Response(res.body, { status: res.status, headers: new Headers(res.headers) });
+}
+
+// The content screen's layer 2a (screen.ts): a secret in customer text is refused before any AI provider sees it.
+// Off unless CONTENT_SCREEN is "shadow" or "enforce". Logs the route and kinds only, never the text.
+const SUBMIT_REFUSED =
+  "Nothing was submitted: send it again without that before the deadline. A refused submission counts as not submitted; if no submission from this seat is accepted by the deadline, the seat forfeits, with no refund (the terms say so before you pay).";
+async function screenIntake(c: any, body: unknown, after: string, charged: false | "already_settled" = false): Promise<Response | null> {
+  if (screenMode(c.env) === "off") return null;
+  const hits = intakeCheck(body);
+  if (!hits.length) return null;
+  console.log(JSON.stringify({ screen: "2a", route: routePath(c), kinds: [...new Set(hits.map((h) => h.kind))], hits: hits.length }));
+  return intakeRefusal(c.env, routePath(c), body, hits, after, charged);
 }
 
 const err = (status: number, error: string) =>
@@ -1647,6 +1664,11 @@ async function handleFreeReview(c: any, tier: ReviewTier, ext?: { caller: string
     stat(c, `${p}bad_input`);
     return err(400, `${v.error} Your free review wasn't used.`);
   }
+  const secret = await screenIntake(c, body, "Your free review wasn't used.");
+  if (secret) {
+    stat(c, `${p}screen_refused`);
+    return secret;
+  }
   let commitment;
   try {
     commitment = await reviewCommitment(tier, c.env, v.value.panel, undefined, v.value.task.length + v.value.output.length);
@@ -1889,6 +1911,8 @@ app.post("/matches", async (c) => {
   const sanctioned = regionCheck(c, [], "");
   if (sanctioned) return sanctioned;
   const input: any = await c.req.json().catch(() => null);
+  const secret = await screenIntake(c, input, "No match was created and nothing was charged.");
+  if (secret) return secret;
   if (isMultiJudgeTier(input?.tier) && !(await multiJudgeOn(c))) return err(503, "The multi-part judge tiers (judge-3x2, judge-3x3) aren't open yet.");
   if (isJudgeTier(input?.tier) && missingJudgeKey(c.env, tierModels(c.env, input.tier as JudgeTierName)))
     return err(503, "This judge tier is temporarily unavailable.");
@@ -1987,6 +2011,8 @@ for (const action of ["commit", "reveal", "submit", "retry-judge", "rematch"]) {
       // Refused before parsing past 128 KB (enough for 3 pieces of 6,000 characters, all JSON-escaped). Nothing changes.
       const body = await readJsonCapped(c.req.raw, MULTI_JUDGE_LIMITS.maxBodyBytes);
       if (body === TOO_BIG) return err(413, `The submit body is over ${MULTI_JUDGE_LIMITS.maxBodyBytes / 1024} KB. Nothing was changed; you can submit again before the deadline.`);
+      const secret = await screenIntake(c, body, SUBMIT_REFUSED, "already_settled");
+      if (secret) return secret;
       return forward(c.env, id, action, body ?? {});
     }
     return forward(c.env, id, action, await c.req.json().catch(() => ({})));
