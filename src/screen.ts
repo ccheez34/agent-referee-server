@@ -21,8 +21,10 @@ export type ScreenMode = "off" | "shadow" | "enforce";
 // no refund "as long as they are made aware that they cant send certain content before"). Shown on every judge tier's
 // payment request, in every match view, in GET /judge, GET / and /llms.txt.
 export const SECRET_KINDS = "a private key, a wallet key or seed phrase, an API key or access token, a password inside a URL, or a bearer token";
-export const SUBMIT_RULE = `Submissions holding a secret (${SECRET_KINDS}) are refused before any AI sees them. A refused submission counts as not submitted: send it again without the secret before the step deadline. If no submission from a seat is accepted by then, that seat forfeits, with no refund.`;
-export const REQUEST_RULE = `Reviews and new matches holding a secret (${SECRET_KINDS}) are refused before any AI sees them, and a refused request isn't charged.`;
+// Fake keys on purpose (test fixtures, decoys, a scrubber's own patterns): the sender says so, and the request passes.
+export const ALLOW_NOTE = `Sending fake keys on purpose (test fixtures, decoys)? Add allow_secrets: true to the request; a real secret sent with it reaches the AI companies.`;
+export const SUBMIT_RULE = `Submissions holding a secret (${SECRET_KINDS}) are refused before any AI sees them. A refused submission counts as not submitted: send it again without the secret before the step deadline. If no submission from a seat is accepted by then, that seat forfeits, with no refund. ${ALLOW_NOTE}`;
+export const REQUEST_RULE = `Reviews and new matches holding a secret (${SECRET_KINDS}) are refused before any AI sees them, and a refused request isn't charged. ${ALLOW_NOTE}`;
 
 /** CONTENT_SCREEN: "off" (default), "shadow" (2b labels only; 2a still refuses) or "enforce". Anything else is "off". */
 export function screenMode(env: { CONTENT_SCREEN?: string }): ScreenMode {
@@ -296,7 +298,7 @@ export async function intakeRefusal(
   const receipt = await refusalReceipt(env, { route, label: "secrets", step: "2a", hits, fields, charged, bind });
   return new Response(
     JSON.stringify({
-      error: `content_refused: the input looks like it holds a secret: ${where}${hits.length > 5 ? ` and ${hits.length - 5} more` : ""}. Remove it (or replace it with a placeholder) and send again, so it never reaches an AI provider. ${after}`,
+      error: `content_refused: the input looks like it holds a secret: ${where}${hits.length > 5 ? ` and ${hits.length - 5} more` : ""}. Remove it (or replace it with a placeholder) and send again, so it never reaches an AI provider; if it is a fake key on purpose, send again with "allow_secrets": true. ${after}`,
       code: "secret_in_input",
       where: hits,
       receipt,

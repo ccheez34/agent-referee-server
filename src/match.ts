@@ -682,7 +682,7 @@ export class MatchRoom {
       if (m.submissions![seat] !== undefined) return bad(409, "Already submitted.");
       const v = validateMultiSubmit(body, m.tier);
       if (!v.ok) return bad(400, v.error);
-      const refused = await this.screenSubmission(seat, { pieces: v.texts.map((text) => ({ text })) });
+      const refused = await this.screenSubmission(seat, { pieces: v.texts.map((text) => ({ text })) }, body?.allow_secrets === true);
       if (refused) return refused;
       const records = await sidePieceRecords(v.texts);
       const hash = await sidePiecesSha256(records);
@@ -697,7 +697,7 @@ export class MatchRoom {
     if (typeof p !== "string" || p.trim().length === 0 || p.length > LIMITS.maxPosition)
       return bad(400, `position must be 1 to ${LIMITS.maxPosition} characters.`);
     if (m.submissions![seat] !== undefined) return bad(409, "Already submitted.");
-    const refused = await this.screenSubmission(seat, { position: p });
+    const refused = await this.screenSubmission(seat, { position: p }, body?.allow_secrets === true);
     if (refused) return refused;
     m.submissions![seat] = p;
     const ack = await this.stepAck(seat, "submit", { position_sha256: await sha256Hex(p) });
@@ -706,13 +706,18 @@ export class MatchRoom {
 
   /** The content screen's layer 2a on a validated submission, after the seat check: a refused submission changes
    * nothing (the seat may submit again before the deadline); the signed refusal names the match, seat and tier. */
-  private async screenSubmission(seat: string, fields: { position: string } | { pieces: { text: string }[] }): Promise<Response | null> {
+  private async screenSubmission(seat: string, fields: { position: string } | { pieces: { text: string }[] }, allow = false): Promise<Response | null> {
     const m = this.m!;
     // Only matches whose seats were told the rule before paying (created while the screen was on): turning the switch on
     // never makes an earlier match's submission forfeit.
     if (screenMode(this.env) === "off" || !m.content_rule_shown) return null;
     const hits = intakeCheck(fields);
     if (!hits.length) return null;
+    if (allow) {
+      // Fake keys on purpose, the sender says (allow_secrets: true): passed, counted.
+      console.log(JSON.stringify({ screen: "2a", passed: "allowed", route: "/matches/:id/submit", tier: m.tier, kinds: [...new Set(hits.map((h) => h.kind))], hits: hits.length }));
+      return null;
+    }
     console.log(JSON.stringify({ screen: "2a", route: "/matches/:id/submit", tier: m.tier, kinds: [...new Set(hits.map((h) => h.kind))], hits: hits.length }));
     const after = `Nothing was submitted. ${SUBMIT_RULE.slice(SUBMIT_RULE.indexOf("A refused submission"))}`;
     const paidFor = m.joined[seat]?.paid || (m.host_pays ? !!m.joined[m.host_pays]?.paid : false);

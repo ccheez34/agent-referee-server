@@ -343,7 +343,7 @@ t("without a configured policy hash the receipt signs the built-in policy's hash
   assert.equal(r.body.receipt.payload.policy_source, BUILT_IN_POLICY.version);
 });
 
-t("every route that carries customer text is screened, in every text field: review tiers, team, free, internal free, multi-part, match creation", async () => {
+t("every public route that carries customer text is screened, in every text field: review tiers, free, internal free, multi-part, match creation", async () => {
   const TEAM = { TEAM_TOKEN: "t".repeat(40), TEAM_MEMBERS: "5.0", TEAM_MEMBER_DAILY_USD: "0.50", TEAM_DAILY_USD: "0.80" };
   const INTERNAL = "i".repeat(40);
   const inTitle = { ...clean, title: `deploy ${fake.github}` };
@@ -355,8 +355,6 @@ t("every route that carries customer text is screened, in every text field: revi
     [{}, "/review-3", inCriteria, {}, "criteria[1].name", 1, "Nothing was charged."],
     [{ MULTI_PART_ENABLED: "true" }, "/review-3x2", multi(2), {}, "pieces[1].text", 2, "Nothing was charged."],
     [{ MULTI_PART_ENABLED: "true" }, "/review-3x3", multi(3), {}, "pieces[1].text", 2, "Nothing was charged."],
-    [TEAM, "/team/review", withSecret, { "x-team-token": TEAM.TEAM_TOKEN, "x-team-member": "5.0" }, "output", 2, "Nothing was charged."],
-    [{ ...TEAM, MULTI_PART_ENABLED: "true" }, "/team/review-3x2", multi(2), { "x-team-token": TEAM.TEAM_TOKEN, "x-team-member": "5.0" }, "pieces[1].text", 2, "Nothing was charged."],
     [{ FREE_REVIEW_DAILY_BUDGET_USD: "3.00" }, "/free/review", withSecret, {}, "output", 2, "Your free review wasn't used."],
     [{ FREE_REVIEW_DAILY_BUDGET_USD: "3.00" }, "/free/review-3", inTitle, {}, "title", 1, "Your free review wasn't used."],
     [{ INTERNAL_TOKEN: INTERNAL, EXT_FREE_DAILY_BUDGET_USD: "1.00" }, "/internal/free/review", withSecret, { "x-internal-auth": INTERNAL, "x-caller-id": "user-1" }, "output", 2, "Your free review wasn't used."],
@@ -418,6 +416,43 @@ t("turning the screen on never forfeits a match whose seats weren't told: submis
   assert.equal((await call(e, "/join/judge", { match_id: c.body.match_id, seat: "beta" })).status, 200);
   const r = await call(e, `/matches/${c.body.match_id}/submit`, { seat: "alpha", seat_token: j.body.seat_token, position: `Plan.\n${fake.github}` });
   assert.equal(r.status, 200, r.text);
+});
+
+t("allow_secrets: true passes fake keys on purpose, counted; the team's own routes count without refusing", async () => {
+  const MP = { MULTI_PART_ENABLED: "true" };
+  const multi = { task: "Check the scrubber's fixtures.", pieces: [{ text: "Piece one." }, { text: `fixture\n${fake.github}` }] };
+  let logs = await logsOf(async () => {
+    assert.equal((await call(env(), "/review", { ...withSecret, allow_secrets: true })).status, 200);
+    assert.equal((await call(env(MP), "/review-3x2", { ...multi, allow_secrets: true })).status, 200, "the multi-part validator accepts the field");
+    assert.equal((await call(env({ FREE_REVIEW_DAILY_BUDGET_USD: "3.00" }), "/free/review", { ...withSecret, allow_secrets: true })).status, 200);
+    assert.equal((await call(env(), "/matches", { tier: "judge", seats: ["alpha", "beta"], rules: `${RULES}\n${fake.github}`, allow_secrets: true })).status, 201);
+  });
+  assert.match(logs, /"passed":"allowed"/);
+  assert.ok(!logs.includes(fake.github.slice(4)), "counted, never content");
+  // Without the field, the same requests are refused (shown above); allow_secrets: false refuses too.
+  assert.equal((await call(env(), "/review", { ...withSecret, allow_secrets: false })).status, 422);
+  // The team's own route: counted, not refused.
+  const TEAM = { TEAM_TOKEN: "t".repeat(40), TEAM_MEMBERS: "5.0", TEAM_MEMBER_DAILY_USD: "0.50", TEAM_DAILY_USD: "0.80" };
+  logs = await logsOf(async () => {
+    assert.equal((await call(env(TEAM), "/team/review", withSecret, { "x-team-token": TEAM.TEAM_TOKEN, "x-team-member": "5.0" })).status, 200);
+  });
+  assert.match(logs, /"passed":"team"/);
+  // Submissions: single position and multi-part pieces.
+  const e = env({ MULTI_JUDGE_ENABLED: "true" });
+  for (const [tier, body] of [["judge", { position: `Plan.\n${fake.github}` }], ["judge-3x2", { pieces: [{ text: "one" }, { text: `two\n${fake.github}` }] }]] as const) {
+    const c = await call(e, "/matches", { tier, seats: ["alpha", "beta"], rules: RULES });
+    const tok: Record<string, string> = {};
+    for (const s of ["alpha", "beta"]) tok[s] = (await call(e, `/join/${tier}`, { match_id: c.body.match_id, seat: s })).body.seat_token;
+    const r = await call(e, `/matches/${c.body.match_id}/submit`, { seat: "alpha", seat_token: tok.alpha, ...body, allow_secrets: true });
+    assert.equal(r.status, 200, `${tier}: ${r.text}`);
+  }
+});
+
+t("the review routes' payment request carries the request rule, with how to send fake keys", async () => {
+  const r = await call(env({ PAYMENTS_ENABLED: "true" }), "/review", clean);
+  assert.equal(r.status, 402, r.text);
+  assert.ok(r.text.includes(REQUEST_RULE), r.text.slice(0, 300));
+  assert.match(REQUEST_RULE, /allow_secrets/);
 });
 
 t("a refused match creation creates nothing: the same key then creates a fresh match", async () => {

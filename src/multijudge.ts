@@ -65,7 +65,7 @@ export function validateMultiSubmit(body: any, tier: MultiJudgeTier): { ok: true
   const shape = `On ${tier}, submit {seat, seat_token, pieces: [{text}]} with exactly ${n} pieces of 1 to ${MULTI_JUDGE_LIMITS.maxPiece} characters each.`;
   if (!body || typeof body !== "object" || Array.isArray(body)) return { ok: false, error: shape };
   if ("position" in body) return { ok: false, error: `${tier} takes your side as "pieces", not "position". ${shape}` };
-  const extraTop = Object.keys(body).filter((k) => !["seat", "seat_token", "pieces"].includes(k));
+  const extraTop = Object.keys(body).filter((k) => !["seat", "seat_token", "pieces", "allow_secrets"].includes(k)); // allow_secrets: screen.ts
   if (extraTop.length) return { ok: false, error: `Unknown field${extraTop.length > 1 ? "s" : ""}: ${extraTop.slice(0, 5).join(", ")}. ${shape}` };
   const pieces = body?.pieces;
   if (!Array.isArray(pieces) || pieces.length !== n)

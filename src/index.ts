@@ -166,7 +166,7 @@ function getPaywall(env: Env): MiddlewareHandler {
     price,
     network,
     config: {
-      description,
+      description: screenMode(env) !== "off" ? `${description} ${REQUEST_RULE}` : description,
       mimeType: "application/json",
       // Reviewers can take a minute or two; keep the payment authorization valid until the review is done.
       maxTimeoutSeconds: 300,
@@ -192,7 +192,7 @@ function getPaywall(env: Env): MiddlewareHandler {
     price,
     network,
     config: {
-      description: `Agent Referee multi-part sealed review — one piece of work in ${n} pieces (up to ${MULTI_LIMITS.maxPiece} characters each, ${MULTI_LIMITS.maxTotal} in all): three independent AI reviewers from three different companies each read every piece in one call, in parallel, without seeing each other's verdicts; majority verdict, every vote in a signed receipt with each piece's hash. One agent, one call; charged only if the review completes.`,
+      description: `Agent Referee multi-part sealed review — one piece of work in ${n} pieces (up to ${MULTI_LIMITS.maxPiece} characters each, ${MULTI_LIMITS.maxTotal} in all): three independent AI reviewers from three different companies each read every piece in one call, in parallel, without seeing each other's verdicts; majority verdict, every vote in a signed receipt with each piece's hash. One agent, one call; charged only if the review completes.${screenMode(env) !== "off" ? ` ${REQUEST_RULE}` : ""}`,
       mimeType: "application/json",
       maxTimeoutSeconds: 300,
       inputSchema: {
@@ -458,7 +458,7 @@ async function reviewGuard(c: any, next: any) {
   const region = regionCheck(c, commitment.models, "Nothing was charged.", paying);
   if (region) return region;
   // The content screen (2a) after the region and sanctions checks, before slots, allowances and the paywall.
-  const secret = await screenIntake(c, v.value, "Nothing was charged.");
+  const secret = await screenIntake(c, v.value, "Nothing was charged.", body?.allow_secrets === true);
   if (secret) return secret;
   if (!paying) {
     // The first x402 call (no payment yet): answer busy now rather than after the agent signs a payment.
@@ -575,7 +575,7 @@ async function multiGuard(c: any, next: any) {
   const region = regionCheck(c, commitment.models, "Nothing was charged.", paying);
   if (region) return region;
   // The content screen (2a) after the region and sanctions checks, before slots, allowances and the paywall.
-  const secret = await screenIntake(c, v.value, "Nothing was charged.");
+  const secret = await screenIntake(c, v.value, "Nothing was charged.", (body as any)?.allow_secrets === true);
   if (secret) return secret;
   if (!paying) {
     const b = await quickBusy(c.env, commitment.models);
@@ -677,10 +677,18 @@ async function forward(env: Env, id: string, action: string, body?: unknown) {
 
 // The content screen's layer 2a (screen.ts): a secret in customer text is refused before any AI provider sees it.
 // Off unless CONTENT_SCREEN is "shadow" or "enforce". Logs the route and kinds only, never the text.
-async function screenIntake(c: any, fields: unknown, after: string): Promise<Response | null> {
+async function screenIntake(c: any, fields: unknown, after: string, allow = false): Promise<Response | null> {
   if (screenMode(c.env) === "off") return null;
   const hits = intakeCheck(fields);
   if (!hits.length) return null;
+  // Passed but counted: the sender says the keys are fake on purpose (allow_secrets: true), or it's the owner's own team,
+  // whose fixtures and decoys are daily work (2.0's 1125; rule 6's privacy scan is the guard there).
+  const pass = allow ? "allowed" : c.get("team") ? "team" : null;
+  if (pass) {
+    stat(c, `screen_2a_${pass}`);
+    console.log(JSON.stringify({ screen: "2a", passed: pass, route: routePath(c), kinds: [...new Set(hits.map((h) => h.kind))], hits: hits.length }));
+    return null;
+  }
   stat(c, "screen_2a_refused");
   console.log(JSON.stringify({ screen: "2a", route: routePath(c), kinds: [...new Set(hits.map((h) => h.kind))], hits: hits.length }));
   return intakeRefusal(c.env, routePath(c), fields, hits, after, false);
@@ -1686,7 +1694,7 @@ async function handleFreeReview(c: any, tier: ReviewTier, ext?: { caller: string
     const legal = legalPause(c);
     if (legal) return legal;
   }
-  const secret = await screenIntake(c, v.value, "Your free review wasn't used.");
+  const secret = await screenIntake(c, v.value, "Your free review wasn't used.", body?.allow_secrets === true);
   if (secret) return secret;
   const caller = ext ? ext.caller : await callerHash(c);
   if (!caller || !c.env.LEDGER) return err(503, "Free reviews aren't available from here. " + FREE_PAID_HINT);
@@ -1918,7 +1926,7 @@ app.post("/matches", async (c) => {
   const checked = validateCreate(input);
   if (checked.ok && isJudgeTier(checked.value.tier)) {
     const { rules, title, criteria, seats } = checked.value;
-    const secret = await screenIntake(c, { rules, title, criteria, seats }, "No match was created and nothing was charged.");
+    const secret = await screenIntake(c, { rules, title, criteria, seats }, "No match was created and nothing was charged.", input?.allow_secrets === true);
     if (secret) return secret;
   }
   if (isMultiJudgeTier(input?.tier) && !(await multiJudgeOn(c))) return err(503, "The multi-part judge tiers (judge-3x2, judge-3x3) aren't open yet.");
