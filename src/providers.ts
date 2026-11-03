@@ -30,6 +30,59 @@ export function isSpendCap(model: string, status: number, bodyText: string): boo
   return false;
 }
 
+/**
+ * PLAN 0.4, alert A8, and two neighbours (fresh read of Oct 31, F1 and F7). What a 400, 401 or 403 says about the
+ * provider account, if anything:
+ * - "account": the account or organization itself is disabled, suspended, deactivated, banned, terminated or revoked
+ *   (Anthropic is reported to answer a disabled organization with a 400). A legal alert.
+ * - "auth": any other 401, so the service's own key was refused. Nobody outside can cause one. An operational alert.
+ * - "region": the provider won't serve the place the call left from. A Worker calls from the data centre that took
+ *   the request, so an outsider can cause one: a warning only.
+ * Never for a moderation refusal (OpenRouter answers 403 when a request's text is flagged): that's about the text,
+ * and anyone can cause one.
+ */
+export type AccountProblem = "account" | "auth" | "region";
+// One list of nouns for both word orders ("API key revoked", "Revoked API key"; fresh read of 6eb05fc, #1).
+const ACCOUNT_NOUN = String.raw`(organi[sz]ation|account|api[ _-]?key|workspace)`;
+const ACCOUNT_STATE = String.raw`(disabled|suspended|deactivated|banned|terminated|revoked)`;
+const ACCOUNT_WORDS = new RegExp(String.raw`\b${ACCOUNT_NOUN}\b[^.]{0,80}?\b${ACCOUNT_STATE}\b|\b${ACCOUNT_STATE}\b[^.]{0,40}?\b${ACCOUNT_NOUN}\b`, "i");
+const REGION_WORDS = /not (available|supported) in your (country|region|territory)|unsupported_country|region_not_supported/i;
+
+/**
+ * The provider's own words: a JSON error without its `metadata`, where OpenRouter echoes the flagged text (anyone can
+ * put words there). null when the body isn't a JSON error object, so an echo can't be told apart.
+ */
+function providerWords(bodyText: string): string | null {
+  try {
+    const j = JSON.parse(bodyText);
+    if (j && typeof j === "object" && j.error && typeof j.error === "object" && !Array.isArray(j.error)) {
+      const { metadata: _echo, ...own } = j.error;
+      return JSON.stringify(own);
+    }
+  } catch {
+    // not JSON
+  }
+  return null;
+}
+
+export function accountProblem(status: number, bodyText: string): AccountProblem | null {
+  if (status !== 400 && status !== 401 && status !== 403) return null;
+  const own = providerWords(bodyText);
+  // Without a JSON error to drop the echo from, moderation wording means a refusal, as before.
+  if (own === null && /flagged|moderation/i.test(bodyText)) return null;
+  const text = own ?? bodyText;
+  // The account wording is read before the moderation wording, so "your account was flagged and suspended" is still
+  // an account problem (fresh read of 6eb05fc, #3); the echoed request text was dropped above.
+  if (ACCOUNT_WORDS.test(text)) return "account";
+  if (/flagged|moderation/i.test(text)) return null;
+  if (status === 401) return "auth";
+  if (REGION_WORDS.test(text)) return "region";
+  return null;
+}
+
+/** Whose account an alert is about: Claude models are called on Anthropic's account; every other model through OpenRouter. */
+export const accountOf = (model: string) => (model.startsWith("claude") ? "anthropic" : "openrouter");
+
 export function classifyStatus(model: string, status: number, bodyText = ""): CallKind {
   if (status >= 200 && status < 300) return "ok";
   if (isSpendCap(model, status, bodyText)) return "cap";

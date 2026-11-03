@@ -10,16 +10,17 @@ import { JUDGE_ADVISORY, JUDGE_HUMAN_REVIEW, JUDGE_MESSAGE_FORMAT, JUDGE_SYSTEM,
 import type { Env } from "./types.ts";
 import { payaiToken } from "./payai.ts";
 import { signReceipt } from "./receipt.ts";
+import { NEVER_AN_APPROVAL, observeGithub, parseProofRequest, proofPayload } from "./proof.ts";
 import {
   REVIEW_LIMITS, REVIEW_MESSAGE_FORMAT, longReviewRule, REVIEW_SYSTEM, REVIEW_VERDICTS, REVIEWER_BUDGET_MS, missingReviewKey, reviewCommitment, type ReviewerCall, reviewModels, reviewPayload, runOneReviewer, validateReview, type ReviewTier,
 } from "./review.ts";
 import { Gate, GATE_MAX_WAIT_MS } from "./gate.ts";
-import { Health, adminOk, evaluateHealth, healthEvents, listUnjudged, markRefunded, pauseState, recordEvent, recordSettleFailure, setPause, listBlocked, settledUp, unblockWallet, walletBlocked, walletStanding } from "./health.ts";
+import { Health, adminOk, evaluateHealth, healthEvents, legalDetail, listUnjudged, publicWarnings, markRefunded, pauseState, publicLegal, recordAccountProblem, recordEvent, recordSettleFailure, setPause, listBlocked, settledUp, unblockWallet, walletBlocked, walletStanding } from "./health.ts";
 import { acquireSlots, gateStats, gatesOn, poolsOfProvider, quickBusy, resetPools, type SlotLease } from "./gateclient.ts";
 import { classifyPaidResponse, plausiblePayment, priceMicro, reviewBudget, reviewLimitRefusal } from "./paywatch.ts";
 import { fakeAiConfig } from "./fakeai.ts";
 import { recordCutOff } from "./cutoffs.ts";
-import { blockedStat, countryStat, judgeRegionBlock, regionBlock, regionRefusal, whereFrom } from "./regions.ts";
+import { BASE_BLOCKED, blockedStat, countryStat, judgeRegionBlock, regionBlock, regionRefusal, regionRulesProblems, regionRulesWarnings, whereFrom } from "./regions.ts";
 import {
   MULTI_BUDGET_MS, MULTI_CALL_TIMEOUT_MS, MULTI_FORMAT_VERSION, MULTI_LEASE_MS, MULTI_LIMITS, MULTI_MAX_ISSUES, MULTI_MESSAGE_FORMAT, MULTI_PIECES, MULTI_RECEIPT_FORMAT, MULTI_SYSTEM,
   MultiClosedError, TOO_BIG, boundaryToken, multiCommitment, multiExcluded, multiMaxTokens, multiModels, MULTI_DEFAULT_PRICES, multiReviewPayload, multiReviewerHow, readJsonCapped, validateMultiReview, type MultiTier,
@@ -317,10 +318,29 @@ async function walletBlockedRefusal(c: any, wallet: string) {
 }
 
 /**
+ * PLAN 0.4, review R1 (agreed by 4.0, 0934): while the region rules are off or fail their self-test (alerts A1, A2),
+ * every route that applies them refuses, wherever the request comes from, before anything is charged or used: a 503
+ * with code legal_pause. It needs no /health poll. /health reports the same problems under `legal`. Free reviews,
+ * the hosted connector's included, are refused too: sanctions rules cover providing a service, not only payments.
+ */
+function legalPause(c: any): Response | null {
+  const problems = regionRulesProblems(c.env);
+  if (!problems.length) return null;
+  stat(c, "legal_paused");
+  console.error(JSON.stringify({ legal_pause: problems, path: routePath(c) }));
+  return new Response(
+    JSON.stringify({ error: "legal_pause: this service is paused while a legal check is fixed. Nothing was charged or used; try again later.", code: "legal_pause" }),
+    { status: 503, headers: { "content-type": "application/json", "retry-after": "600" } },
+  );
+}
+
+/**
  * Region rule for a request that may reach these models (see regions.ts): null when it may go ahead, otherwise a 451
  * refusal (counted). `count`: also add one to today's count for the request's country (counts only, never who).
  */
 function regionCheck(c: any, models: string[], suffix: string, count = false, judges = false): Response | null {
+  const legal = legalPause(c);
+  if (legal) return legal;
   const where = whereOf(c);
   if (count) stat(c, countryStat(where));
   // Judge seats keep Anthropic's list while Claude judges are off (regions.ts, judgeRegionBlock).
@@ -328,6 +348,11 @@ function regionCheck(c: any, models: string[], suffix: string, count = false, ju
   if (!block) return null;
   stat(c, "region_blocked");
   stat(c, blockedStat(block.code));
+  // PLAN 0.4, alert A4: someone tried from a sanctioned location and was refused (the control worked). A warning on
+  // /health for 24 h, one entry per code (the Health store). Only the sanctioned codes in the code's own list: not
+  // Tor (T1), whose users' location is unknown, and not codes the operator added (fresh read, F2).
+  if (block.company === "all" && block.code !== "T1" && BASE_BLOCKED.includes(block.code))
+    void inBackground(c, recordEvent(c.env, "sanctions_region_attempt", block.code));
   return regionRefusal(block, suffix);
 }
 
@@ -808,9 +833,10 @@ app.get("/health", async (c) => {
   const badlyClosed = (["judge", "judge-2", "judge-3"] as const).some((t) => judges[t] === "closed" && !judgeTierWaitsForCompany(env, t));
   const pools = gatesOn(env) ? [...new Set([...poolsOfProvider(env, "anthropic"), "openrouter"])] : [];
   const gates = pools.length ? await gateStats(env, pools) : {};
-  const events = await healthEvents(env).catch(() => []);
+  let storeError = false;
+  const events = await healthEvents(env).catch(() => ((storeError = !!env.HEALTH), []));
   const unjudged = await listUnjudged(env).catch(() => []);
-  const verdict = evaluateHealth({ gates, events, ledger: records, unjudgedOpen: unjudged.filter((u) => !u.refunded).length });
+  const verdict = evaluateHealth({ gates, events, ledger: records, unjudgedOpen: unjudged.filter((u) => !u.refunded).length, regionProblems: regionRulesProblems(env as any), regionWarnings: regionRulesWarnings(env as any), storeError });
   const pause = await pauseState(env);
   if (pause.auto) verdict.reasons.push(`auto_paused: ${pause.auto}`), (verdict.degraded = true);
   const paused = paidPaused(env) || pause.paid;
@@ -822,7 +848,8 @@ app.get("/health", async (c) => {
     ok,
     status,
     reasons: [...verdict.reasons, ...(allJudges ? [] : ["judge_key_missing"]), ...(badlyClosed ? ["judge_closed"] : [])],
-    warnings: verdict.warnings,
+    legal: publicLegal(verdict.legal), // F10: the public sees only that a legal alert is on; the detail is in /admin/stats
+    warnings: publicWarnings(verdict.warnings), // the region lists' detail is in /admin/stats
     checks: {
       receipts_signing: signing ? "ok" : "missing key",
       records,
@@ -949,14 +976,20 @@ app.post("/admin/unblock", async (c) => {
 app.get("/admin/stats", async (c) => {
   const denied = await admin(c);
   if (denied) return denied;
-  if (!c.env.LEDGER) return err(503, "Stats need the ledger.");
+  // F10: the legal detail doesn't depend on the ledger, so it's computed first and shown even when the stats fail
+  // (fresh read of 30802a6, #3). A health store that can't be read is named, never shown as an empty list (#4).
+  let healthStoreError = false;
+  const events = await healthEvents(c.env).catch(() => ((healthStoreError = true), []));
+  const legal = [...legalDetail(events, regionRulesProblems(c.env as any)), ...(healthStoreError ? [{ code: "health_store_unreachable", from: "error" as const }] : [])];
+  const regionDetail = regionRulesWarnings(c.env as any);
+  if (!c.env.LEDGER) return c.json({ error: "Stats need the ledger.", legal_now: legal, region_settings_detail: regionDetail }, 503);
   let s: any;
   try {
     s = await ledgerJson(c.env, undefined, "stats", {});
     if (!Array.isArray(s?.days) || !s.days.length) throw new Error("unexpected answer");
   } catch (e: any) {
     console.error(`admin stats: ${String(e?.message ?? e).slice(0, 200)}`);
-    return err(503, "Stats can't be read right now; try again in a minute.");
+    return c.json({ error: "Stats can't be read right now; try again in a minute.", legal_now: legal, region_settings_detail: regionDetail }, 503);
   }
   const usd = (micro: unknown) => (Number.isFinite(micro) ? Math.round((micro as number) / 10_000) / 100 : 0);
   const pub = freeReviewConfig(c.env);
@@ -989,6 +1022,9 @@ app.get("/admin/stats", async (c) => {
     // AI answers cut off at the token limit, per model (ids with "/" and "." shown as "-"), and the latest 100 in full.
     ran_out_of_tokens_7_days: total("ran_out_of_tokens"),
     ran_out_of_tokens_recent: Array.isArray(s.cutoffs) ? s.cutoffs.slice().reverse() : [],
+    // F10: the legal list's detail, which /health shows the public only as "alert", and the region lists' warnings.
+    legal_now: legal,
+    region_settings_detail: regionDetail,
     free_budget_today: {
       public: { spent_usd: usd(s.free_spent_micro?.public), budget_usd: usd(pub.budgetMicro) },
       ext: { spent_usd: usd(s.free_spent_micro?.ext), budget_usd: usd(ext.budgetMicro), note: "free reviews from the hosted MCP server (ChatGPT)" },
@@ -1106,7 +1142,7 @@ function runReviewers(c: any, commitment: any, input: any, lease: SlotLease, bud
   const fake = fakeAiConfig(c.env, { mix: c.req.header("x-test-fake-mix"), delay: c.req.header("x-test-fake-delay") });
   const keys = { ANTHROPIC_API_KEY: c.env.ANTHROPIC_API_KEY, OPENROUTER_API_KEY: c.env.OPENROUTER_API_KEY, fake };
   return Promise.allSettled(
-    commitment.models.map((m: string, i: number) => runOneReviewer(keys, m, i + 1, input, undefined, { budgetMs, observe: (o) => lease.observe(i, o), onCutOff: (cut) => void inBackground(c, recordCutOff(c.env, cut)) })),
+    commitment.models.map((m: string, i: number) => runOneReviewer(keys, m, i + 1, input, undefined, { budgetMs, observe: (o) => lease.observe(i, o), onCutOff: (cut) => void inBackground(c, recordCutOff(c.env, cut)), onAccountProblem: (who, problem) => void inBackground(c, recordAccountProblem(c.env, who, problem)) })),
   );
 }
 
@@ -1255,6 +1291,7 @@ async function handleMultiReview(c: any, tier: MultiTier) {
             how: multiReviewerHow(m, input, token, c.env),
             observe: (o) => lease.observe(i, o),
             onCutOff: (cut) => void inBackground(c, recordCutOff(c.env, cut)),
+            onAccountProblem: (who, problem) => void inBackground(c, recordAccountProblem(c.env, who, problem)),
             onCall: (call) => {
               calls.push(call);
               console.log(JSON.stringify({ multi_call: { tier, ...call } }));
@@ -1313,6 +1350,63 @@ app.post("/team/review", (c) => handleReview(c, "review"));
 app.post("/team/review-3", (c) => handleReview(c, "review-3"));
 app.post("/team/review-3x2", (c) => handleMultiReview(c, "review-3x2"));
 app.post("/team/review-3x3", (c) => handleMultiReview(c, "review-3x3"));
+// ---------- proof receipts (research\specs\proof-receipts-2026-10-31\SPEC.md v0.5) ----------
+// Signed records that use no AI model: L0 a claim and a hash, L1 a public GitHub fact the service checked itself.
+// For now team members only, free, and unlisted: it isn't in GET /, llms.txt or any tool text until the experiment's
+// last arm ends (4.0's 1020). Nothing that exists changes. A receipt never stands in for the owner's yes.
+app.post("/team/proof", teamAuth, async (c: any) => {
+  const sanctioned = regionCheck(c, [], "Nothing was issued.");
+  if (sanctioned) return sanctioned;
+  const team = c.get("team") as TeamCaller;
+  // Read at most 8 KB (code review 1): a proof request is small.
+  const body = await readJsonCapped(c.req.raw, 8_192);
+  if (body === TOO_BIG) return err(413, "Too big: a proof request is at most 8 KB. Nothing was issued.");
+  const parsed = parseProofRequest(body);
+  if (!parsed.ok) return err(400, `${parsed.error} Nothing was issued.`);
+  const request = parsed.value;
+  if (!c.env.LEDGER) return err(503, "Proof receipts are unavailable here. Nothing was issued.");
+  // A daily limit per member and level, counted per attempt (an L1 attempt asks GitHub even when it fails).
+  // A setting that isn't a whole number falls back to the default instead of refusing everything (code review 1).
+  const raw = String((request.level === "L0" ? c.env.PROOF_L0_DAILY : c.env.PROOF_L1_DAILY) ?? "").trim();
+  const setting = raw === "" ? NaN : Number(raw);
+  const limit = Number.isInteger(setting) && setting >= 0 ? setting : request.level === "L0" ? 500 : 200;
+  let q: any;
+  try {
+    q = await ledgerJson(c.env, undefined, "proof-quota", { member: team.member, level: request.level, limit }, true);
+  } catch (e: any) {
+    await recordEvent(c.env, "ledger_error", `proof-quota: ${String(e?.message ?? e)}`);
+    // A timeout may come after the ledger counted the attempt (as on /team/review), so don't promise it wasn't counted.
+    return err(503, "The proof limit can't be checked right now. Nothing was issued, but this attempt may have been counted against today's limit.");
+  }
+  if (q.__status === 429) return err(429, `${q.error ?? "Today's proof receipts are used up."} Nothing was issued.`);
+  let observation: { repo: string; observed: Record<string, unknown> } | undefined;
+  if (request.level === "L1") {
+    const o = await observeGithub(request.check, request.repo, request.sha, { token: c.env.GITHUB_TOKEN });
+    if (!o.ok) {
+      stat(c, "proof_unobserved");
+      return err(o.status, `${o.error}. No receipt was issued.`);
+    }
+    observation = o;
+  }
+  const payload = proofPayload({ request, member: team.member, id: randomToken(12), issuedAt: new Date().toISOString(), observation });
+  let receipt;
+  try {
+    receipt = await signReceipt(payload, c.env.SIGNING_KEY, c.env.PUBLIC_KEY);
+  } catch (e: any) {
+    console.error(`proof receipt signing failed: ${String(e?.message ?? e).slice(0, 200)}`);
+    return err(503, "The receipt couldn't be signed right now. Nothing was issued.");
+  }
+  stat(c, `proof_${request.level.toLowerCase()}`);
+  return c.json({
+    receipt,
+    what_it_proves:
+      request.level === "L0"
+        ? "That this claim and hash reached Agent Referee at issued_at from a holder of the team token (the member name is declared, not verified). Not that the claim is true."
+        : "That Agent Referee itself read these facts from GitHub at observed_at (the member name is declared, not verified). Not that the work is good.",
+    never_an_approval: NEVER_AN_APPROVAL,
+  });
+});
+
 app.get("/team/allowance", teamAuth, async (c: any) => {
   const cfg = teamConfig(c.env);
   const team = c.get("team") as TeamCaller;
@@ -1561,10 +1655,14 @@ async function handleFreeReview(c: any, tier: ReviewTier, ext?: { caller: string
     return err(400, `${String(e?.message ?? e)} Your free review wasn't used.`);
   }
   if (missingReviewKey(c.env, commitment.models)) return err(503, "Sealed review is temporarily unavailable. Your free review wasn't used.");
-  // Not for ext: those requests come from the hosted MCP server's own location, not the person's.
+  // Not for ext: those requests come from the hosted MCP server's own location, not the person's. A legal pause
+  // (PLAN 0.4, R1) applies to them all the same.
   if (!ext) {
     const region = regionCheck(c, commitment.models, "Your free review wasn't used.", true);
     if (region) return region;
+  } else {
+    const legal = legalPause(c);
+    if (legal) return legal;
   }
   const caller = ext ? ext.caller : await callerHash(c);
   if (!caller || !c.env.LEDGER) return err(503, "Free reviews aren't available from here. " + FREE_PAID_HINT);
