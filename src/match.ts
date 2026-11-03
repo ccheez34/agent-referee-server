@@ -722,7 +722,9 @@ export class MatchRoom {
     const after = `Nothing was submitted. ${SUBMIT_RULE.slice(SUBMIT_RULE.indexOf("A refused submission"))}`;
     const paidFor = m.joined[seat]?.paid || (m.host_pays ? !!m.joined[m.host_pays]?.paid : false);
     const settled = paidFor && !m.demo && this.env.PAYMENTS_ENABLED !== "false";
-    return intakeRefusal(this.env, "/matches/:id/submit", fields, hits, after, settled ? "already_settled" : false, { match_id: m.id, seat, tier: m.tier });
+    const refusal = await intakeRefusal(this.env, "/matches/:id/submit", fields, hits, after, settled ? "already_settled" : false, { match_id: m.id, seat, tier: m.tier });
+    refusal.headers.set("x-content-screen", "refused"); // so the route counts screen refusals, not any 422
+    return refusal;
   }
 
   /** After an accepted submit: start judging once every side is in. */

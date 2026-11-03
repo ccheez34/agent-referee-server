@@ -458,7 +458,7 @@ async function reviewGuard(c: any, next: any) {
   const region = regionCheck(c, commitment.models, "Nothing was charged.", paying);
   if (region) return region;
   // The content screen (2a) after the region and sanctions checks, before slots, allowances and the paywall.
-  const secret = await screenIntake(c, v.value, "Nothing was charged.", body?.allow_secrets === true);
+  const secret = await screenIntake(c, { task: v.value.task, output: v.value.output, title: v.value.title, criteria: v.value.criteria }, "Nothing was charged.", body?.allow_secrets === true);
   if (secret) return secret;
   if (!paying) {
     // The first x402 call (no payment yet): answer busy now rather than after the agent signs a payment.
@@ -575,7 +575,7 @@ async function multiGuard(c: any, next: any) {
   const region = regionCheck(c, commitment.models, "Nothing was charged.", paying);
   if (region) return region;
   // The content screen (2a) after the region and sanctions checks, before slots, allowances and the paywall.
-  const secret = await screenIntake(c, v.value, "Nothing was charged.", (body as any)?.allow_secrets === true);
+  const secret = await screenIntake(c, { task: v.value.task, pieces: v.value.pieces, title: v.value.title, criteria: v.value.criteria }, "Nothing was charged.", (body as any)?.allow_secrets === true);
   if (secret) return secret;
   if (!paying) {
     const b = await quickBusy(c.env, commitment.models);
@@ -1058,7 +1058,7 @@ app.get("/admin/stats", async (c) => {
       public: { spent_usd: usd(s.free_spent_micro?.public), budget_usd: usd(pub.budgetMicro) },
       ext: { spent_usd: usd(s.free_spent_micro?.ext), budget_usd: usd(ext.budgetMicro), note: "free reviews from the hosted MCP server (ChatGPT)" },
     },
-    key: "free_* = free reviews from the public routes; ext_* = free reviews from the hosted MCP server (ChatGPT); paid_* = paid reviews. ok_review / ok_review3 = completed, failed = a reviewer failed (not used / not charged), busy = at capacity, refused_caller = that address or user had used today's allowance, refused_budget = the shared budget was used up, bad_input = the request was rejected, region_blocked = refused because of where it came from, screen_2a_refused = refused by the content screen's local check (a secret in the text; every route, paid, free and team, and match creation and submission). countries = AI requests by the country Cloudflare reports, approximate (paid reviews and judge seats on the call carrying a payment, whether or not it then settles; free reviews once their input passed, including ones then refused or busy; XX = unknown; not the hosted MCP server's, which come from its own location), ran_out_of_tokens = AI answers cut off at the model's token limit (max_tokens) and so unusable: raise that model's limit if it keeps happening (the recent list has each one's limit and prompt length; GET /health warns for 24 h), region_blocked by country = those refused by the region rules (CC-SUB is a region, e.g. UA-43 Crimea; T1 = Tor). Spending is counted at list price, not the real AI cost.",
+    key: "free_* = free reviews from the public routes; ext_* = free reviews from the hosted MCP server (ChatGPT); paid_* = paid reviews. ok_review / ok_review3 = completed, failed = a reviewer failed (not used / not charged), busy = at capacity, refused_caller = that address or user had used today's allowance, refused_budget = the shared budget was used up, bad_input = the request was rejected, region_blocked = refused because of where it came from, screen_2a_refused = refused by the content screen's local check (a secret in the text; paid and free reviews, match creation and submission), screen_2a_allowed = the same check's hits passed because the sender set allow_secrets (fake keys on purpose), screen_2a_team = hits on the team's own routes, counted, not refused. countries = AI requests by the country Cloudflare reports, approximate (paid reviews and judge seats on the call carrying a payment, whether or not it then settles; free reviews once their input passed, including ones then refused or busy; XX = unknown; not the hosted MCP server's, which come from its own location), ran_out_of_tokens = AI answers cut off at the model's token limit (max_tokens) and so unusable: raise that model's limit if it keeps happening (the recent list has each one's limit and prompt length; GET /health warns for 24 h), region_blocked by country = those refused by the region rules (CC-SUB is a region, e.g. UA-43 Crimea; T1 = Tor). Spending is counted at list price, not the real AI cost.",
   });
 });
 
@@ -1694,7 +1694,7 @@ async function handleFreeReview(c: any, tier: ReviewTier, ext?: { caller: string
     const legal = legalPause(c);
     if (legal) return legal;
   }
-  const secret = await screenIntake(c, v.value, "Your free review wasn't used.", body?.allow_secrets === true);
+  const secret = await screenIntake(c, { task: v.value.task, output: v.value.output, title: v.value.title, criteria: v.value.criteria }, "Your free review wasn't used.", body?.allow_secrets === true);
   if (secret) return secret;
   const caller = ext ? ext.caller : await callerHash(c);
   if (!caller || !c.env.LEDGER) return err(503, "Free reviews aren't available from here. " + FREE_PAID_HINT);
@@ -2027,9 +2027,15 @@ for (const action of ["commit", "reveal", "submit", "retry-judge", "rematch"]) {
       // Refused before parsing past 128 KB (enough for 3 pieces of 6,000 characters, all JSON-escaped). Nothing changes.
       const body = await readJsonCapped(c.req.raw, MULTI_JUDGE_LIMITS.maxBodyBytes);
       if (body === TOO_BIG) return err(413, `The submit body is over ${MULTI_JUDGE_LIMITS.maxBodyBytes / 1024} KB. Nothing was changed; you can submit again before the deadline.`);
-      // The content screen runs inside the match, after the seat check (match.ts submit); counted here.
+      // The content screen runs inside the match, after the seat check (match.ts submit); counted here: a refusal by
+      // its marker, a submission the sender passed with allow_secrets by checking the same text again (counts only).
       const res = await forward(c.env, id, action, body ?? {});
-      if (res.status === 422) stat(c, "screen_2a_refused");
+      if (res.headers.get("x-content-screen") === "refused") stat(c, "screen_2a_refused");
+      else if (res.status < 300 && (body as any)?.allow_secrets === true && screenMode(c.env) !== "off") {
+        const b: any = body;
+        const fields = Array.isArray(b.pieces) ? { pieces: b.pieces.map((p: any) => ({ text: String(p?.text ?? "") })) } : { position: String(b.position ?? "") };
+        if (intakeCheck(fields).length) stat(c, "screen_2a_allowed");
+      }
       return res;
     }
     return forward(c.env, id, action, await c.req.json().catch(() => ({})));

@@ -448,6 +448,28 @@ t("allow_secrets: true passes fake keys on purpose, counted; the team's own rout
   }
 });
 
+t("refusals and allow_secrets passes are counted in /admin/stats, on every route, submissions included", async () => {
+  const e = env({ MULTI_JUDGE_ENABLED: "true" });
+  await call(e, "/review", withSecret);
+  await call(e, "/review", { ...withSecret, allow_secrets: true });
+  const c = await call(e, "/matches", { tier: "judge", seats: ["alpha", "beta"], rules: RULES });
+  const tok: Record<string, string> = {};
+  for (const s of ["alpha", "beta"]) tok[s] = (await call(e, "/join/judge", { match_id: c.body.match_id, seat: s })).body.seat_token;
+  await call(e, `/matches/${c.body.match_id}/submit`, { seat: "alpha", seat_token: tok.alpha, position: `Plan.\n${fake.github}` });
+  await call(e, `/matches/${c.body.match_id}/submit`, { seat: "alpha", seat_token: tok.alpha, position: `Plan.\n${fake.github}`, allow_secrets: true });
+  await new Promise((ok) => setTimeout(ok, 50));
+  const res = await app.fetch(new Request("https://x/admin/stats", { headers: { authorization: `Bearer ${"a".repeat(40)}` } }), e, ctx);
+  const st = JSON.stringify(await res.json());
+  assert.match(st, /"screen_2a_refused":2/, st.slice(0, 400));
+  assert.match(st, /"screen_2a_allowed":2/, st.slice(0, 400));
+});
+
+t("a refusal's receipt hashes only the fields that reach a provider (not the panel or other request settings)", async () => {
+  const r = await call(env(), "/review-3", { ...withSecret, title: "Deploy script", panel: "rotate" });
+  assert.equal(r.status, 422, r.text);
+  assert.deepEqual(Object.keys(r.body.receipt.payload.inputs_sha256).sort(), ["output", "task", "title"]);
+});
+
 t("the review routes' payment request carries the request rule, with how to send fake keys", async () => {
   const r = await call(env({ PAYMENTS_ENABLED: "true" }), "/review", clean);
   assert.equal(r.status, 402, r.text);
