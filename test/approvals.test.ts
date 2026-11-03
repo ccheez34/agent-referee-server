@@ -1,9 +1,9 @@
 // The owner-approvals Worker (owner-approvals/; rules-in-code DESIGN part A). Its records are the ones 3.0's gate
-// checks (agent-referee-owner-approval-v1, gate/README.md on agent-referee-mcp's gate-v0). These tests need no
-// installed packages, so they run anywhere.
+// checks (agent-referee-owner-approval-v2, gate/README.md in agent-referee-mcp 0.6.0). These tests need no installed
+// packages, so they run anywhere.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { APPROVAL_FORMAT, ApprovalStore, canonicalJson, handle, keyIdOf, parseApproval, verifyRecord } from "../owner-approvals/src/approvals.ts";
+import { APPROVAL_FORMAT, ApprovalStore, BASELINE_ACTIONS, DEFAULT_ACTIONS, canonicalJson, handle, keyIdOf, parseApproval, parsePolicy, verifyRecord } from "../owner-approvals/src/approvals.ts";
 import { PAGE, pageResponse } from "../owner-approvals/src/page.ts";
 import { canonicalJson as agentRefereeCanonical } from "../src/logic.ts";
 
@@ -34,27 +34,33 @@ const go = async (e: any, path: string, body?: unknown, token?: string) => {
 const POLICY = "2026-11-01.1";
 const COMMIT = "b".repeat(40);
 const TARGET = `agent-referee-server:production@${COMMIT}`;
-const deploy = { action: "deploy", target: ` ${TARGET} `, max_uses: 1, expires_in_hours: 2 };
+const SEATS = ["1.0", "2.0", "3.0", "4.0", "5.0"];
+const POL = { version: POLICY, members: SEATS };
+const deploy = { member: " 3.0 ", action: "deploy", target: ` ${TARGET} `, expires_in_hours: 2 };
 
-// The gate's own shape rules, copied from agent-referee-mcp gate-v0 dce97cf, gate/src/approvals.mjs (shapeProblem),
-// so a change on either side shows up here.
+// The gate's own shape rules, copied from agent-referee-mcp 0.6.0 (5c06536), gate/src/approvals.mjs (shapeProblem),
+// so a change on either side shows up here. A v1 approval is rejected; a v1 revocation still counts.
 const GATE_NONCE = /^[0-9a-f]{24,64}$/;
 const GATE_ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
+const GATE_MEMBER = /^[A-Za-z0-9._-]{1,40}$/;
 function gateShapeProblem(p: any): string | null {
   if (!p || typeof p !== "object") return "no payload";
-  if (p.format !== "agent-referee-owner-approval-v1") return "format";
+  if (p.format === "agent-referee-owner-approval-v1" && p.type !== "revocation") return "format v1 names no seat";
+  if (p.format !== "agent-referee-owner-approval-v2" && p.format !== "agent-referee-owner-approval-v1") return "format";
   if (!GATE_NONCE.test(String(p.nonce ?? ""))) return "nonce";
   const validTime = (v: any) => GATE_ISO.test(String(v ?? "")) && Number.isFinite(Date.parse(v));
   if (!validTime(p.issued_at)) return "issued_at";
   if (p.type === "revocation") return null;
   if (p.type !== "approval") return "type";
+  if (!GATE_MEMBER.test(String(p.member ?? ""))) return "member";
   if (typeof p.action !== "string" || !p.action) return "action";
   if (typeof p.target !== "string" || !p.target) return "target";
   if (p.target_sha256 !== null && !/^[0-9a-f]{64}$/.test(String(p.target_sha256))) return "target_sha256";
   if (typeof p.policy_version !== "string") return "policy_version";
   if (!validTime(p.expires_at)) return "expires_at";
-  const uses = p.max_uses ?? 1;
-  if (!Number.isInteger(uses) || uses < 1 || uses > 20) return "max_uses";
+  if (Date.parse(p.expires_at) <= Date.parse(p.issued_at)) return "expires_at after issued_at";
+  const uses = p.max_uses === undefined ? 1 : p.max_uses;
+  if (uses !== 1) return "max_uses";
   return null;
 }
 
@@ -63,11 +69,12 @@ test("the signed bytes are Agent Referee's canonical JSON, so one verifier works
     assert.equal(canonicalJson(v), agentRefereeCanonical(v));
 });
 
-test("approval requests: the gate policy's owner-only actions, one exact plain-text target, at most 20 uses and 24 hours", () => {
+test("approval requests: a seat, the policy's owner-only actions, one exact plain-text target, used once (count for several), at most 24 hours", () => {
   const ok = parseApproval(deploy);
-  assert.deepEqual(ok, { ok: true, value: { action: "deploy", target: TARGET, target_sha256: null, max_uses: 1, hours: 2 } });
-  const hashed = parseApproval({ action: "publish", target: "npm:agent-referee-client@0.11.0", target_sha256: "C".repeat(64), request_id: "r-1234567" });
-  assert.deepEqual(hashed, { ok: true, value: { action: "publish", target: "npm:agent-referee-client@0.11.0", target_sha256: "c".repeat(64), max_uses: 1, hours: 2, request_id: "r-1234567" } });
+  assert.deepEqual(ok, { ok: true, value: { action: "deploy", member: "3.0", target: TARGET, target_sha256: null, count: 1, hours: 2 } });
+  const hashed = parseApproval({ member: "1.0", action: "publish", target: "npm:agent-referee-client@0.11.0", target_sha256: "C".repeat(64), request_id: "r-1234567", max_uses: 1, count: 3 });
+  assert.deepEqual(hashed, { ok: true, value: { action: "publish", member: "1.0", target: "npm:agent-referee-client@0.11.0", target_sha256: "c".repeat(64), count: 3, hours: 2, request_id: "r-1234567" } });
+  for (const a of ["tag", "rollback", "feature_on"]) assert.equal(parseApproval({ ...deploy, action: a }).ok, true, `the policy template's ${a}`);
   for (const bad of [
     { ...deploy, action: "merge" },
     { ...deploy, action: "__proto__" },
@@ -79,9 +86,16 @@ test("approval requests: the gate policy's owner-only actions, one exact plain-t
     { ...deploy, target: "café" },
     { ...deploy, target_sha256: COMMIT },
     { ...deploy, target_sha256: 5 },
-    { ...deploy, max_uses: 21 },
-    { ...deploy, max_uses: 0 },
-    { ...deploy, max_uses: 1.5 },
+    { ...deploy, member: undefined },
+    { ...deploy, member: "" },
+    { ...deploy, member: "3 0" },
+    { ...deploy, member: "x".repeat(41) },
+    { ...deploy, max_uses: 2 },
+    { ...deploy, max_uses: 3 },
+    { ...deploy, max_uses: null },
+    { ...deploy, count: 21 },
+    { ...deploy, count: 0 },
+    { ...deploy, count: 1.5 },
     { ...deploy, expires_in_hours: 25 },
     { ...deploy, expires_in_hours: 0.1 },
     { ...deploy, expires_in_hours: "2" },
@@ -90,6 +104,33 @@ test("approval requests: the gate policy's owner-only actions, one exact plain-t
   ])
     assert.equal(parseApproval(bad).ok, false, JSON.stringify(bad));
   for (const empty of [undefined, null, ""]) assert.equal((parseApproval({ ...deploy, target_sha256: empty }) as any).value.target_sha256, null);
+  // Against a policy: only its seats, its actions, and its approval_max_hours.
+  const pol = { members: SEATS, actions: [...BASELINE_ACTIONS, "merge"], max_hours: 12 };
+  assert.equal(parseApproval({ ...deploy, member: "6.0" }, pol).ok, false, "a seat the policy doesn't list");
+  assert.equal(parseApproval({ ...deploy, action: "merge" }, pol).ok, true, "an action the policy lists");
+  assert.equal(parseApproval({ ...deploy, action: "tag" }, pol).ok, false, "an action it doesn't");
+  assert.equal(parseApproval({ ...deploy, expires_in_hours: 13 }, pol).ok, false, "longer than the policy's hours");
+  assert.equal(parseApproval({ ...deploy, expires_in_hours: 12 }, pol).ok, true);
+});
+
+test("the policy: its version, every seat, owner-only actions that keep the seven, at most 24 hours", () => {
+  assert.deepEqual(parsePolicy({ version: ` ${POLICY} `, members: [" 1.0", "2.0"] }), { ok: true, value: { version: POLICY, members: ["1.0", "2.0"], actions: DEFAULT_ACTIONS, max_hours: 24 } });
+  assert.deepEqual((parsePolicy({ ...POL, actions: [...BASELINE_ACTIONS, "tag"], approval_max_hours: 12 }) as any).value, { version: POLICY, members: SEATS, actions: [...BASELINE_ACTIONS, "tag"], max_hours: 12 });
+  for (const bad of [
+    { members: SEATS },
+    { version: "two words", members: SEATS },
+    { version: POLICY },
+    { version: POLICY, members: [] },
+    { version: POLICY, members: ["1.0", "1.0"] },
+    { version: POLICY, members: ["a b"] },
+    { ...POL, actions: ["deploy"] },
+    { ...POL, actions: [...BASELINE_ACTIONS, "Bad-Name"] },
+    { ...POL, actions: [...BASELINE_ACTIONS, "deploy"] },
+    { ...POL, approval_max_hours: 25 },
+    { ...POL, approval_max_hours: 1.5 },
+  ])
+    assert.equal(parsePolicy(bad).ok, false, JSON.stringify(bad));
+  assert.match((parsePolicy({ ...POL, actions: ["deploy", "publish"] }) as any).error, /payment, delete, secret, install, rule_change/);
 });
 
 test("only the owner's token signs; wrong tokens never lock him out; nothing is signed before the policy version is set", async () => {
@@ -97,9 +138,10 @@ test("only the owner's token signs; wrong tokens never lock him out; nothing is 
   assert.equal((await go(e, "/approve", deploy)).status, 401);
   // Anyone can send wrong tokens all day: the owner still gets through, and so does his revoke (fresh read of c3b0b64, #1).
   for (let i = 0; i < 25; i++) assert.equal((await go(e, "/approve", deploy, "w".repeat(40))).status, 401);
-  assert.equal((await go(e, "/approve", deploy, OWNER)).status, 409, "no policy version yet");
-  for (const version of ["", "two words", "x".repeat(65), 5]) assert.equal((await go(e, "/policy", { version }, OWNER)).status, 400, String(version));
-  assert.equal((await go(e, "/policy", { version: ` ${POLICY} ` }, OWNER)).status, 200);
+  assert.equal((await go(e, "/approve", deploy, OWNER)).status, 409, "no policy yet");
+  for (const version of ["", "two words", "x".repeat(65), 5]) assert.equal((await go(e, "/policy", { ...POL, version }, OWNER)).status, 400, String(version));
+  assert.equal((await go(e, "/policy", { version: POLICY }, OWNER)).status, 400, "the seats are needed");
+  assert.equal((await go(e, "/policy", { ...POL, version: ` ${POLICY} ` }, OWNER)).status, 200);
   assert.equal((await go(e, "/approve", deploy, OWNER)).status, 200);
   const none = await env({ OWNER_TOKEN: undefined });
   assert.match((await go(none.e, "/approve", deploy, OWNER)).body.error, /No owner token/);
@@ -114,7 +156,7 @@ test("the key is made inside the store, once, and never leaves it; every record 
   assert.equal(k1.body.public_key, k2.body.public_key);
   assert.equal(k1.body.key_id, await keyIdOf(k1.body.public_key));
   assert.equal(k1.headers.get("access-control-allow-origin"), "*");
-  await go(e, "/policy", { version: POLICY }, OWNER);
+  await go(e, "/policy", POL, OWNER);
   const rec = (await go(e, "/approve", deploy, OWNER)).body.approval;
   assert.equal(rec.public_key, k1.body.public_key, "the envelope's key is the served key (fresh read of c3b0b64, #4)");
   assert.equal(await verifyRecord(rec, k1.body.public_key), true);
@@ -134,22 +176,30 @@ test("the key is made inside the store, once, and never leaves it; every record 
   assert.equal(await store400({ ...deploy, action: "anything" }), 400);
 });
 
-test("an approval is exactly the gate's record: the exact action and target, and it expires", async () => {
+test("an approval is exactly the gate's v2 record: the seat, the exact action and target, used once, and it expires; count signs several", async () => {
   const { e } = await env();
-  await go(e, "/policy", { version: POLICY }, OWNER);
-  const r = await go(e, "/approve", { ...deploy, max_uses: 3 }, OWNER);
+  await go(e, "/policy", POL, OWNER);
+  assert.equal((await go(e, "/approve", { ...deploy, max_uses: 3 }, OWNER)).status, 400, "an approval is used once");
+  const r = await go(e, "/approve", { ...deploy, count: 3 }, OWNER);
   assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.approvals.length, 3);
+  assert.equal(new Set(r.body.approvals.map((x: any) => x.payload.nonce)).size, 3, "each with its own nonce");
+  for (const x of r.body.approvals) {
+    assert.equal(gateShapeProblem(x.payload), null);
+    assert.deepEqual([x.payload.issued_at, x.payload.expires_at, x.payload.member], [r.body.approval.payload.issued_at, r.body.approval.payload.expires_at, "3.0"]);
+  }
   const rec = r.body.approval;
   const p = rec.payload;
-  assert.deepEqual(Object.keys(p).sort(), ["action", "expires_at", "format", "issued_at", "max_uses", "nonce", "policy_version", "target", "target_sha256", "type"]);
-  assert.deepEqual([p.format, p.type, p.action, p.target, p.target_sha256, p.max_uses, p.policy_version], [APPROVAL_FORMAT, "approval", "deploy", TARGET, null, 3, POLICY]);
-  assert.equal(gateShapeProblem(p), null);
+  assert.deepEqual(Object.keys(p).sort(), ["action", "expires_at", "format", "issued_at", "max_uses", "member", "nonce", "policy_version", "target", "target_sha256", "type"]);
+  assert.deepEqual([p.format, p.type, p.member, p.action, p.target, p.target_sha256, p.max_uses, p.policy_version], [APPROVAL_FORMAT, "approval", "3.0", "deploy", TARGET, null, 1, POLICY]);
+  assert.equal(APPROVAL_FORMAT, "agent-referee-owner-approval-v2");
+  assert.equal(gateShapeProblem({ ...p, format: "agent-referee-owner-approval-v1" }), "format v1 names no seat", "the copied rule refuses v1, as the gate does");
   assert.equal(Date.parse(p.expires_at) - Date.parse(p.issued_at), 2 * 3_600_000);
   assert.match(p.nonce, /^[0-9a-f]{32}$/);
   assert.equal(rec.algorithm, "Ed25519");
   assert.match(canonicalJson(p), /"target_sha256":null/, "null is signed as null, not dropped: the gate needs the key");
   const pub = (await go(e, "/pubkey")).body.public_key;
-  assert.equal(await verifyRecord({ ...rec, payload: { ...p, max_uses: 5 } }, pub), false, "a changed field");
+  assert.equal(await verifyRecord({ ...rec, payload: { ...p, member: "4.0" } }, pub), false, "another seat isn't this signature");
   const other = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"])) as CryptoKeyPair;
   const otherPub = Buffer.from((await crypto.subtle.exportKey("raw", other.publicKey)) as ArrayBuffer).toString("base64");
   assert.equal(await verifyRecord(rec, otherPub), false, "another key");
@@ -157,7 +207,7 @@ test("an approval is exactly the gate's record: the exact action and target, and
 
 test("a double tap gives the first approval back, not a second one (fresh read of c3b0b64, #3)", async () => {
   const { e } = await env();
-  await go(e, "/policy", { version: POLICY }, OWNER);
+  await go(e, "/policy", POL, OWNER);
   const body = { ...deploy, request_id: "tap-0001-abcd" };
   const [a, b] = await Promise.all([go(e, "/approve", body, OWNER), go(e, "/approve", body, OWNER)]);
   assert.equal(a.body.approval.payload.nonce, b.body.approval.payload.nonce);
@@ -167,22 +217,33 @@ test("a double tap gives the first approval back, not a second one (fresh read o
   assert.equal((await go(e, "/approve", { ...body, request_id: "tap-0002-abcd" }, OWNER)).body.approval.payload.nonce === a.body.approval.payload.nonce, false, "a new request id is a new approval");
   // The same id with different fields is refused, not answered with the old approval (part A review 1).
   assert.equal((await go(e, "/approve", { ...body, target: "agent-referee-server:staging" }, OWNER)).status, 409);
+  assert.equal((await go(e, "/approve", { ...body, member: "4.0" }, OWNER)).status, 409, "the same id for another seat");
+  assert.equal((await go(e, "/approve", { ...body, count: 2 }, OWNER)).status, 409, "the same id with another count");
   // ...and so is a different length, a newer policy version, a revoked or an expired first approval (fresh read of
   // 1091ea5, #1): a same-id call never hands back an approval other than the one asked for, or one that no longer counts.
   const shorter = await go(e, "/approve", { ...body, expires_in_hours: 0.25 }, OWNER);
   assert.deepEqual([shorter.status, shorter.body.approval], [409, undefined]);
-  await go(e, "/policy", { version: "2026-11-01.2" }, OWNER);
+  await go(e, "/policy", { ...POL, version: "2026-11-01.2" }, OWNER);
   assert.equal((await go(e, "/approve", body, OWNER)).status, 409, "another policy version");
-  await go(e, "/policy", { version: POLICY }, OWNER);
+  await go(e, "/policy", POL, OWNER);
   assert.equal((await go(e, "/approve", body, OWNER)).body.repeat, true, "back under the same version, it's the same approval");
   await go(e, "/revoke", { nonce: a.body.approval.payload.nonce }, OWNER);
   const afterRevoke = await go(e, "/approve", body, OWNER);
   assert.deepEqual([afterRevoke.status, /revoked or has expired/.test(afterRevoke.body.error)], [409, true]);
 });
 
+test("a double tap on count 2 gives the same two approvals back", async () => {
+  const { e } = await env();
+  await go(e, "/policy", POL, OWNER);
+  const body = { ...deploy, count: 2, request_id: "tap-0004-abcd" };
+  const [a, b] = await Promise.all([go(e, "/approve", body, OWNER), go(e, "/approve", body, OWNER)]);
+  assert.deepEqual(a.body.approvals.map((x: any) => x.payload.nonce), b.body.approvals.map((x: any) => x.payload.nonce));
+  assert.equal((await go(e, "/approvals")).body.approvals.length, 2);
+});
+
 test("an expired first approval isn't handed back for its request id", async () => {
   const { e, store } = await env();
-  await go(e, "/policy", { version: POLICY }, OWNER);
+  await go(e, "/policy", POL, OWNER);
   const body = { ...deploy, expires_in_hours: 0.25, request_id: "tap-0003-abcd" };
   assert.equal((await go(e, "/approve", body, OWNER)).status, 200);
   store.now = () => Date.now() + 20 * 60_000; // 20 minutes later: it expired after 15
@@ -214,7 +275,7 @@ test("revoke-all signs and stores every revocation in one turn and one write; a 
   })();
   const store = new ApprovalStore(state);
   const e = { OWNER_TOKEN: OWNER, APPROVALS: { idFromName: (x: string) => x, get: () => ({ fetch: (u: string, i?: RequestInit) => store.fetch(new Request(u, i)) }) } } as any;
-  await go(e, "/policy", { version: POLICY }, OWNER);
+  await go(e, "/policy", POL, OWNER);
   for (const t of ["npm:a@1.0.0", "npm:b@1.0.0", "npm:c@1.0.0"]) await go(e, "/approve", { ...deploy, action: "publish", target: t }, OWNER);
   // An approval sent during revoke-all lands wholly before it (and is revoked) or wholly after it (and stays live).
   const before = state.puts;
@@ -237,7 +298,7 @@ test("revoke-all signs and stores every revocation in one turn and one write; a 
 
 test("revocations name the approval's nonce; revoke-all; the list is open to anyone, as the gate reads it", async () => {
   const { e } = await env();
-  await go(e, "/policy", { version: POLICY }, OWNER);
+  await go(e, "/policy", POL, OWNER);
   const a = (await go(e, "/approve", deploy, OWNER)).body.approval;
   const b = (await go(e, "/approve", { ...deploy, action: "publish", target: "npm:x@1.0.0" }, OWNER)).body.approval;
   assert.equal((await go(e, "/revoke", { nonce: "f".repeat(32) }, OWNER)).status, 404, "a mistyped nonce revokes nothing, and says so");
@@ -260,11 +321,12 @@ test("revocations name the approval's nonce; revoke-all; the list is open to any
   assert.equal(list.status, 200);
   assert.deepEqual([list.body.approvals.map((r: any) => r.payload.type), list.body.policy_version], [["approval", "approval", "revocation", "revocation"], POLICY]);
   assert.equal((await go(e, "/status", {})).status, 401, "the owner's status needs his token");
+  assert.deepEqual((await go(e, "/status", {}, OWNER)).body.policy, { version: POLICY, members: SEATS, actions: DEFAULT_ACTIONS, max_hours: 24 });
 });
 
 test("freeze: the list answers 503 so every gate refuses, nothing new is signed, and revoking still works", async () => {
   const { e, store } = await env();
-  await go(e, "/policy", { version: POLICY }, OWNER);
+  await go(e, "/policy", POL, OWNER);
   const a = (await go(e, "/approve", deploy, OWNER)).body.approval;
   assert.equal((await go(e, "/freeze", { on: "yes" }, OWNER)).status, 400);
   assert.equal((await go(e, "/freeze", { on: true })).status, 401);
@@ -284,7 +346,7 @@ test("freeze: the list answers 503 so every gate refuses, nothing new is signed,
 
 test("the store keeps approvals 7 days past expiry and revocations 8 days past issue, so a revocation outlives its approval", async () => {
   const { e, store } = await env();
-  await go(e, "/policy", { version: POLICY }, OWNER);
+  await go(e, "/policy", POL, OWNER);
   const a = (await go(e, "/approve", { ...deploy, expires_in_hours: 2 }, OWNER)).body.approval;
   await go(e, "/revoke", { nonce: a.payload.nonce }, OWNER);
   const types = async () => (await go(e, "/approvals")).body.approvals.map((r: any) => r.payload.type);

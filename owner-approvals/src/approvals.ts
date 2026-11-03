@@ -2,21 +2,27 @@
 // apart from Agent Referee, with its own Ed25519 key and the owner's own token. The owner signs approvals here from his
 // phone; every gate, from any AI company's session, reads them and checks them against the pinned public key. Sessions
 // never hold the owner's token or the signing key, so they can't make one. The records are exactly the ones 3.0's gate
-// checks: `agent-referee-owner-approval-v1` (agent-referee-mcp, branch gate-v0, gate/README.md; 2.0's 1126).
+// checks: `agent-referee-owner-approval-v2` (agent-referee-mcp 0.6.0, gate/README.md, "The approval record part A must
+// produce"): each approval names the seat it's for and is used once; several uses are several approvals.
 // Deploying it, and setting its token, is the owner's (installing a server is on his owner-only list).
 
-export const APPROVAL_FORMAT = "agent-referee-owner-approval-v1";
-// The gate policy's owner-only actions. Publishing is on his list (his "2. A", Oct 31, 12:16).
-export const ACTIONS = ["deploy", "publish", "payment", "delete", "secret", "install", "rule_change"] as const;
-export type Action = (typeof ACTIONS)[number];
+export const APPROVAL_FORMAT = "agent-referee-owner-approval-v2";
+// The seven actions every gate policy keeps owner-only (the gate won't start without them; publishing is on his list,
+// his "2. A", Oct 31, 12:16), and the default list: those plus tag, rollback and feature_on (3.0's policy template, Nov
+// 3). /policy sets the policy's own list.
+export const BASELINE_ACTIONS = ["deploy", "publish", "payment", "delete", "secret", "install", "rule_change"];
+export const DEFAULT_ACTIONS = [...BASELINE_ACTIONS, "tag", "rollback", "feature_on"];
+export type Action = string;
+const ACTION_NAME = /^[a-z][a-z0-9_]{0,39}$/; // the gate policy's action names
+export const MEMBER = /^[A-Za-z0-9._-]{1,40}$/; // a seat, as its gate's GATE_MEMBER names it
 const HEX64 = /^[0-9a-f]{64}$/;
 const NONCE = /^[0-9a-f]{24,64}$/;
 const VERSION = /^[A-Za-z0-9._:-]{1,64}$/;
 const REQUEST_ID = /^[A-Za-z0-9-]{8,64}$/;
 // Printable ASCII only, so a target can't hide characters or run right to left on his phone (fresh read of c3b0b64, #7).
 const TARGET = /^[\x20-\x7e]{1,200}$/;
-const MAX_USES = 20;
-const MAX_HOURS = 24;
+const MAX_COUNT = 20; // approvals signed at once, each used once with its own nonce
+const MAX_HOURS = 24; // at most a day here, even when the gate policy's approval_max_hours allows more
 const KEEP_MS = 7 * 86_400_000; // approvals: 7 days past their expiry
 // Revocations: 8 days past issue. An approval lasts at most a day, so its revocation is always kept at least as long.
 const KEEP_REVOCATION_MS = 8 * 86_400_000;
@@ -51,6 +57,8 @@ const sha256Hex = async (s: string | Uint8Array<ArrayBuffer>) => [...new Uint8Ar
 export const keyIdOf = async (publicKeyB64: string) => (await sha256Hex(unb64(publicKeyB64))).slice(0, 16);
 
 export type Envelope = { payload: Record<string, unknown>; signature: string; algorithm: "Ed25519"; public_key: string };
+/** What the store keeps of the gate policy: its version, its seats (members), its owner-only actions, its longest approval. */
+export type Policy = { version: string; members: string[]; actions: string[]; max_hours: number };
 export type Signer = { key: CryptoKey; publicKey: string };
 
 const json = (status: number, body: unknown, extra: Record<string, string> = {}) =>
@@ -94,13 +102,18 @@ export async function verifyRecord(r: Envelope, pinnedPublicKeyB64: string): Pro
 }
 
 /**
- * Checks an approval request; returns the fields to sign (without times, nonce and policy version) or an error. The
- * gate compares `target` and `target_sha256` exactly, so the exact version goes in one of them, for example
- * "agent-referee-server:production@<40-hex commit>", or a bundle's sha256 in target_sha256.
+ * Checks an approval request against the policy; returns the fields to sign (without times, nonces and policy version)
+ * or an error. The gate compares `target` and `target_sha256` exactly, so the exact version goes in one of them, for
+ * example "agent-referee-server:production@<40-hex commit>", or a bundle's sha256 in target_sha256. An approval is used
+ * once: `count` asks for that many, each with its own nonce (a standing "at most 3" is three approvals).
  */
-export function parseApproval(body: any): { ok: true; value: { action: Action; target: string; target_sha256: string | null; max_uses: number; hours: number; request_id?: string } } | { ok: false; error: string } {
+export function parseApproval(body: any, policy: { members?: string[]; actions?: string[]; max_hours?: number } = {}): { ok: true; value: { action: Action; member: string; target: string; target_sha256: string | null; count: number; hours: number; request_id?: string } } | { ok: false; error: string } {
   if (!body || typeof body !== "object") return { ok: false, error: "Send JSON." };
-  if (!ACTIONS.includes(body.action)) return { ok: false, error: `action must be one of ${ACTIONS.join(", ")}.` };
+  const actions = policy.actions ?? DEFAULT_ACTIONS;
+  if (typeof body.action !== "string" || !actions.includes(body.action)) return { ok: false, error: `action must be one of ${actions.join(", ")}.` };
+  const member = typeof body.member === "string" ? body.member.trim() : "";
+  if (!MEMBER.test(member)) return { ok: false, error: "member: the seat it's for, as its gate names it (for example 3.0): letters, digits, . _ -, at most 40." };
+  if (policy.members && !policy.members.includes(member)) return { ok: false, error: `member must be one of the policy's seats: ${policy.members.join(", ")}.` };
   const target = typeof body.target === "string" ? body.target.trim() : "";
   if (!TARGET.test(target)) return { ok: false, error: "target: the exact thing, in plain letters, digits and punctuation, at most 200, for example agent-referee-server:production@<40-hex commit>." };
   let target_sha256: string | null = null;
@@ -109,12 +122,34 @@ export function parseApproval(body: any): { ok: true; value: { action: Action; t
     if (!HEX64.test(sha)) return { ok: false, error: "target_sha256 must be 64 hex characters, or left empty." };
     target_sha256 = sha;
   }
-  const max_uses = body.max_uses === undefined ? 1 : body.max_uses;
-  if (!Number.isInteger(max_uses) || max_uses < 1 || max_uses > MAX_USES) return { ok: false, error: `max_uses must be a whole number from 1 to ${MAX_USES}.` };
-  const hours = body.expires_in_hours === undefined ? 2 : body.expires_in_hours;
-  if (typeof hours !== "number" || !(hours >= 0.25 && hours <= MAX_HOURS)) return { ok: false, error: `expires_in_hours must be from 0.25 to ${MAX_HOURS}.` };
+  if (body.max_uses !== undefined && body.max_uses !== 1) return { ok: false, error: "An approval is used once (max_uses 1). For several uses, send count: that many approvals, each with its own nonce." };
+  const count = body.count === undefined ? 1 : body.count;
+  if (!Number.isInteger(count) || count < 1 || count > MAX_COUNT) return { ok: false, error: `count must be a whole number from 1 to ${MAX_COUNT}.` };
+  const maxHours = Math.min(MAX_HOURS, policy.max_hours ?? MAX_HOURS);
+  const hours = body.expires_in_hours === undefined ? Math.min(2, maxHours) : body.expires_in_hours;
+  if (typeof hours !== "number" || !(hours >= 0.25 && hours <= maxHours)) return { ok: false, error: `expires_in_hours must be from 0.25 to ${maxHours} (the policy's approval_max_hours).` };
   if (body.request_id !== undefined && (typeof body.request_id !== "string" || !REQUEST_ID.test(body.request_id))) return { ok: false, error: "request_id: 8 to 64 letters, digits or dashes." };
-  return { ok: true, value: { action: body.action, target, target_sha256, max_uses, hours, ...(body.request_id ? { request_id: body.request_id } : {}) } };
+  return { ok: true, value: { action: body.action, member, target, target_sha256, count, hours, ...(body.request_id ? { request_id: body.request_id } : {}) } };
+}
+
+/** Checks the gate policy's fields the store keeps; returns the policy or an error. */
+export function parsePolicy(body: any): { ok: true; value: Policy } | { ok: false; error: string } {
+  const version = typeof body?.version === "string" ? body.version.trim() : "";
+  if (!VERSION.test(version)) return { ok: false, error: 'version must be the gate policy\'s "version": 1 to 64 letters, digits, or . _ : -' };
+  const members = Array.isArray(body?.members) ? body.members.map((m: unknown) => (typeof m === "string" ? m.trim() : "")) : [];
+  if (!members.length || members.length > 40 || members.some((m: string) => !MEMBER.test(m)) || new Set(members).size !== members.length)
+    return { ok: false, error: 'members must list every seat, as the gate policy\'s "members" does (for example ["1.0", "2.0", "3.0"]): letters, digits, . _ -, each once.' };
+  let actions = DEFAULT_ACTIONS;
+  if (body?.actions !== undefined) {
+    if (!Array.isArray(body.actions) || !body.actions.length || body.actions.length > 40 || body.actions.some((a: unknown) => typeof a !== "string" || !ACTION_NAME.test(a)) || new Set(body.actions).size !== body.actions.length)
+      return { ok: false, error: "actions: the gate policy's owner-only action names (lower-case letters, digits, _), each once." };
+    const missing = BASELINE_ACTIONS.filter((a) => !body.actions.includes(a));
+    if (missing.length) return { ok: false, error: `actions must include ${missing.join(", ")}: every gate keeps them owner-only.` };
+    actions = body.actions;
+  }
+  const max_hours = body?.approval_max_hours === undefined ? MAX_HOURS : body.approval_max_hours;
+  if (!Number.isInteger(max_hours) || max_hours < 1 || max_hours > MAX_HOURS) return { ok: false, error: `approval_max_hours must be a whole number from 1 to ${MAX_HOURS}: the gate policy's, at most a day here.` };
+  return { ok: true, value: { version, members, actions, max_hours } };
 }
 
 /** Constant-time check: both sides hashed, then compared byte by byte. No token configured means no access. */
@@ -146,47 +181,42 @@ export class ApprovalStore {
     // turn (blockConcurrencyWhile), so approvals, revocations and the freeze never interleave (#2). The key is fetched
     // first, because storeKey takes a turn of its own. Nothing throws out of a turn: an error there would reset the store.
     if (action === "approve") {
-      const parsed = parseApproval(body);
-      if (!parsed.ok) return json(400, { error: parsed.error });
-      const v = parsed.value;
       const signer = await storeKey(this.state);
       const out = await this.state.blockConcurrencyWhile(async () => {
         try {
           if (await st.get("frozen")) return { status: 409, body: { error: "Approvals are frozen. Unfreeze them first. Nothing was approved." } };
-          const policy_version: string | undefined = await st.get("policy_version");
-          if (!policy_version) return { status: 409, body: { error: "Set the policy version first: POST /policy with the gate policy's version." } };
+          const policy: Policy | undefined = await st.get("policy");
+          if (!policy) return { status: 409, body: { error: "Set the policy first: POST /policy with the gate policy's version and members. Nothing was approved." } };
+          // Checked against the stored policy, inside the turn that signs, so a policy change can't slip between them.
+          const parsed = parseApproval(body, policy);
+          if (!parsed.ok) return { status: 400, body: { error: parsed.error } };
+          const v = parsed.value;
           const now = this.now();
           const list = fresh((await st.get("records")) ?? [], now);
-          const rids: Record<string, { nonce: string; at: number }> = Object.fromEntries(Object.entries((await st.get("rids")) ?? {}).filter(([, x]: any) => now - x.at < REQUEST_ID_MS)) as any;
+          const rids: Record<string, { nonces?: string[]; nonce?: string; at: number }> = Object.fromEntries(Object.entries((await st.get("rids")) ?? {}).filter(([, x]: any) => now - x.at < REQUEST_ID_MS)) as any;
           const hit = v.request_id ? rids[v.request_id] : undefined;
-          const first = hit && list.find((r) => r.payload.type === "approval" && r.payload.nonce === hit.nonce);
-          if (first) {
-            // The same request again (a double tap) gets the first approval back, but only if every field, the length
-            // and the policy version match, and it's still live; otherwise nothing is approved (fresh read of 1091ea5, #1).
-            const p = first.payload;
-            const same = p.action === v.action && p.target === v.target && p.target_sha256 === v.target_sha256 && p.max_uses === v.max_uses && Date.parse(String(p.expires_at)) - Date.parse(String(p.issued_at)) === Math.round(v.hours * 3_600_000) && p.policy_version === policy_version;
+          const firsts = (hit ? (hit.nonces ?? (hit.nonce ? [hit.nonce] : [])) : []).map((n) => list.find((r) => r.payload.type === "approval" && r.payload.nonce === n)).filter(Boolean) as Envelope[];
+          if (firsts.length) {
+            // The same request again (a double tap) gets the first approvals back, but only if every field, the seat,
+            // the count, the length and the policy version match, and they're still live; otherwise nothing is
+            // approved (fresh read of 1091ea5, #1).
+            const p = firsts[0].payload;
+            const same = firsts.length === v.count && p.member === v.member && p.action === v.action && p.target === v.target && p.target_sha256 === v.target_sha256 && Date.parse(String(p.expires_at)) - Date.parse(String(p.issued_at)) === Math.round(v.hours * 3_600_000) && p.policy_version === policy.version;
             if (!same) return { status: 409, body: { error: "This request id was already used for a different approval, or under another policy version. Nothing new was approved." } };
-            const revoked = list.some((r) => r.payload.type === "revocation" && r.payload.nonce === p.nonce);
+            const revoked = firsts.some((f) => list.some((r) => r.payload.type === "revocation" && r.payload.nonce === f.payload.nonce));
             if (revoked || Date.parse(String(p.expires_at)) <= now) return { status: 409, body: { error: "This request id's approval was revoked or has expired. Send a new request id. Nothing new was approved." } };
-            return { status: 200, body: { approval: first, repeat: true } };
+            return { status: 200, body: { approval: firsts[0], approvals: firsts, repeat: true } };
           }
-          const payload = {
-            format: APPROVAL_FORMAT,
-            type: "approval",
-            action: v.action,
-            target: v.target,
-            target_sha256: v.target_sha256,
-            policy_version,
-            issued_at: new Date(now).toISOString(),
-            expires_at: new Date(now + Math.round(v.hours * 3_600_000)).toISOString(),
-            nonce: hex(16),
-            max_uses: v.max_uses,
-          };
-          const record = await signRecord(payload, signer);
-          list.push(record);
+          const issued_at = new Date(now).toISOString();
+          const expires_at = new Date(now + Math.round(v.hours * 3_600_000)).toISOString();
+          const records: Envelope[] = [];
+          for (let i = 0; i < v.count; i++)
+            records.push(await signRecord({ format: APPROVAL_FORMAT, type: "approval", member: v.member, action: v.action, target: v.target, target_sha256: v.target_sha256, policy_version: policy.version, issued_at, expires_at, nonce: hex(16), max_uses: 1 }, signer));
+          // All signed before anything is stored: a failure partway stores none of them.
+          list.push(...records);
           await st.put("records", list.slice(-MAX_RECORDS));
-          if (v.request_id) await st.put("rids", { ...rids, [v.request_id]: { nonce: payload.nonce, at: now } });
-          return { status: 200, body: { approval: record } };
+          if (v.request_id) await st.put("rids", { ...rids, [v.request_id]: { nonces: records.map((r) => String(r.payload.nonce)), at: now } });
+          return { status: 200, body: { approval: records[0], approvals: records } };
         } catch (e: any) {
           return { status: 503, body: { error: `Couldn't sign or store the approval: ${String(e?.message ?? e).slice(0, 200)}. Nothing was approved.` } };
         }
@@ -237,11 +267,15 @@ export class ApprovalStore {
       return json(out.status, out.body);
     }
     // The gate reads {"approvals": [...]} and tells approvals and revocations apart by `type`.
-    if (action === "list")
-      return json(200, { approvals: fresh((await st.get("records")) ?? [], this.now()), policy_version: (await st.get("policy_version")) ?? null, frozen: !!(await st.get("frozen")) });
+    if (action === "list") {
+      const policy: Policy | undefined = await st.get("policy");
+      return json(200, { approvals: fresh((await st.get("records")) ?? [], this.now()), policy: policy ?? null, policy_version: policy?.version ?? null, frozen: !!(await st.get("frozen")) });
+    }
     if (action === "set-policy") {
-      await st.put("policy_version", body.version);
-      return json(200, { ok: true });
+      const parsed = parsePolicy(body);
+      if (!parsed.ok) return json(400, { error: parsed.error });
+      await st.put("policy", parsed.value);
+      return json(200, { ok: true, policy: parsed.value });
     }
     if (action === "freeze") {
       await st.put("frozen", !!body.on);
@@ -288,7 +322,7 @@ export async function handle(req: Request, env: Env, page: () => Response): Prom
   const body: any = await req.json().catch(() => null);
   if (path === "/status") {
     const l = await call(env, "list");
-    return json(200, { frozen: l.frozen, policy_version: l.policy_version, live: live(l.approvals, now) });
+    return json(200, { frozen: l.frozen, policy: l.policy, policy_version: l.policy_version, live: live(l.approvals, now) });
   }
   if (path === "/freeze") {
     if (typeof body?.on !== "boolean") return json(400, { error: 'Send {"on": true} to freeze every approval, or {"on": false} to unfreeze.' });
@@ -296,11 +330,11 @@ export async function handle(req: Request, env: Env, page: () => Response): Prom
     return json(200, { frozen: body.on });
   }
   if (path === "/policy") {
-    // The gate policy's `version`: an approval made under another version doesn't count.
-    const version = typeof body?.version === "string" ? body.version.trim() : "";
-    if (!VERSION.test(version)) return json(400, { error: 'version must be the gate policy\'s "version": 1 to 64 letters, digits, or . _ : -' });
-    await call(env, "set-policy", { version });
-    return json(200, { ok: true, policy_version: version });
+    // The gate policy's version (an approval made under another one doesn't count), its seats, its owner-only actions
+    // and its approval_max_hours, as the owner copies them from the policy file. Checked again inside the store.
+    const parsed = parsePolicy(body);
+    if (!parsed.ok) return json(400, { error: parsed.error });
+    return pass(env, "set-policy", parsed.value);
   }
   // Revoking and approving are decided inside the store, in one turn each (fresh read of 1091ea5, #2 and #3).
   if (path === "/revoke") return pass(env, "revoke", body);
