@@ -37,21 +37,36 @@ const fake = {
 
 const cp = (...c: number[]) => c.map((x) => String.fromCodePoint(x)).join("");
 const hex64 = "4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318";
+const pg = "postgres" + "://", web = "https" + "://", pw = "r3al" + "PassW"; // URL fakes, built so this file holds none
 const keyBody = () => Buffer.from(crypto.getRandomValues(new Uint8Array(48))).toString("base64");
 
+const body = keyBody();
 test("each kind of secret is found, by field and line, never echoing the text", () => {
-  const body = keyBody();
   const cases: Array<[string, string]> = [
     [fake.openai, "api_key"], [fake.stripe, "api_key"], [fake.aws, "api_key"], [fake.github, "api_key"], [fake.slack, "api_key"], [fake.google, "api_key"],
     [`${fake.pem}\n${body}\n-----END RSA PRIVATE KEY-----`, "private_key"],
     [`${fake.pem}\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,ABCD\n\n${body}`, "private_key"],
     [`"private_key": "${fake.pem}\\n${body}\\n-----END RSA PRIVATE KEY-----\\n"`, "private_key"],
     [fake.url, "url_credentials"], ["redis://:" + "Tr0ub4dor3xQ" + "@cache:6379", "url_credentials"],
-    [`{"a":"http://localhost:5173/x","b":"postgres://u:${"r3alPassW"}@db"}`, "url_credentials"],
-    [`postgres://u:<password>@h,postgres://u:${"r3alPassW"}@h2`, "url_credentials"],
-    ["https://u:pa$word123@db", "url_credentials"],
-    ["https://u:$ecretP4ss@db", "url_credentials"], // a real password starting with "$" isn't a $VAR
-    [`postgres://u:${"r3alPassW"}@db.example.com/app?admin=ops@corp`, "url_credentials"], // a later "@" and "example" don't hide it
+    [`{"a":"http://localhost:5173/x","b":"${pg}u:${pw}@db"}`, "url_credentials"],
+    [`${pg}u:<password>@h,${pg}u:${pw}@h2`, "url_credentials"],
+    [`${web}u:pa$word123@db`, "url_credentials"],
+    [`${web}u:$ecretP4ss@db`, "url_credentials"], // a real password starting with "$" isn't a $VAR
+    [`${pg}u:${pw}@db.example.com/app?admin=ops@corp`, "url_credentials"], // a later "@" and "example" don't hide it
+    [`${pg}admin:P@ss${pw}@db.internal/app`, "url_credentials"], // a raw "@" inside the password
+    [`const PEM = "${fake.pem}\\n" +\n    "${body}\\n" +\n    "-----END RSA PRIVATE KEY-----";`, "private_key"], // Java-style concatenation
+    [`key = ("${fake.pem}\\n"\n       "${body}\\n")`, "private_key"], // Python implicit concatenation
+    [`const lines = ["${fake.pem}",\n  "${body}",`, "private_key"], // a JS array of lines
+    [`# ${fake.pem}\n# ${body}`, "private_key"], // commented out
+    [`> ${fake.pem}\n> ${body}`, "private_key"], // quoted in an email
+    [`public static final String PRIVATE_KEY = "0x${hex64}";`, "wallet_key"],
+    [`uint256 public deployerPrivateKey = 0x${hex64};`, "wallet_key"],
+    [`const w = new ethers.Wallet("0x${hex64}");`, "wallet_key"],
+    [`acct = Account.from_key("0x${hex64}")`, "wallet_key"],
+    [`await client.sendTransaction({ account: privateKeyToAccount("0x${hex64}") })`, "wallet_key"],
+    [`DEPLOYER_KEY=0x${hex64}`, "wallet_key"],
+    [`Mnemonic phrase: ${"abandon ability able about above absent absorb abstract absurd abuse access accident"}`, "seed_phrase"],
+    ["client-key-data: " + Buffer.from(`${fake.pem}\n${body}${body}${body}${body}\n`).toString("base64").slice(0, 76), "encoded_private_key"], // wrapped at 76
     [fake.bearer, "bearer_token"],
     [`const PRIVATE_KEY = "0x${hex64}";`, "wallet_key"],
     [`mnemonic: "${"abandon ability able about above absent absorb abstract absurd abuse access accident"}"`, "seed_phrase"],
@@ -62,6 +77,9 @@ test("each kind of secret is found, by field and line, never echoing the text", 
     assert.deepEqual(hits, [{ field: "output", line: 3, kind }], `${kind}: ${secret.slice(0, 12)}`);
     assert.ok(!JSON.stringify(hits).includes(secret.slice(4, 14)), "the hit holds no part of the secret");
   }
+  // The label on the line above the words; a key header ending one piece and its body opening the next.
+  assert.deepEqual(intakeCheck({ output: `Recovery phrase:\n${"abandon ability able about above absent absorb abstract absurd abuse access accident"}` }), [{ field: "output", line: 2, kind: "seed_phrase" }]);
+  assert.deepEqual(intakeCheck({ pieces: [{ text: `config\n${fake.pem}` }, { text: `${body}\n-----END RSA PRIVATE KEY-----` }] }), [{ field: "pieces[0].text", line: 2, kind: "private_key" }]);
   // Nested fields: pieces, criteria names, rules.
   assert.deepEqual(intakeCheck({ pieces: [{ text: "ok" }, { name: "env", text: `a\nb\n${fake.github}` }] }), [{ field: "pieces[1].text", line: 3, kind: "api_key" }]);
   assert.deepEqual(intakeCheck({ rules: `Judge fairly.\n${fake.stripe}` }), [{ field: "rules", line: 2, kind: "api_key" }]);
@@ -69,7 +87,7 @@ test("each kind of secret is found, by field and line, never echoing the text", 
 });
 
 test("invisible characters can't split a key past the check: format characters, tags, the line separator, joiners", () => {
-  for (const c of [0x200b, 0x180e, 0xe0041, 0x2028, 0x34f, 0xfe0f, 0xad, 0x2060, 0xfeff])
+  for (const c of [0x200b, 0x180e, 0xe0041, 0x2028, 0x34f, 0xfe0f, 0xad, 0x2060, 0xfeff, 0x17b4, 0x17b5, 0x180b, 0x180f, 0xfff0])
     assert.equal(intakeCheck({ output: fake.github.slice(0, 10) + cp(c) + fake.github.slice(10) })[0]?.kind, "api_key", `U+${c.toString(16)}`);
 });
 
@@ -99,17 +117,29 @@ test("ordinary code and documentation pass: hashes, base64, the word token, plac
     "-----BEGIN PUBLIC KEY-----\n" + keyBody(),
     "-----BEGIN CERTIFICATE-----",
     'mnemonic = "test test test test test test test test test test test junk"',
+    'mnemonic: "candy maple cake sugar pudding cream honey rich smooth crumble sweet treat"',
+    'mnemonic: "myth like bonus scare over problem client lizard pioneer submit female collect"',
+    'mnemonic = "legal winner thank year wave sausage worth useful legal winner thank yellow"',
+    `const PRIVATE_KEY = "0x${"ac0974be" + "c39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"}"; // Hardhat account #0`,
+    `DATABASE_URL: ${pg}postgres:postgres@localhost:5432/app_test`,
+    `const url = "amqp://guest:guest@localhost:5672/";`,
+    `mysql://root:root@127.0.0.1:3306/db`,
+    `redis://:foobared@localhost:6379/0`,
+    `${pg}app:${pw}@localhost:5432/dev`,
+    "OPENAI_API_KEY=sk-abcdef1234567890abcdef", // a typed run: a docs fake
+    "const tx = await wallet.sendTransaction(tx); // hash 0x" + "4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318",
     "The skin-deep tasks: risk assessment, asking for 12 apples.",
   ];
   for (const line of ok) assert.deepEqual(intakeCheck({ output: line }), [], line);
 });
 
 test("a crafted long line costs milliseconds, not seconds, at the field limit", () => {
-  const line = "a://b:".repeat(2000); // 12,000 characters, the longest validated field
-  const t0 = Date.now();
-  intakeCheck({ output: line });
-  intakeCheck({ output: "x@" + line });
-  assert.ok(Date.now() - t0 < 400, `${Date.now() - t0} ms`);
+  const shapes = ["a://b:".repeat(2000), "x@" + "a://b:".repeat(2000), "a://b:".repeat(1999) + "c@", "a.".repeat(6000), "sk-".repeat(4000), "xoxb-".repeat(2400), "redis://:".repeat(1333)];
+  for (const line of shapes) {
+    const t0 = Date.now();
+    intakeCheck({ output: line.slice(0, 12000) }); // 12,000 characters, the longest validated field
+    assert.ok(Date.now() - t0 < 150, `${line.slice(0, 12)}: ${Date.now() - t0} ms`);
+  }
 });
 
 test("an input with more strings than any validated field set can hold is refused, not passed unscreened", () => {
@@ -341,6 +371,55 @@ t("every route that carries customer text is screened, in every text field: revi
   }
 });
 
+t("only validated fields are screened: an extra field the route ignores (and never sends to a provider) isn't refused", async () => {
+  const r = await call(env(), "/review", { ...clean, notes: `deploy with ${fake.github}` });
+  assert.equal(r.status, 200, r.text);
+});
+
+t("match creation screens only what reaches a judge: an rps key or a draw option is never screened", async () => {
+  const rps = await call(env(), "/matches", { tier: "rps", seats: ["alpha", "beta"], key: "deal:" + fake.openai.slice(0, 30) });
+  assert.equal(rps.status, 201, rps.text);
+  const draw = await call(env(), "/matches", { tier: "draw", seats: ["alpha", "beta"], options: ["one", `amqp://ops:${pw}@mq`] });
+  assert.equal(draw.status, 201, draw.text);
+});
+
+t("a refused submission says already_settled only when the seat really paid", async () => {
+  const f = fakeFacilitator();
+  try {
+    const e = env({ PAYMENTS_ENABLED: "true", JOIN_WAIT_SECONDS: "5" });
+    const c = await call(e, "/matches", { tier: "judge", seats: ["alpha", "beta"], rules: RULES });
+    assert.equal(c.status, 201, c.text);
+    // A paid seat waits for the other one (and is released, uncharged, if nobody comes): join both at once.
+    const tok: Record<string, string> = {};
+    const join = (s: string, i: number) => call(e, "/join/judge", { match_id: c.body.match_id, seat: s }, { "x-payment": payHeader("0x" + String(i + 1).repeat(40), "100000") });
+    const first = join("alpha", 0);
+    await new Promise((ok) => setTimeout(ok, 50));
+    const [a, b] = await Promise.all([first, join("beta", 1)]);
+    for (const [s, j] of [["alpha", a], ["beta", b]] as const) {
+      assert.equal(j.status, 200, j.text);
+      tok[s] = j.body.seat_token;
+    }
+    assert.equal(Object.keys(tok).length, 2, "both seats joined");
+    const r = await call(e, `/matches/${c.body.match_id}/submit`, { seat: "alpha", seat_token: tok.alpha, position: `Plan.\n${fake.github}` });
+    assert.equal(r.status, 422, r.text);
+    assert.equal(r.body.receipt.payload.charged, "already_settled");
+  } finally {
+    f.restore();
+  }
+});
+
+t("turning the screen on never forfeits a match whose seats weren't told: submissions to it aren't screened", async () => {
+  const e = env({ CONTENT_SCREEN: "off" });
+  const c = await call(e, "/matches", { tier: "judge", seats: ["alpha", "beta"], rules: RULES });
+  assert.equal(c.status, 201, c.text);
+  assert.equal(c.body.content_rule, undefined);
+  e.CONTENT_SCREEN = "shadow"; // the switch, after creation
+  const j = await call(e, "/join/judge", { match_id: c.body.match_id, seat: "alpha" });
+  assert.equal((await call(e, "/join/judge", { match_id: c.body.match_id, seat: "beta" })).status, 200);
+  const r = await call(e, `/matches/${c.body.match_id}/submit`, { seat: "alpha", seat_token: j.body.seat_token, position: `Plan.\n${fake.github}` });
+  assert.equal(r.status, 200, r.text);
+});
+
 t("a refused match creation creates nothing: the same key then creates a fresh match", async () => {
   const e = env();
   const key = "screen-" + "k".repeat(20);
@@ -373,7 +452,7 @@ t("a refused submission, after the seat check, changes nothing: the seat is stil
   assertRefusal(r, "position", 3);
   assert.match(r.body.error, /Nothing was submitted.*forfeits, with no refund/);
   const p = r.body.receipt.payload;
-  assert.equal(p.charged, "already_settled");
+  assert.equal(p.charged, false, "payments off: nobody paid");
   assert.deepEqual([p.match_id, p.seat, p.tier], [id, "alpha", "judge"]);
   const st = await get(e, `/matches/${id}`);
   assert.equal(st.body.phase, "submit");

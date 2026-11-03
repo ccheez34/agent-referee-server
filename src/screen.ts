@@ -31,10 +31,10 @@ export function screenMode(env: { CONTENT_SCREEN?: string }): ScreenMode {
 }
 
 // Removed before matching, so they can't split a secret: every format character (\p{Cf}: zero-width, bidi, soft
-// hyphen, word joiners, the BOM, tag characters, U+180E), U+034F, variation selectors, Hangul fillers, and the line and
-// paragraph separators U+2028 and U+2029.
+// hyphen, word joiners, the BOM, tag characters) and every default-ignorable code point (U+034F, U+17B4/5, the
+// Mongolian selectors, variation selectors, Hangul fillers, U+FFF0-8), plus the separators U+2028 and U+2029.
 const cp = (...c: number[]) => c.map((x) => String.fromCodePoint(x)).join("");
-const FORMAT_CHARS = /\p{Cf}/gu;
+const FORMAT_CHARS = /[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu;
 const OTHER_INVISIBLE = new RegExp(`[${cp(0x34f)}${cp(0xfe00)}-${cp(0xfe0f)}${cp(0xe0100)}-${cp(0xe01ef)}${cp(0x115f, 0x1160, 0x3164, 0xffa0, 0x2028, 0x2029)}]`, "gu");
 
 /** find's four patterns (sources and flags copied exactly from find/lib/scrub.mjs). */
@@ -51,11 +51,20 @@ export const INTAKE_PATTERNS: ReadonlyArray<{ kind: string; re: RegExp; what: st
 
 // This server's own kinds (not in find).
 const WALLET_KEY = /(?<![0-9A-Za-z])(?:0x)?[0-9a-fA-F]{64}(?![0-9A-Za-z])/g;
-const WALLET_WORD = /priv(?:ate)?[ _-]?key|secret[ _-]?key|signing[ _-]?key|wallet[ _-]?key|account[ _-]?key/i;
-const HASH_LABEL = /sha-?(1|224|256|384|512)|\bsha\b|(?<![a-z])hash(es)?(?![a-z])|digest|fingerprint|checksum|manifest|\btx(id)?\b|transaction|public/i; // find's, plus "public"
+// The nearest label before a 64-hex value decides: a key label refuses, a hash or public-key label passes, none passes.
+const WALLET_LABEL = /(public[ _-]?key|pub[ _-]?key)|(priv(?:ate)?[ _-]?key|secret[ _-]?key|signing[ _-]?key|wallet[ _-]?key|account[ _-]?key|deployer[ _-]?key|[a-z0-9]_key\b|wallet\s*\(|from_key|privatekeytoaccount|signer|mnemonic)|((?<![a-z])(?:tx|txid|tx_?hash|hash(?:es)?|digest|sha\d*|checksum|fingerprint|address|addr|salt|nonce|root|commitment|seed_hash)(?![a-z]))/gi;
+// Published development values, not secrets (two sources each: their projects' docs and the fresh reader's probes).
+const DEV_KEYS = new Set(["ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"]); // Hardhat/Anvil account #0
+const DEV_MNEMONICS = new Set([
+  "test test test test test test test test test test test junk", // Hardhat, Anvil
+  "candy maple cake sugar pudding cream honey rich smooth crumble sweet treat", // Truffle develop
+  "myth like bonus scare over problem client lizard pioneer submit female collect", // Ganache -d
+  "legal winner thank year wave sausage worth useful legal winner thank yellow", // a BIP39 test vector
+]);
 const PHRASE = /(?<![A-Za-z0-9])(mnemonic|seed|passphrase|pass[ _-]phrase|(?:seed|recovery)[ _-]?phrase)(["']?\s*[:=]\s*)(.{8,})$/i; // find's PHRASE, one match per line
 const URL_NO_USER = /\b[a-z][a-z0-9+.-]*:\/\/:([^\s@]+)@/gi; // "redis://:password@host", which find's pattern misses
-const B64_PEM = /(?<![A-Za-z0-9+/])LS0tLS1CRUdJTi[A-Za-z0-9+/]{200,}={0,2}/g; // base64 of "-----BEGIN", then a key's worth
+const B64_PEM = /(?<![A-Za-z0-9+/])LS0tLS1CRUdJTi[A-Za-z0-9+/]{60,}={0,2}/g; // base64 of "-----BEGIN" and more (wrapped at 64 or 76 too)
+const SEED_LABEL = /mnemonic|seed|recovery[ _-]?(?:phrase|words)|pass[ _-]?phrase|secret[ _-]?(?:phrase|words)|backup[ _-]?phrase/i;
 const SERVER_KINDS: Record<string, string> = { wallet_key: "a wallet private key", seed_phrase: "a seed phrase", encoded_private_key: "a base64-encoded private key" };
 
 // Placeholders: words that mark documentation or test values.
@@ -66,8 +75,20 @@ const repeated = (s: string) => /^(.{1,16}?)\1+(.{0,16})$/s.test(s) && s.length 
 const plainPlaceholder = (s: string) =>
   PLACEHOLDER_WORD.test(s) || /x{6,}|\*{4,}|\.{3}|<[^>]*>|\{\{|\$\{/.test(s) || repeated(s);
 
-/** A key body: a base64 line of 40+ characters with real variety (not "XXXX…" or "AAAA…"). */
-const keyBody = (s: string) => /^[A-Za-z0-9+/]{40,}={0,2}$/.test(s) && distinct(s) >= 16;
+/** A key body's run of base64 in a line, wherever it sits: bare, quoted, concatenated, in an array, after "#" or ">"
+ * or a literal "\n" escape. It needs real variety and both cases (so "XXXX…" and long hex don't count). */
+function keyBody(line: string): boolean {
+  const run = /[A-Za-z0-9+/]{40,}/.exec(line.replace(/\\[nr]/g, " "))?.[0].slice(0, 64) ?? "";
+  return run.length >= 40 && distinct(run) >= 16 && /[A-Z]/.test(run) && /[a-z]/.test(run);
+}
+/** An ascending run of 6 (abcdef, 123456): typed by a person, never drawn at random. */
+const ascending = (s: string) => {
+  for (let i = 0, n = 1; i + 1 < s.length; i++) {
+    n = s.charCodeAt(i + 1) === s.charCodeAt(i) + 1 && /[A-Za-z0-9]/.test(s[i]) ? n + 1 : 1;
+    if (n >= 6) return true;
+  }
+  return false;
+};
 
 export type IntakeHit = { field: string; line: number; kind: string };
 const MAX_HITS = 20;
@@ -91,13 +112,12 @@ function realMatch(kind: string, m: RegExpExecArray, lines: string[], i: number)
   if (kind === "private_key") {
     // A header alone (a constant in code, a docs line) isn't a key. A key body follows: on the next lines, or on the
     // same line after literal "\n" escapes (a JSON-escaped key, as in a cloud service-account file).
-    const rest = lines[i].slice(m.index + m[0].length).replace(/^(?:\\n|\\r|\s)+/, "");
-    const sameLine = /^[A-Za-z0-9+/]{40,}/.exec(rest)?.[0] ?? "";
-    if (keyBody(sameLine.slice(0, 64))) return true;
+    // `lines` runs on into the next field's first lines, for a header that ends one piece and a body that opens the next.
+    if (keyBody(lines[i].slice(m.index + m[0].length))) return true;
     for (let j = i + 1; j <= i + 4 && j < lines.length; j++) {
-      const t = lines[j].trim();
+      const t = lines[j].replace(/^[\s"'`#>*/+,;()[\]]+/, "");
       if (t === "" || /^[A-Za-z-]+:\s/.test(t)) continue; // blank, or a PEM header line (Proc-Type:, DEK-Info:)
-      return keyBody(t.slice(0, 64)) && /^[A-Za-z0-9+/=]+$/.test(t);
+      return keyBody(t);
     }
     return false;
   }
@@ -105,30 +125,43 @@ function realMatch(kind: string, m: RegExpExecArray, lines: string[], i: number)
     // The password runs from the scheme's user colon to the FIRST "@", and must be valid userinfo: no "/", quotes,
     // spaces or brackets. ("http://localhost:5173/@vite" has the port, not a password.)
     const after = m[0].slice(m[1].length);
-    return realUrlPassword(after.slice(0, after.indexOf("@")));
+    const user = m[1].slice(m[1].indexOf("//") + 2, -1);
+    const slash = after.indexOf("/");
+    const authority = slash === -1 ? after : after.slice(0, slash);
+    const firstAt = after.indexOf("@"), lastAt = authority.lastIndexOf("@");
+    // The host after a given "@", read from the line itself (the match ends at the run's last "@").
+    const hostAfter = (at: number) => lines[i].slice(m.index + m[1].length + at + 1).match(/^[^/:\s"'?#,]*/)?.[0] ?? "";
+    return realUrlPassword(after.slice(0, firstAt), user, hostAfter(firstAt)) || (lastAt > firstAt && realUrlPassword(authority.slice(0, lastAt), user, hostAfter(lastAt), true));
   }
   if (kind === "bearer_token") {
     const token = m[0].slice(m[1].length + m[2].length);
     if (/^[A-Z_]+$/.test(token)) return false; // ACCESS_TOKEN_GOES_HERE
-    return !plainPlaceholder(token) && distinct(token) >= 8;
+    return !plainPlaceholder(token) && !ascending(token) && distinct(token) >= 8;
   }
   // api_key: the key itself (AWS's documented example key ends in EXAMPLE inside the match)
   const body = m[0].replace(/^(?:sk-|sk_(?:live|test)_|AKIA|gh[pousr]_|github_pat_|xox[abprs]-|AIza|ya29\.)/, "");
-  return !plainPlaceholder(m[0]) && distinct(body) >= 8;
+  return !plainPlaceholder(m[0]) && !ascending(body) && distinct(body) >= 8;
 }
 
-/** A URL password up to the first "@": valid userinfo (no "/", quotes, spaces or brackets) and not a placeholder. */
-function realUrlPassword(pass: string): boolean {
-  if (!pass || !/^[^\s"'<>\\/`{}|^@[\]]+$/.test(pass)) return false;
+const DEV_HOSTS = /^(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|host\.docker\.internal)$/i;
+const DEV_PASSWORDS = /^(?:postgres|guest|root|admin|test|foobared|mysql|redis|rabbitmq|minio(?:admin)?|dev)$/i;
+/** A URL password: valid userinfo (no "/", quotes, spaces or brackets; a raw "@" only when `withAt`), not a placeholder,
+ * and not a development default (the user name repeated, a local host, a documented default password). */
+function realUrlPassword(pass: string, user = "", host = "", withAt = false): boolean {
+  if (!pass || !(withAt ? /^[^\s"'<>\\/`{}|^[\]]+$/ : /^[^\s"'<>\\/`{}|^@[\]]+$/).test(pass)) return false;
+  if (pass === user || DEV_HOSTS.test(host) || DEV_PASSWORDS.test(pass)) return false;
   if (/^(?:pass(?:word)?|passwd|pwd|secret|token|changeme|p|x+|\*+)$/i.test(pass)) return false;
   if (/^\$[A-Z_][A-Z0-9_]*$|^%[A-Z_][A-Z0-9_]*%$/.test(pass)) return false; // $VAR or %VAR%, case-sensitive and whole
   return !plainPlaceholder(pass) && distinct(pass) >= 3;
 }
 
-/** Every match of a /g regex, from every start position (a greedy match must not hide a later one on the same line). */
-function* everyMatch(re: RegExp, line: string): Generator<RegExpExecArray> {
+const MAX_STARTS = 200; // URL candidates on one line; past it the line is refused as too complex (fail closed)
+const TOO_COMPLEX = Symbol("too complex");
+/** Every URL-credential match, from every start position (a greedy match must not hide a later one on the line). */
+function* everyMatch(re: RegExp, line: string): Generator<RegExpExecArray | typeof TOO_COMPLEX> {
   const r = new RegExp(re.source, re.flags.includes("g") ? re.flags : re.flags + "g");
-  for (let from = 0; from <= line.length; ) {
+  for (let from = 0, n = 0; from <= line.length; n++) {
+    if (n >= MAX_STARTS) { yield TOO_COMPLEX; return; }
     r.lastIndex = from;
     const m = r.exec(line);
     if (!m) return;
@@ -137,19 +170,35 @@ function* everyMatch(re: RegExp, line: string): Generator<RegExpExecArray> {
   }
 }
 
-function serverHits(line: string): string[] {
+/** 12 to 24 BIP39-shaped words (lowercase, 3 to 8 letters, at least 8 different), not a published dev mnemonic. */
+function seedWords(text: string): boolean {
+  const words = text.trim().replace(/^["'`]|["'`,;]+$/g, "").trim().split(/\s+/);
+  return [12, 15, 18, 21, 24].includes(words.length) && words.every((w) => /^[a-z]{3,8}$/.test(w)) && new Set(words).size >= 8 && !DEV_MNEMONICS.has(words.join(" "));
+}
+
+function serverHits(line: string, prev: string): string[] {
   const kinds: string[] = [];
-  if (WALLET_WORD.test(line) && !HASH_LABEL.test(line))
-    for (const m of line.matchAll(WALLET_KEY)) if (distinct(m[0].replace(/^0x/, "").toLowerCase()) >= 10) { kinds.push("wallet_key"); break; }
-  const p = PHRASE.exec(line);
-  if (p) {
-    const words = p[3].trim().replace(/^["'`]|["'`,;]+$/g, "").trim().split(/\s+/);
-    if ([12, 15, 18, 21, 24].includes(words.length) && words.every((w) => /^[a-z]{3,8}$/.test(w)) && new Set(words).size >= 8) kinds.push("seed_phrase");
+  for (const m of line.matchAll(WALLET_KEY)) {
+    const hex = m[0].replace(/^0x/, "").toLowerCase();
+    if (distinct(hex) < 10 || DEV_KEYS.has(hex)) continue;
+    const labels = [...line.slice(Math.max(0, m.index! - 80), m.index).matchAll(WALLET_LABEL)];
+    const near = labels[labels.length - 1];
+    if (near && near[2] && !near[1] && !near[3]) { kinds.push("wallet_key"); break; }
   }
-  for (const m of line.matchAll(URL_NO_USER)) if (realUrlPassword(m[1])) { kinds.push("url_credentials"); break; }
-  for (const m of line.matchAll(B64_PEM)) {
+  // A seed phrase: find's labelled form, a label then ":" or "=" anywhere before the words, or the label on the line above.
+  const p = PHRASE.exec(line);
+  const quoted = /["'`]([a-z ]{20,})["'`]/.exec(line)?.[1];
+  const afterSep = /[:=]\s*(.+)$/.exec(line)?.[1];
+  if ((p && seedWords(p[3])) || (SEED_LABEL.test(line) && ((quoted && seedWords(quoted)) || (afterSep && seedWords(afterSep)))) || (SEED_LABEL.test(prev) && seedWords(line)))
+    kinds.push("seed_phrase");
+  if (line.includes("://:"))
+    for (const m of line.matchAll(URL_NO_USER)) {
+      const host = line.slice(m.index! + m[0].length).match(/^[^/:\s"'?#,]*/)?.[0] ?? "";
+      if (realUrlPassword(m[1], "", host)) { kinds.push("url_credentials"); break; }
+    }
+  if (line.includes("LS0tLS1CRUdJTi")) for (const m of line.matchAll(B64_PEM)) {
     try {
-      if (/PRIVATE KEY/.test(atob(m[0].slice(0, 80)))) { kinds.push("encoded_private_key"); break; }
+      if (/PRIVATE KEY/.test(atob(m[0].slice(0, Math.floor(Math.min(m[0].length, 80) / 4) * 4)))) { kinds.push("encoded_private_key"); break; }
     } catch { /* not base64 after all */ }
   }
   return kinds;
@@ -160,15 +209,26 @@ export function intakeCheck(fields: unknown): IntakeHit[] {
   const all: Array<[string, string]> = [];
   if (!strings(fields, "", 0, all)) return [{ field: "(input)", line: 0, kind: "too_complex" }]; // fail closed
   const hits: IntakeHit[] = [];
-  for (const [field, text] of all) {
-    const lines = text.replace(FORMAT_CHARS, "").replace(OTHER_INVISIBLE, "").split(/\r\n|\r|\n/);
-    for (let i = 0; i < lines.length && hits.length < MAX_HITS; i++) {
+  const split = (t: string) => t.replace(FORMAT_CHARS, "").replace(OTHER_INVISIBLE, "").split(/\r\n|\r|\n/);
+  const fieldLines = all.map(([, text]) => split(text));
+  for (let f = 0; f < all.length; f++) {
+    const field = all[f][0];
+    const own = fieldLines[f];
+    const lines = f + 1 < all.length ? own.concat(fieldLines[f + 1].slice(0, 4)) : own; // a key body may open the next piece
+    for (let i = 0; i < own.length && hits.length < MAX_HITS; i++) {
       const kinds = new Set<string>();
       for (const p of INTAKE_PATTERNS) {
-        for (const m of everyMatch(p.re, lines[i]))
-          if (realMatch(p.kind, m, lines, i)) { kinds.add(p.kind); break; }
+        if (p.kind === "url_credentials") {
+          if (!own[i].includes("://")) continue;
+          for (const m of everyMatch(p.re, own[i])) {
+            if (m === TOO_COMPLEX) { kinds.add("too_complex"); break; }
+            if (realMatch(p.kind, m, lines, i)) { kinds.add(p.kind); break; }
+          }
+        } else
+          for (const m of p.re.global ? own[i].matchAll(p.re) : [p.re.exec(own[i])].filter((x) => x !== null))
+            if (realMatch(p.kind, m as RegExpExecArray, lines, i)) { kinds.add(p.kind); break; }
       }
-      for (const k of serverHits(lines[i])) kinds.add(k);
+      for (const k of serverHits(own[i], i > 0 ? own[i - 1] : "")) kinds.add(k);
       for (const kind of kinds) hits.push({ field, line: i + 1, kind });
     }
   }
@@ -220,7 +280,7 @@ export async function refusalReceipt(
   return signReceipt(payload, env.SIGNING_KEY, env.PUBLIC_KEY);
 }
 
-const KIND_TEXT: Record<string, string> = { ...Object.fromEntries(INTAKE_PATTERNS.map((p) => [p.kind, p.what])), ...SERVER_KINDS, too_complex: "too many fields to screen" };
+const KIND_TEXT: Record<string, string> = { ...Object.fromEntries(INTAKE_PATTERNS.map((p) => [p.kind, p.what])), ...SERVER_KINDS, too_complex: "too complex to screen" };
 
 /** The 422 for a 2a hit. `after`: what the refusal means for this route (reviews: nothing charged). */
 export async function intakeRefusal(

@@ -1914,9 +1914,11 @@ app.post("/matches", async (c) => {
   if (sanctioned) return sanctioned;
   const input: any = await c.req.json().catch(() => null);
   // The screen reads the validated fields only (the match object validates again and gives the errors as before).
+  // Only the judge tiers send text to an AI: their rules, title, criteria and seat labels. Nothing else is screened.
   const checked = validateCreate(input);
-  if (checked.ok) {
-    const secret = await screenIntake(c, checked.value, "No match was created and nothing was charged.");
+  if (checked.ok && isJudgeTier(checked.value.tier)) {
+    const { rules, title, criteria, seats } = checked.value;
+    const secret = await screenIntake(c, { rules, title, criteria, seats }, "No match was created and nothing was charged.");
     if (secret) return secret;
   }
   if (isMultiJudgeTier(input?.tier) && !(await multiJudgeOn(c))) return err(503, "The multi-part judge tiers (judge-3x2, judge-3x3) aren't open yet.");
