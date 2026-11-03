@@ -157,7 +157,7 @@ function realUrlPassword(pass: string, user = "", host = "", withAt = false): bo
   return !plainPlaceholder(pass) && distinct(pass) >= 3;
 }
 
-const MAX_STARTS = 200; // URL candidates on one line; past it the line is refused as too complex (fail closed)
+const MAX_STARTS = 200; // URL matches examined on one line; past it the line is refused as too complex (fail closed)
 const TOO_COMPLEX = Symbol("too complex");
 /** Every URL-credential match, from every start position (a greedy match must not hide a later one on the line). */
 function* everyMatch(re: RegExp, line: string): Generator<RegExpExecArray | typeof TOO_COMPLEX> {
@@ -170,6 +170,24 @@ function* everyMatch(re: RegExp, line: string): Generator<RegExpExecArray | type
     yield m;
     from = m.index + 1;
   }
+}
+
+/** The line as the URL pattern sees it, same length and offsets: only the words (runs without whitespace) that hold
+ * "://" before an "@", each cut after its last "@", everything else blanked. A match always ends at its word's last
+ * "@", so the matches are exactly the full line's; but no start can scan text that can never match, so a line costs at
+ * most its matches times its word's length (the cap bounds the matches), never a scan per start. null: no word qualifies. */
+function urlScanLine(line: string): string | null {
+  if (!line.includes("://") || !line.includes("@")) return null;
+  let out = "", any = false;
+  for (const tok of line.split(/(\s+)/)) {
+    if (tok === "" || /^\s/.test(tok)) { out += tok; continue; }
+    const last = tok.lastIndexOf("@");
+    if (last > 0 && tok.slice(0, last).includes("://")) {
+      out += tok.slice(0, last + 1) + " ".repeat(tok.length - last - 1);
+      any = true;
+    } else out += " ".repeat(tok.length);
+  }
+  return any ? out : null;
 }
 
 /** 12 to 24 BIP39-shaped words (lowercase, 3 to 8 letters, at least 8 different), not a published dev mnemonic. */
@@ -221,8 +239,9 @@ export function intakeCheck(fields: unknown): IntakeHit[] {
       const kinds = new Set<string>();
       for (const p of INTAKE_PATTERNS) {
         if (p.kind === "url_credentials") {
-          if (!own[i].includes("://")) continue;
-          for (const m of everyMatch(p.re, own[i])) {
+          const scan = urlScanLine(own[i]);
+          if (scan === null) continue;
+          for (const m of everyMatch(p.re, scan)) {
             if (m === TOO_COMPLEX) { kinds.add("too_complex"); break; }
             if (realMatch(p.kind, m, lines, i)) { kinds.add(p.kind); break; }
           }

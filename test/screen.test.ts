@@ -9,14 +9,14 @@ import { createHash } from "node:crypto";
 import { BUILT_IN_POLICY, INTAKE_PATTERNS, intakeCheck, screenMode, REFUSAL_RECEIPT_FORMAT, REQUEST_RULE, SUBMIT_RULE } from "../src/screen.ts";
 import { canonicalJson } from "../src/logic.ts";
 import { verifyReceipt } from "../src/receipt.ts";
-import { scrubText } from "./fixtures/find-scrub-v1.mjs";
+import { scrubText } from "./fixtures/find-scrub-r4.mjs";
 import { Gate } from "../src/gate.ts";
 import { Health, _resetHealthCaches } from "../src/health.ts";
 import { Ledger } from "../src/ledger.ts";
 import { MatchRoom } from "../src/match.ts";
 import { _clearSnapshots } from "../src/gateclient.ts";
 
-const FIXTURE = new URL("./fixtures/find-scrub-v1.mjs", import.meta.url);
+const FIXTURE = new URL("./fixtures/find-scrub-r4.mjs", import.meta.url);
 // find/lib/scrub.mjs as locked in SKILLS.lock 8375f007fccd (round 4, Nov 3; skills/find/lib/scrub.mjs). A new find build
 // changes this on purpose: re-vendor it, then this test says whether the server's patterns still match.
 const FIND_SCRUB_SHA256 = "703911e197384903b1c29b582d9148d323671a3fbc3c74773b099a382d54f2f0";
@@ -140,6 +140,18 @@ test("a crafted long line costs milliseconds, not seconds, at the field limit", 
     intakeCheck({ output: line.slice(0, 12000) }); // 12,000 characters, the longest validated field
     assert.ok(Date.now() - t0 < 150, `${line.slice(0, 12)}: ${Date.now() - t0} ms`);
   }
+  // The shapes that made every start position scan the line (a URL start with no "@" after it in its word): warm, each
+  // costs a few milliseconds, not the tens a scan per start costs (the review-3x3's point 6, Nov 3).
+  const quadratic = ["a://b:".repeat(2000), "x@" + "a://b:".repeat(1999), "a://b:".repeat(1000) + " x@y", "a://b:".repeat(1000) + "@" + "c://d:".repeat(999)];
+  for (const line of quadratic) {
+    intakeCheck({ output: line.slice(0, 12000) });
+    const t0 = performance.now();
+    intakeCheck({ output: line.slice(0, 12000) });
+    assert.ok(performance.now() - t0 < 12, `${line.slice(0, 12)}: ${(performance.now() - t0).toFixed(1)} ms warm`);
+  }
+  // Same matches as the full line: a placeholder URL then a real one, in one word and in two.
+  assert.equal(intakeCheck({ output: `${pg}u:<password>@h,${pg}u:${pw}@h2` })[0]?.kind, "url_credentials");
+  assert.equal(intakeCheck({ output: `see ${pg}u:<password>@h and ${pg}u:${pw}@h2 too` })[0]?.kind, "url_credentials");
 });
 
 test("an input with more strings than any validated field set can hold is refused, not passed unscreened", () => {
