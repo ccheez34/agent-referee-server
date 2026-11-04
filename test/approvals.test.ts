@@ -1,0 +1,479 @@
+// The owner-approvals Worker (owner-approvals/; rules-in-code DESIGN part A). Its records are the ones 3.0's gate
+// checks (agent-referee-owner-approval-v2, gate/README.md in agent-referee-mcp 0.6.0). These tests need no installed
+// packages, so they run anywhere.
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { APPROVAL_FORMAT, ApprovalStore, BASELINE_ACTIONS, DEFAULT_ACTIONS, canonicalJson, handle, keyIdOf, parseApproval, parsePolicy, verifyRecord } from "../owner-approvals/src/approvals.ts";
+import { PAGE, pageResponse } from "../owner-approvals/src/page.ts";
+import { canonicalJson as agentRefereeCanonical } from "../src/logic.ts";
+
+// A stand-in Durable Object state: storage, and blockConcurrencyWhile as a simple queue.
+const mem = () => {
+  const d = new Map<string, unknown>();
+  let chain: Promise<unknown> = Promise.resolve();
+  const st = {
+    puts: [] as string[][],
+    storage: {
+      async get(k: string) { return structuredClone(d.get(k)); },
+      async put(k: string | Record<string, unknown>, v?: unknown) {
+        const entries = typeof k === "string" ? { [k]: v } : k; // the object form is one atomic write
+        (st as any).puts.push(Object.keys(entries));
+        for (const [kk, vv] of Object.entries(entries)) d.set(kk, structuredClone(vv));
+      },
+    },
+    blockConcurrencyWhile<T>(f: () => Promise<T>): Promise<T> {
+      const run = chain.then(f);
+      chain = run.catch(() => {});
+      return run;
+    },
+  };
+  return st;
+};
+const OWNER = "o".repeat(40);
+async function env(extra: Record<string, unknown> = {}) {
+  const store = new ApprovalStore(mem());
+  return { store, e: { OWNER_TOKEN: OWNER, APPROVALS: { idFromName: (x: string) => x, get: () => ({ fetch: (u: string, i?: RequestInit) => store.fetch(new Request(u, i)) }) }, ...extra } as any };
+}
+const req = (path: string, body?: unknown, token?: string) =>
+  new Request(`https://approvals.example${path}`, body === undefined ? { headers: token ? { authorization: `Bearer ${token}` } : {} } : { method: "POST", headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify(body) });
+const go = async (e: any, path: string, body?: unknown, token?: string) => {
+  const r = await handle(req(path, body, token), e, pageResponse);
+  return { status: r.status, headers: r.headers, body: r.headers.get("content-type")?.includes("json") ? ((await r.json()) as any) : await r.text() };
+};
+const POLICY = "2026-11-01.1";
+const COMMIT = "b".repeat(40);
+const TARGET = `agent-referee-server:production@${COMMIT}`;
+const SEATS = ["1.0", "2.0", "3.0", "4.0", "5.0"];
+const POL = { version: POLICY, members: SEATS };
+const deploy = { member: " 3.0 ", action: "deploy", target: ` ${TARGET} `, expires_in_hours: 2 };
+
+// The gate's own shape rules, copied from agent-referee-mcp 0.6.0 (5c06536), gate/src/approvals.mjs (shapeProblem),
+// so a change on either side shows up here. A v1 approval is rejected; a v1 revocation still counts.
+const GATE_NONCE = /^[0-9a-f]{24,64}$/;
+const GATE_ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
+const GATE_MEMBER = /^[A-Za-z0-9._-]{1,40}$/;
+function gateShapeProblem(p: any): string | null {
+  if (!p || typeof p !== "object") return "no payload";
+  if (p.format === "agent-referee-owner-approval-v1" && p.type !== "revocation") return "format v1 names no seat";
+  if (p.format !== "agent-referee-owner-approval-v2" && p.format !== "agent-referee-owner-approval-v1") return "format";
+  if (!GATE_NONCE.test(String(p.nonce ?? ""))) return "nonce";
+  const validTime = (v: any) => GATE_ISO.test(String(v ?? "")) && Number.isFinite(Date.parse(v));
+  if (!validTime(p.issued_at)) return "issued_at";
+  if (p.type === "revocation") return null;
+  if (p.type !== "approval") return "type";
+  if (!GATE_MEMBER.test(String(p.member ?? ""))) return "member";
+  if (typeof p.action !== "string" || !p.action) return "action";
+  if (typeof p.target !== "string" || !p.target) return "target";
+  if (p.target_sha256 !== null && !/^[0-9a-f]{64}$/.test(String(p.target_sha256))) return "target_sha256";
+  if (typeof p.policy_version !== "string") return "policy_version";
+  if (!validTime(p.expires_at)) return "expires_at";
+  if (Date.parse(p.expires_at) <= Date.parse(p.issued_at)) return "expires_at after issued_at";
+  const uses = p.max_uses === undefined ? 1 : p.max_uses;
+  if (uses !== 1) return "max_uses";
+  return null;
+}
+
+test("the signed bytes are Agent Referee's canonical JSON, so one verifier works for both", () => {
+  for (const v of [{ b: 1, a: [3, { z: null, y: "é" }], c: undefined }, [1, "x", { k: true }], "s", 5, null])
+    assert.equal(canonicalJson(v), agentRefereeCanonical(v));
+});
+
+test("approval requests: a seat, the policy's owner-only actions, one exact plain-text target, used once (count for several), at most 24 hours", () => {
+  const ok = parseApproval(deploy);
+  assert.deepEqual(ok, { ok: true, value: { action: "deploy", member: "3.0", target: TARGET, target_sha256: null, count: 1, hours: 2 } });
+  const hashed = parseApproval({ member: "1.0", action: "publish", target: "npm:agent-referee-client@0.11.0", target_sha256: "C".repeat(64), request_id: "r-1234567", max_uses: 1, count: 3 });
+  assert.deepEqual(hashed, { ok: true, value: { action: "publish", member: "1.0", target: "npm:agent-referee-client@0.11.0", target_sha256: "c".repeat(64), count: 3, hours: 2, request_id: "r-1234567" } });
+  for (const a of ["tag", "rollback", "feature_on"]) assert.equal(parseApproval({ ...deploy, action: a }).ok, true, `the policy template's ${a}`);
+  for (const bad of [
+    { ...deploy, action: "merge" },
+    { ...deploy, action: "__proto__" },
+    { ...deploy, target: "" },
+    { ...deploy, target: "x".repeat(201) },
+    { ...deploy, target: "two\nlines" },
+    { ...deploy, target: "pay​ment" }, // a zero-width space
+    { ...deploy, target: "abc‮def" }, // right to left
+    { ...deploy, target: "café" },
+    { ...deploy, target_sha256: COMMIT },
+    { ...deploy, target_sha256: 5 },
+    { ...deploy, member: undefined },
+    { ...deploy, member: "" },
+    { ...deploy, member: "3 0" },
+    { ...deploy, member: "x".repeat(41) },
+    { ...deploy, max_uses: 2 },
+    { ...deploy, max_uses: 3 },
+    { ...deploy, max_uses: null },
+    { ...deploy, count: 21 },
+    { ...deploy, count: 0 },
+    { ...deploy, count: 1.5 },
+    { ...deploy, expires_in_hours: 25 },
+    { ...deploy, expires_in_hours: 0.1 },
+    { ...deploy, expires_in_hours: "2" },
+    { ...deploy, request_id: "short" },
+    { ...deploy, request_id: "has spaces in it" },
+  ])
+    assert.equal(parseApproval(bad).ok, false, JSON.stringify(bad));
+  for (const empty of [undefined, null, ""]) assert.equal((parseApproval({ ...deploy, target_sha256: empty }) as any).value.target_sha256, null);
+  // Against a policy: only its seats, its actions, and its approval_max_hours.
+  const pol = { members: SEATS, actions: [...BASELINE_ACTIONS, "merge"], max_hours: 12 };
+  assert.equal(parseApproval({ ...deploy, member: "6.0" }, pol).ok, false, "a seat the policy doesn't list");
+  assert.equal(parseApproval({ ...deploy, action: "merge" }, pol).ok, true, "an action the policy lists");
+  assert.equal(parseApproval({ ...deploy, action: "tag" }, pol).ok, false, "an action it doesn't");
+  assert.equal(parseApproval({ ...deploy, expires_in_hours: 13 }, pol).ok, false, "longer than the policy's hours");
+  assert.equal(parseApproval({ ...deploy, expires_in_hours: 12 }, pol).ok, true);
+});
+
+test("the policy: its version, every seat, owner-only actions that keep the seven, at most 24 hours", () => {
+  assert.deepEqual(parsePolicy({ version: ` ${POLICY} `, members: [" 1.0", "2.0"] }), { ok: true, value: { version: POLICY, members: ["1.0", "2.0"], actions: DEFAULT_ACTIONS, max_hours: 24 } });
+  assert.deepEqual((parsePolicy({ ...POL, actions: [...BASELINE_ACTIONS, "tag"], approval_max_hours: 12 }) as any).value, { version: POLICY, members: SEATS, actions: [...BASELINE_ACTIONS, "tag"], max_hours: 12 });
+  for (const bad of [
+    { members: SEATS },
+    { version: "two words", members: SEATS },
+    { version: POLICY },
+    { version: POLICY, members: [] },
+    { version: POLICY, members: ["1.0", "1.0"] },
+    { version: POLICY, members: ["a b"] },
+    { ...POL, actions: ["deploy"] },
+    { ...POL, actions: [...BASELINE_ACTIONS, "Bad-Name"] },
+    { ...POL, actions: [...BASELINE_ACTIONS, "deploy"] },
+    { ...POL, approval_max_hours: 25 },
+    { ...POL, approval_max_hours: 1.5 },
+  ])
+    assert.equal(parsePolicy(bad).ok, false, JSON.stringify(bad));
+  assert.match((parsePolicy({ ...POL, actions: ["deploy", "publish"] }) as any).error, /payment, delete, secret, install, rule_change/);
+});
+
+test("only the owner's token signs; wrong tokens never lock him out; nothing is signed before the policy version is set", async () => {
+  const { e } = await env();
+  assert.equal((await go(e, "/approve", deploy)).status, 401);
+  // Anyone can send wrong tokens all day: the owner still gets through, and so does his revoke (fresh read of c3b0b64, #1).
+  for (let i = 0; i < 25; i++) assert.equal((await go(e, "/approve", deploy, "w".repeat(40))).status, 401);
+  assert.equal((await go(e, "/approve", deploy, OWNER)).status, 409, "no policy yet");
+  for (const version of ["", "two words", "x".repeat(65), 5]) assert.equal((await go(e, "/policy", { ...POL, version }, OWNER)).status, 400, String(version));
+  assert.equal((await go(e, "/policy", { version: POLICY }, OWNER)).status, 400, "the seats are needed");
+  assert.equal((await go(e, "/policy", { ...POL, version: ` ${POLICY} ` }, OWNER)).status, 200);
+  assert.equal((await go(e, "/approve", deploy, OWNER)).status, 200);
+  const none = await env({ OWNER_TOKEN: undefined });
+  assert.match((await go(none.e, "/approve", deploy, OWNER)).body.error, /No owner token/);
+  const short = await env({ OWNER_TOKEN: "short" });
+  assert.equal((await go(short.e, "/approve", deploy, "short")).status, 401, "a token under 32 characters never works");
+});
+
+test("the key is made inside the store, once, and never leaves it; every record carries it and verifies with it", async () => {
+  const { e, store } = await env();
+  // Two first calls at once still make one key.
+  const [k1, k2] = await Promise.all([go(e, "/pubkey"), go(e, "/pubkey")]);
+  assert.equal(k1.body.public_key, k2.body.public_key);
+  assert.equal(k1.body.key_id, await keyIdOf(k1.body.public_key));
+  assert.equal(k1.headers.get("access-control-allow-origin"), "*");
+  await go(e, "/policy", POL, OWNER);
+  const rec = (await go(e, "/approve", deploy, OWNER)).body.approval;
+  assert.equal(rec.public_key, k1.body.public_key, "the envelope's key is the served key (fresh read of c3b0b64, #4)");
+  assert.equal(await verifyRecord(rec, k1.body.public_key), true);
+  assert.equal((await go(e, "/pubkey")).body.public_key, k1.body.public_key, "the same key later");
+  // The store signs; nothing it answers carries the private key (part A review 1).
+  const ask = async (action: string, body?: unknown) => (await store.fetch(new Request(`https://store/${action}`, body === undefined ? {} : { method: "POST", body: JSON.stringify(body) }))).json() as Promise<any>;
+  const made = await ask("approve", { ...deploy, request_id: "store-0001-abcd" });
+  assert.equal(await verifyRecord(made.approval, k1.body.public_key), true);
+  for (const out of [made, await ask("pubkey"), await ask("key"), await ask("list")]) assert.ok(!/"d":/.test(JSON.stringify(out)), "no private key in any answer");
+  assert.equal((await ask("key")).error, "Unknown action.");
+  // It signs nothing it's handed: there's no "sign" or "add", and it builds every approval itself, within the limits
+  // (fresh read of 1091ea5, #3: a handed-in payload got a year-long, 20-use approval signed).
+  for (const a of ["sign", "add", "find-request"]) assert.equal((await ask(a, { payload: { a: 1 } })).error, "Unknown action.");
+  const store400 = async (body: unknown) => (await store.fetch(new Request("https://store/approve", { method: "POST", body: JSON.stringify(body) }))).status;
+  assert.equal(await store400({ ...deploy, expires_in_hours: 8760 }), 400);
+  assert.equal(await store400({ ...deploy, max_uses: 21 }), 400);
+  assert.equal(await store400({ ...deploy, action: "anything" }), 400);
+});
+
+test("an approval is exactly the gate's v2 record: the seat, the exact action and target, used once, and it expires; count signs several", async () => {
+  const { e } = await env();
+  await go(e, "/policy", POL, OWNER);
+  assert.equal((await go(e, "/approve", { ...deploy, max_uses: 3 }, OWNER)).status, 400, "an approval is used once");
+  const r = await go(e, "/approve", { ...deploy, count: 3 }, OWNER);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.approvals.length, 3);
+  assert.equal(new Set(r.body.approvals.map((x: any) => x.payload.nonce)).size, 3, "each with its own nonce");
+  for (const x of r.body.approvals) {
+    assert.equal(gateShapeProblem(x.payload), null);
+    assert.deepEqual([x.payload.issued_at, x.payload.expires_at, x.payload.member], [r.body.approval.payload.issued_at, r.body.approval.payload.expires_at, "3.0"]);
+  }
+  const rec = r.body.approval;
+  const p = rec.payload;
+  assert.deepEqual(Object.keys(p).sort(), ["action", "expires_at", "format", "issued_at", "max_uses", "member", "nonce", "policy_version", "target", "target_sha256", "type"]);
+  assert.deepEqual([p.format, p.type, p.member, p.action, p.target, p.target_sha256, p.max_uses, p.policy_version], [APPROVAL_FORMAT, "approval", "3.0", "deploy", TARGET, null, 1, POLICY]);
+  assert.equal(APPROVAL_FORMAT, "agent-referee-owner-approval-v2");
+  assert.equal(gateShapeProblem({ ...p, format: "agent-referee-owner-approval-v1" }), "format v1 names no seat", "the copied rule refuses v1, as the gate does");
+  assert.equal(Date.parse(p.expires_at) - Date.parse(p.issued_at), 2 * 3_600_000);
+  assert.match(p.nonce, /^[0-9a-f]{32}$/);
+  assert.equal(rec.algorithm, "Ed25519");
+  assert.match(canonicalJson(p), /"target_sha256":null/, "null is signed as null, not dropped: the gate needs the key");
+  const pub = (await go(e, "/pubkey")).body.public_key;
+  assert.equal(await verifyRecord({ ...rec, payload: { ...p, member: "4.0" } }, pub), false, "another seat isn't this signature");
+  const other = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"])) as CryptoKeyPair;
+  const otherPub = Buffer.from((await crypto.subtle.exportKey("raw", other.publicKey)) as ArrayBuffer).toString("base64");
+  assert.equal(await verifyRecord(rec, otherPub), false, "another key");
+});
+
+test("a double tap gives the first approval back, not a second one (fresh read of c3b0b64, #3)", async () => {
+  const { e } = await env();
+  await go(e, "/policy", POL, OWNER);
+  const body = { ...deploy, request_id: "tap-0001-abcd" };
+  const [a, b] = await Promise.all([go(e, "/approve", body, OWNER), go(e, "/approve", body, OWNER)]);
+  assert.equal(a.body.approval.payload.nonce, b.body.approval.payload.nonce);
+  const again = await go(e, "/approve", body, OWNER);
+  assert.deepEqual([again.body.repeat, again.body.approval.payload.nonce], [true, a.body.approval.payload.nonce]);
+  assert.equal((await go(e, "/approvals")).body.approvals.length, 1);
+  assert.equal((await go(e, "/approve", { ...body, request_id: "tap-0002-abcd" }, OWNER)).body.approval.payload.nonce === a.body.approval.payload.nonce, false, "a new request id is a new approval");
+  // The same id with different fields is refused, not answered with the old approval (part A review 1).
+  assert.equal((await go(e, "/approve", { ...body, target: "agent-referee-server:staging" }, OWNER)).status, 409);
+  assert.equal((await go(e, "/approve", { ...body, member: "4.0" }, OWNER)).status, 409, "the same id for another seat");
+  assert.equal((await go(e, "/approve", { ...body, count: 2 }, OWNER)).status, 409, "the same id with another count");
+  // ...and so is a different length, a newer policy version, a revoked or an expired first approval (fresh read of
+  // 1091ea5, #1): a same-id call never hands back an approval other than the one asked for, or one that no longer counts.
+  const shorter = await go(e, "/approve", { ...body, expires_in_hours: 0.25 }, OWNER);
+  assert.deepEqual([shorter.status, shorter.body.approval], [409, undefined]);
+  await go(e, "/policy", { ...POL, version: "2026-11-01.2" }, OWNER);
+  assert.equal((await go(e, "/approve", body, OWNER)).status, 409, "another policy version");
+  await go(e, "/policy", POL, OWNER);
+  assert.equal((await go(e, "/approve", body, OWNER)).body.repeat, true, "back under the same version, it's the same approval");
+  await go(e, "/revoke", { nonce: a.body.approval.payload.nonce }, OWNER);
+  const afterRevoke = await go(e, "/approve", body, OWNER);
+  assert.deepEqual([afterRevoke.status, /revoked or has expired/.test(afterRevoke.body.error)], [409, true]);
+});
+
+test("a double tap on count 2 gives the same two approvals back", async () => {
+  const { e } = await env();
+  await go(e, "/policy", POL, OWNER);
+  const body = { ...deploy, count: 2, request_id: "tap-0004-abcd" };
+  const [a, b] = await Promise.all([go(e, "/approve", body, OWNER), go(e, "/approve", body, OWNER)]);
+  assert.deepEqual(a.body.approvals.map((x: any) => x.payload.nonce), b.body.approvals.map((x: any) => x.payload.nonce));
+  assert.equal((await go(e, "/approvals")).body.approvals.length, 2);
+});
+
+test("an expired first approval isn't handed back for its request id", async () => {
+  const { e, store } = await env();
+  await go(e, "/policy", POL, OWNER);
+  const body = { ...deploy, expires_in_hours: 0.25, request_id: "tap-0003-abcd" };
+  assert.equal((await go(e, "/approve", body, OWNER)).status, 200);
+  store.now = () => Date.now() + 20 * 60_000; // 20 minutes later: it expired after 15
+  assert.equal((await go(e, "/approve", body, OWNER)).status, 409);
+});
+
+test("revoke-all signs and stores every revocation in one turn and one write; a store failure answers, never throws", async () => {
+  const state = (() => {
+    const d = new Map<string, unknown>();
+    let chain: Promise<unknown> = Promise.resolve();
+    const s = {
+      puts: 0,
+      failPut: false,
+      storage: {
+        async get(k: string) { return structuredClone(d.get(k)); },
+        async put(k: string | Record<string, unknown>, v?: unknown) {
+          const entries = typeof k === "string" ? { [k]: v } : k;
+          if (s.failPut && "records" in entries) throw new Error("storage unavailable");
+          if ("records" in entries) s.puts++;
+          for (const [kk, vv] of Object.entries(entries)) d.set(kk, structuredClone(vv));
+        },
+      },
+      blockConcurrencyWhile<T>(f: () => Promise<T>): Promise<T> {
+        const run = chain.then(f);
+        chain = run.catch(() => {});
+        return run;
+      },
+    };
+    return s;
+  })();
+  const store = new ApprovalStore(state);
+  const e = { OWNER_TOKEN: OWNER, APPROVALS: { idFromName: (x: string) => x, get: () => ({ fetch: (u: string, i?: RequestInit) => store.fetch(new Request(u, i)) }) } } as any;
+  await go(e, "/policy", POL, OWNER);
+  for (const t of ["npm:a@1.0.0", "npm:b@1.0.0", "npm:c@1.0.0"]) await go(e, "/approve", { ...deploy, action: "publish", target: t }, OWNER);
+  // An approval sent during revoke-all lands wholly before it (and is revoked) or wholly after it (and stays live).
+  const before = state.puts;
+  const [all, late] = await Promise.all([go(e, "/revoke", { all: true }, OWNER), go(e, "/approve", { ...deploy, target: "npm:d@1.0.0" }, OWNER)]);
+  assert.equal(late.status, 200);
+  assert.equal(state.puts - before, 2, "one write for all the revocations, one for the late approval");
+  const live = (await go(e, "/status", {}, OWNER)).body.live.map((r: any) => r.payload.target);
+  assert.ok((all.body.revoked === 3 && live.join() === "npm:d@1.0.0") || (all.body.revoked === 4 && live.length === 0), JSON.stringify([all.body.revoked, live]));
+  await go(e, "/approve", { ...deploy, target: "npm:e@1.0.0" }, OWNER);
+  const liveNow = (await go(e, "/status", {}, OWNER)).body.live.length;
+  state.failPut = true;
+  const failed = await go(e, "/revoke", { all: true }, OWNER);
+  assert.deepEqual([failed.status, /Nothing was revoked/.test(failed.body.error)], [503, true]);
+  const failedApprove = await go(e, "/approve", deploy, OWNER);
+  assert.deepEqual([failedApprove.status, /Nothing was approved/.test(failedApprove.body.error)], [503, true]);
+  state.failPut = false;
+  assert.equal((await go(e, "/status", {}, OWNER)).body.live.length, liveNow, "the failed calls stored nothing");
+  assert.equal((await go(e, "/revoke", { all: true }, OWNER)).body.revoked, liveNow, "the store still works afterwards");
+});
+
+test("revocations name the approval's nonce; revoke-all; the list is open to anyone, as the gate reads it", async () => {
+  const { e } = await env();
+  await go(e, "/policy", POL, OWNER);
+  const a = (await go(e, "/approve", deploy, OWNER)).body.approval;
+  const b = (await go(e, "/approve", { ...deploy, action: "publish", target: "npm:x@1.0.0" }, OWNER)).body.approval;
+  assert.equal((await go(e, "/revoke", { nonce: "f".repeat(32) }, OWNER)).status, 404, "a mistyped nonce revokes nothing, and says so");
+  assert.equal((await go(e, "/revoke", { nonce: "xyz" }, OWNER)).status, 400);
+  assert.equal((await go(e, "/revoke", { nonce: a.payload.nonce })).status, 401, "revoking needs the owner's token too");
+  const rv = await go(e, "/revoke", { nonce: a.payload.nonce.toUpperCase() }, OWNER);
+  assert.equal(rv.status, 200, JSON.stringify(rv.body));
+  const rp = rv.body.revocation.payload;
+  assert.deepEqual(rp, { format: APPROVAL_FORMAT, type: "revocation", nonce: a.payload.nonce, issued_at: rp.issued_at });
+  assert.equal(gateShapeProblem(rp), null);
+  const status = await go(e, "/status", {}, OWNER);
+  assert.deepEqual(status.body.live.map((r: any) => r.payload.nonce), [b.payload.nonce], "the revoked one isn't live");
+  // Revoking it again gives the same revocation back and adds nothing (part A review 1).
+  const again = await go(e, "/revoke", { nonce: a.payload.nonce }, OWNER);
+  assert.deepEqual(again.body.revocation, rv.body.revocation);
+  const all = await go(e, "/revoke", { all: true }, OWNER);
+  assert.equal(all.body.revoked, 1);
+  assert.deepEqual((await go(e, "/status", {}, OWNER)).body.live, []);
+  const list = await go(e, "/approvals");
+  assert.equal(list.status, 200);
+  assert.deepEqual([list.body.approvals.map((r: any) => r.payload.type), Object.keys(list.body)], [["approval", "approval", "revocation", "revocation"], ["approvals"]], "exactly what the gate reads (review 2)");
+  assert.equal((await go(e, "/status", {})).status, 401, "the owner's status needs his token");
+  assert.deepEqual((await go(e, "/status", {}, OWNER)).body.policy, { version: POLICY, members: SEATS, actions: DEFAULT_ACTIONS, max_hours: 24 });
+});
+
+test("freeze: the list answers 503 so every gate refuses, nothing new is signed, and revoking still works", async () => {
+  const { e, store } = await env();
+  await go(e, "/policy", POL, OWNER);
+  const a = (await go(e, "/approve", deploy, OWNER)).body.approval;
+  assert.equal((await go(e, "/freeze", { on: "yes" }, OWNER)).status, 400);
+  assert.equal((await go(e, "/freeze", { on: true })).status, 401);
+  assert.deepEqual((await go(e, "/freeze", { on: true }, OWNER)).body, { frozen: true });
+  const list = await go(e, "/approvals");
+  assert.deepEqual([list.status, list.body.code], [503, "frozen"]);
+  assert.equal((await go(e, "/approve", deploy, OWNER)).status, 409);
+  assert.equal((await go(e, "/revoke", { nonce: a.payload.nonce }, OWNER)).status, 200);
+  assert.equal((await go(e, "/status", {}, OWNER)).body.frozen, true);
+  // The freeze is checked inside the store, in the same turn that would sign (part A review 1; fresh read of 1091ea5).
+  const late = await store.fetch(new Request("https://store/approve", { method: "POST", body: JSON.stringify(deploy) }));
+  assert.deepEqual([late.status, ((await late.json()) as any).error], [409, "Approvals are frozen. Unfreeze them first. Nothing was approved."]);
+  await go(e, "/freeze", { on: false }, OWNER);
+  assert.equal((await go(e, "/approvals")).status, 200);
+  assert.equal((await go(e, "/approvals")).body.approvals.length, 2, "the late approval wasn't stored");
+});
+
+test("the store keeps approvals 7 days past expiry and revocations 8 days past issue, so a revocation outlives its approval", async () => {
+  const { e, store } = await env();
+  await go(e, "/policy", POL, OWNER);
+  const a = (await go(e, "/approve", { ...deploy, expires_in_hours: 2 }, OWNER)).body.approval;
+  await go(e, "/revoke", { nonce: a.payload.nonce }, OWNER);
+  const types = async () => (await go(e, "/approvals")).body.approvals.map((r: any) => r.payload.type);
+  const h = 3_600_000;
+  store.now = () => Date.now() + 7 * 24 * h + 1 * h; // 7 days and 1 hour later: both kept (it expired after 2 hours)
+  assert.deepEqual(await types(), ["approval", "revocation"]);
+  store.now = () => Date.now() + 7 * 24 * h + 3 * h; // the approval is gone (7 days past its expiry); its revocation isn't
+  assert.deepEqual(await types(), ["revocation"]);
+  store.now = () => Date.now() + 8 * 24 * h + 60_000;
+  assert.deepEqual(await types(), []);
+});
+
+test("review 2: the store never drops a record to make room; it refuses new approvals when full (a revocation is never lost)", async () => {
+  const { e, store } = await env();
+  await go(e, "/policy", POL, OWNER);
+  // Fill the store close to the cap through its own door, 20 at a time, then revoke one of the first.
+  const first = (await go(e, "/approve", { ...deploy, count: 20 }, OWNER)).body.approvals[0].payload.nonce;
+  for (let i = 1; i < 49; i++) assert.equal((await go(e, "/approve", { ...deploy, count: 20, target: `npm:fill@${i}` }, OWNER)).status, 200, `batch ${i}`);
+  assert.equal((await go(e, "/revoke", { nonce: first }, OWNER)).status, 200);
+  const before = (await go(e, "/approvals")).body.approvals;
+  assert.equal(before.length, 981);
+  // 20 more would pass 1000: refused, nothing dropped, the revocation still there.
+  const full = await go(e, "/approve", { ...deploy, count: 20, target: "npm:one-too-many" }, OWNER);
+  assert.deepEqual([full.status, /nothing is dropped/i.test(full.body.error)], [409, true]);
+  const after = (await go(e, "/approvals")).body.approvals;
+  assert.equal(after.length, 981);
+  assert.ok(after.some((r: any) => r.payload.type === "revocation" && r.payload.nonce === first), "the revocation is still on file");
+  assert.equal((await go(e, "/approve", { ...deploy, count: 19, target: "npm:fits" }, OWNER)).status, 200, "what fits is signed");
+  assert.equal((await go(e, "/revoke", { all: true }, OWNER)).status, 200, "revoking never needs room");
+  const full2 = (await go(e, "/approvals")).body.approvals;
+  assert.ok(full2.length > 1000, "revocations are stored past the cap");
+  // The re-check (Opus): the whole list is one stored value; at the cap with every approval revoked it stays far
+  // under a SQLite-backed Durable Object's 2 MiB for one value.
+  assert.ok(full2.length <= 2000, `at most twice the cap: ${full2.length}`);
+  const bytes = new TextEncoder().encode(JSON.stringify(full2)).length;
+  assert.ok(bytes < 1.5 * 1024 * 1024, `the stored list at its largest: ${bytes} bytes`);
+  const s = (await go(e, "/status", {}, OWNER)).body;
+  assert.deepEqual([s.max_records, typeof s.records], [1000, "number"]);
+  // Old records leave by age, never by count: 8 days on, the store is empty again.
+  store.now = () => Date.now() + 9 * 86_400_000;
+  assert.equal((await go(e, "/approvals")).body.approvals.length, 0);
+});
+
+test("the re-check: an approval's records and its request id are stored in one atomic write", async () => {
+  const { e, store } = await env();
+  await go(e, "/policy", POL, OWNER);
+  const puts = (store.state as any).puts as string[][];
+  puts.length = 0;
+  assert.equal((await go(e, "/approve", { ...deploy, count: 2, request_id: "atom-0001-abcd" }, OWNER)).status, 200);
+  const writes = puts.filter((keys) => keys.includes("records") || keys.includes("rids"));
+  assert.deepEqual(writes, [["records", "rids"]], "one write with both keys, not two");
+});
+
+test("review 2: a request id seen today whose approvals are gone never makes new ones", async () => {
+  const { e, store } = await env();
+  await go(e, "/policy", POL, OWNER);
+  const body = { ...deploy, expires_in_hours: 0.25, request_id: "tap-0005-abcd" };
+  assert.equal((await go(e, "/approve", body, OWNER)).status, 200);
+  // The approvals age out of the store (7 days past a 15-minute expiry) while the request id is still remembered: the
+  // store's clock is moved for the records only, so the id stays within its day.
+  const realNow = Date.now();
+  store.now = () => realNow + 7 * 86_400_000 + 3_600_000;
+  const rids = await store.state.storage.get("rids");
+  rids["tap-0005-abcd"].at = store.now() - 60_000; // seen a minute ago, by the store's clock
+  await store.state.storage.put("rids", rids);
+  const again = await go(e, "/approve", body, OWNER);
+  assert.deepEqual([again.status, /no longer on file/.test(again.body.error)], [409, true]);
+  assert.equal((await go(e, "/approvals")).body.approvals.length, 0, "nothing new was signed");
+});
+
+test("review 2: every store action answers in words when storage fails; the key being unreadable is a 503, not a crash", async () => {
+  const state = (() => {
+    const d = new Map<string, unknown>();
+    let chain: Promise<unknown> = Promise.resolve();
+    const s = {
+      failGet: false,
+      storage: {
+        async get(k: string) { if (s.failGet) throw new Error("storage unavailable"); return structuredClone(d.get(k)); },
+        async put(k: string | Record<string, unknown>, v?: unknown) {
+          if (s.failGet) throw new Error("storage unavailable");
+          for (const [kk, vv] of Object.entries(typeof k === "string" ? { [k]: v } : k)) d.set(kk, structuredClone(vv));
+        },
+      },
+      blockConcurrencyWhile<T>(f: () => Promise<T>): Promise<T> {
+        const run = chain.then(f);
+        chain = run.catch(() => {});
+        return run;
+      },
+    };
+    return s;
+  })();
+  const store = new ApprovalStore(state);
+  const e = { OWNER_TOKEN: OWNER, APPROVALS: { idFromName: (x: string) => x, get: () => ({ fetch: (u: string, i?: RequestInit) => store.fetch(new Request(u, i)) }) } } as any;
+  await go(e, "/policy", POL, OWNER);
+  state.failGet = true;
+  for (const [path, body] of [["/approve", deploy], ["/revoke", { all: true }], ["/status", {}], ["/freeze", { on: true }], ["/policy", POL]] as const) {
+    const r = await go(e, path, body, OWNER);
+    assert.equal(r.status, 503, `${path}: ${JSON.stringify(r.body)}`);
+    assert.match(String(r.body.error), /storage unavailable/);
+  }
+  assert.equal((await go(e, "/pubkey")).status, 503);
+  const pub = await go(e, "/approvals");
+  assert.deepEqual([pub.status, pub.body.code], [503, "unavailable"], "gates fail closed when the record can't be read");
+  state.failGet = false;
+  assert.equal((await go(e, "/approve", deploy, OWNER)).status, 200, "it works again afterwards");
+});
+
+test("the page needs no token, loads nothing from elsewhere, never stores the token, and never renders HTML from answers", async () => {
+  const { e } = await env();
+  const r = await go(e, "/");
+  assert.equal(r.status, 200);
+  assert.match(r.headers.get("content-security-policy")!, /default-src 'none'.*connect-src 'self'/);
+  assert.ok(!/https?:\/\//.test(r.body), "no outside URLs");
+  assert.ok(!/localStorage|sessionStorage|document\.cookie|innerHTML|insertAdjacentHTML|document\.write/.test(PAGE));
+  assert.match(PAGE, /b\.disabled=on/, "buttons are off while a request is out");
+  assert.match(PAGE, /request_id:rid/, "a repeated Sign sends the same request id");
+  assert.ok(!/<option>deploy<\/option>/.test(PAGE), "the actions come from the policy, not a built-in list (review 2)");
+  assert.match(PAGE, /else rid=crypto\.randomUUID\(\)/, "a policy load that changes the chosen seat or action makes a new request id (review 2)");
+  assert.equal((await go(e, "/nope")).status, 404);
+});
