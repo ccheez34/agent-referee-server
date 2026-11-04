@@ -29,9 +29,10 @@
     "NETWORK": "base",
     "FACILITATOR_URL": "https://facilitator.payai.network",
     "PAYMENTS_ENABLED": "true",
-    // The content screen (src/screen.ts; research\specs\content-screen-2026-11-03). "off" until the bundled deploy, which
-    // goes out as "shadow" (ccheez34, Nov 3, 08:58: "shadow mode it is"); "enforce" waits for his yes after the lawyer.
-    "CONTENT_SCREEN": "off",
+    // The content screen (src/screen.ts; research\specs\content-screen-2026-11-03). "shadow" from the bundled deploy
+    // (ccheez34, Nov 3, 08:58: "shadow mode it is"; Nov 4, 13:55: "A-on for liability reasons"): layer 2a refuses secrets
+    // for real; 2b's labels, once built, are only logged. "enforce" waits for his yes after the lawyer.
+    "CONTENT_SCREEN": "shadow",
     // No Claude judges until the lawyer approves (ccheez34, Oct 30, 16:57: "ok no claude on any judge panel until the
     // lawyer approves"). Only "true" turns them back on (judge-tier spec v2.1, research\specs\judge-no-claude-2026-10-30).
     // Wrangler doesn't pass vars down to environments, so env.staging.vars repeats every judge setting below.
