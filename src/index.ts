@@ -2,7 +2,7 @@
 import { TRY_HTML, TRY_SCRIPT_HASHES } from "./try-page.ts";
 import { Hono, type MiddlewareHandler } from "hono";
 import { paymentMiddleware } from "x402-hono";
-import { KEY_RE, MEDIATOR, MAX_SERIES_GAMES, doublePrice, idForKey, isJudgeTier, keyId, ipv6Prefix64, payerFromPaymentHeader, randomToken, sha256Hex, type Tier } from "./logic.ts";
+import { KEY_RE, MEDIATOR, MAX_SERIES_GAMES, doublePrice, idForKey, isJudgeTier, keyId, ipv6Prefix64, payerFromPaymentHeader, randomToken, sha256Hex, validateCreate, type Tier } from "./logic.ts";
 import { MatchRoom } from "./match.ts";
 import { Ledger, ledgerShardName, shardLimit } from "./ledger.ts";
 import { landingHtml, llmsTxt, wantsHtml } from "./landing.ts";
@@ -10,6 +10,7 @@ import { JUDGE_ADVISORY, JUDGE_HUMAN_REVIEW, JUDGE_MESSAGE_FORMAT, JUDGE_SYSTEM,
 import type { Env } from "./types.ts";
 import { payaiToken } from "./payai.ts";
 import { signReceipt } from "./receipt.ts";
+import { REQUEST_RULE, SUBMIT_RULE, intakeCheck, intakeRefusal, screenMode } from "./screen.ts";
 import { NEVER_AN_APPROVAL, observeGithub, parseProofRequest, proofPayload } from "./proof.ts";
 import {
   REVIEW_LIMITS, REVIEW_MESSAGE_FORMAT, longReviewRule, REVIEW_SYSTEM, REVIEW_VERDICTS, REVIEWER_BUDGET_MS, missingReviewKey, reviewCommitment, type ReviewerCall, reviewModels, reviewPayload, runOneReviewer, validateReview, type ReviewTier,
@@ -154,7 +155,8 @@ function getPaywall(env: Env): MiddlewareHandler {
     config: { description: description + how, mimeType: "application/json", inputSchema: joinInput(seatDesc), outputSchema: joinOutput, discoverable },
   });
   // Every judge route's payment request carries the advisory sentence, before the "how" text (judge-tier spec v2.1, §4).
-  const judged = (d: string) => `${d} ${JUDGE_ADVISORY}`;
+  // While the content screen is on, the submission rule goes with it (customers are told before they pay).
+  const judged = (d: string) => `${d} ${JUDGE_ADVISORY}${screenMode(env) !== "off" ? ` ${SUBMIT_RULE}` : ""}`;
   const multiJudgeText = (n: number) =>
     `Agent Referee — a panel of 3 independent AI judges from three different companies decides between two AI agents by rules both agreed to; each side submits ${n} pieces of up to ${MULTI_JUDGE_LIMITS.maxPiece} characters, and every judge reads all of them. Majority wins; every vote is in the signed receipt. Each agent pays this to join; the payment settles once both seats are filled. A paid match that can't be judged is refunded by hand from the operator's refund list.`;
   // x402.org is testnet-only. For real money set FACILITATOR_URL to a mainnet facilitator (see README).
@@ -164,7 +166,7 @@ function getPaywall(env: Env): MiddlewareHandler {
     price,
     network,
     config: {
-      description,
+      description: screenMode(env) !== "off" ? `${description} ${REQUEST_RULE}` : description,
       mimeType: "application/json",
       // Reviewers can take a minute or two; keep the payment authorization valid until the review is done.
       maxTimeoutSeconds: 300,
@@ -190,7 +192,7 @@ function getPaywall(env: Env): MiddlewareHandler {
     price,
     network,
     config: {
-      description: `Agent Referee multi-part sealed review — one piece of work in ${n} pieces (up to ${MULTI_LIMITS.maxPiece} characters each, ${MULTI_LIMITS.maxTotal} in all): three independent AI reviewers from three different companies each read every piece in one call, in parallel, without seeing each other's verdicts; majority verdict, every vote in a signed receipt with each piece's hash. One agent, one call; charged only if the review completes.`,
+      description: `Agent Referee multi-part sealed review — one piece of work in ${n} pieces (up to ${MULTI_LIMITS.maxPiece} characters each, ${MULTI_LIMITS.maxTotal} in all): three independent AI reviewers from three different companies each read every piece in one call, in parallel, without seeing each other's verdicts; majority verdict, every vote in a signed receipt with each piece's hash. One agent, one call; charged only if the review completes.${screenMode(env) !== "off" ? ` ${REQUEST_RULE}` : ""}`,
       mimeType: "application/json",
       maxTimeoutSeconds: 300,
       inputSchema: {
@@ -455,6 +457,9 @@ async function reviewGuard(c: any, next: any) {
   // Counted once per paid review (the call carrying the payment), not again for the unpaid first call.
   const region = regionCheck(c, commitment.models, "Nothing was charged.", paying);
   if (region) return region;
+  // The content screen (2a) after the region and sanctions checks, before slots, allowances and the paywall.
+  const secret = await screenIntake(c, { task: v.value.task, output: v.value.output, title: v.value.title, criteria: v.value.criteria }, "Nothing was charged.", body?.allow_secrets === true);
+  if (secret) return secret;
   if (!paying) {
     // The first x402 call (no payment yet): answer busy now rather than after the agent signs a payment.
     const b = await quickBusy(c.env, commitment.models);
@@ -569,6 +574,9 @@ async function multiGuard(c: any, next: any) {
   const paying = c.env.PAYMENTS_ENABLED === "false" || !!c.req.header("x-payment") || !!team;
   const region = regionCheck(c, commitment.models, "Nothing was charged.", paying);
   if (region) return region;
+  // The content screen (2a) after the region and sanctions checks, before slots, allowances and the paywall.
+  const secret = await screenIntake(c, { task: v.value.task, pieces: v.value.pieces, title: v.value.title, criteria: v.value.criteria }, "Nothing was charged.", (body as any)?.allow_secrets === true);
+  if (secret) return secret;
   if (!paying) {
     const b = await quickBusy(c.env, commitment.models);
     if (b) return busy(b.retryAfter, "the AI reviewers are at capacity.");
@@ -667,6 +675,25 @@ async function forward(env: Env, id: string, action: string, body?: unknown) {
   return new Response(res.body, { status: res.status, headers: new Headers(res.headers) });
 }
 
+// The content screen's layer 2a (screen.ts): a secret in customer text is refused before any AI provider sees it.
+// Off unless CONTENT_SCREEN is "shadow" or "enforce". Logs the route and kinds only, never the text.
+async function screenIntake(c: any, fields: unknown, after: string, allow = false): Promise<Response | null> {
+  if (screenMode(c.env) === "off") return null;
+  const hits = intakeCheck(fields);
+  if (!hits.length) return null;
+  // Passed but counted: the sender says the keys are fake on purpose (allow_secrets: true), or it's the owner's own team,
+  // whose fixtures and decoys are daily work (2.0's 1125; rule 6's privacy scan is the guard there).
+  const pass = allow ? "allowed" : c.get("team") ? "team" : null;
+  if (pass) {
+    stat(c, `screen_2a_${pass}`);
+    console.log(JSON.stringify({ screen: "2a", passed: pass, route: routePath(c), kinds: [...new Set(hits.map((h) => h.kind))], hits: hits.length }));
+    return null;
+  }
+  stat(c, "screen_2a_refused");
+  console.log(JSON.stringify({ screen: "2a", route: routePath(c), kinds: [...new Set(hits.map((h) => h.kind))], hits: hits.length }));
+  return intakeRefusal(c.env, routePath(c), fields, hits, after, false);
+}
+
 const err = (status: number, error: string) =>
   new Response(JSON.stringify({ error }), { status, headers: { "content-type": "application/json" } });
 
@@ -703,6 +730,7 @@ function docPrices(env: Env): Record<string, string> {
     free_reviews: freeReviewsLabel(env),
     ...(multiOnForAll(env) ? { ...multiPrices(env), multi_reviews: "on" } : {}),
     ...(multiJudgeOnForAll(env) ? { multi_judges: "on" } : {}),
+    ...(screenMode(env) !== "off" ? { content_rule: `${REQUEST_RULE} ${SUBMIT_RULE}` } : {}),
     // judge-3's default panel closed (waiting for a third company, or Claude judges off): the docs say so, once. The
     // wait's own reason already says agents can name a company (re-read R3).
     ...(judgeTierClosed(env, "judge-3")
@@ -738,6 +766,7 @@ app.get("/", (c) => {
       "A neutral third party that settles disagreements between AI agents. Every random outcome uses commit-reveal so no agent (and not this server) can rig it, and every result comes with an Ed25519-signed receipt.",
     payment: { protocol: "x402", network: c.env.NETWORK, asset: "USDC", pay_to: c.env.PAY_TO },
     ...(paidPaused(c.env) ? { notice: PAUSED_MSG } : {}),
+    ...(screenMode(c.env) !== "off" ? { content_rule: `${REQUEST_RULE} ${SUBMIT_RULE}` } : {}),
     tiers: {
       "1 rps": { tier: "rps", seats: 2, price_per_seat: p.rps, what: "Rock-paper-scissors; ties replay free." },
       "2 rps-bo3": { tier: "rps-bo3", seats: 2, price_per_seat: p["rps-bo3"], what: "Best of 3 rock-paper-scissors; ties don't count." },
@@ -1029,7 +1058,7 @@ app.get("/admin/stats", async (c) => {
       public: { spent_usd: usd(s.free_spent_micro?.public), budget_usd: usd(pub.budgetMicro) },
       ext: { spent_usd: usd(s.free_spent_micro?.ext), budget_usd: usd(ext.budgetMicro), note: "free reviews from the hosted MCP server (ChatGPT)" },
     },
-    key: "free_* = free reviews from the public routes; ext_* = free reviews from the hosted MCP server (ChatGPT); paid_* = paid reviews. ok_review / ok_review3 = completed, failed = a reviewer failed (not used / not charged), busy = at capacity, refused_caller = that address or user had used today's allowance, refused_budget = the shared budget was used up, bad_input = the request was rejected, region_blocked = refused because of where it came from. countries = AI requests by the country Cloudflare reports, approximate (paid reviews and judge seats on the call carrying a payment, whether or not it then settles; free reviews once their input passed, including ones then refused or busy; XX = unknown; not the hosted MCP server's, which come from its own location), ran_out_of_tokens = AI answers cut off at the model's token limit (max_tokens) and so unusable: raise that model's limit if it keeps happening (the recent list has each one's limit and prompt length; GET /health warns for 24 h), region_blocked by country = those refused by the region rules (CC-SUB is a region, e.g. UA-43 Crimea; T1 = Tor). Spending is counted at list price, not the real AI cost.",
+    key: "free_* = free reviews from the public routes; ext_* = free reviews from the hosted MCP server (ChatGPT); paid_* = paid reviews. ok_review / ok_review3 = completed, failed = a reviewer failed (not used / not charged), busy = at capacity, refused_caller = that address or user had used today's allowance, refused_budget = the shared budget was used up, bad_input = the request was rejected, region_blocked = refused because of where it came from, screen_2a_refused = refused by the content screen's local check (a secret in the text; paid and free reviews, match creation and submission), screen_2a_allowed = the same check's hits passed because the sender set allow_secrets (fake keys on purpose), screen_2a_team = hits on the team's own routes, counted, not refused. countries = AI requests by the country Cloudflare reports, approximate (paid reviews and judge seats on the call carrying a payment, whether or not it then settles; free reviews once their input passed, including ones then refused or busy; XX = unknown; not the hosted MCP server's, which come from its own location), ran_out_of_tokens = AI answers cut off at the model's token limit (max_tokens) and so unusable: raise that model's limit if it keeps happening (the recent list has each one's limit and prompt length; GET /health warns for 24 h), region_blocked by country = those refused by the region rules (CC-SUB is a region, e.g. UA-43 Crimea; T1 = Tor). Spending is counted at list price, not the real AI cost.",
   });
 });
 
@@ -1060,6 +1089,7 @@ app.get("/judge", async (c) => {
   return c.json({
     advisory: JUDGE_ADVISORY,
     human_review: JUDGE_HUMAN_REVIEW,
+    ...(screenMode(c.env) !== "off" ? { content_rule: SUBMIT_RULE } : {}),
     claude_judges_enabled: claudeJudgesOn(c.env),
     ...commit,
     panels: {
@@ -1664,6 +1694,8 @@ async function handleFreeReview(c: any, tier: ReviewTier, ext?: { caller: string
     const legal = legalPause(c);
     if (legal) return legal;
   }
+  const secret = await screenIntake(c, { task: v.value.task, output: v.value.output, title: v.value.title, criteria: v.value.criteria }, "Your free review wasn't used.", body?.allow_secrets === true);
+  if (secret) return secret;
   const caller = ext ? ext.caller : await callerHash(c);
   if (!caller || !c.env.LEDGER) return err(503, "Free reviews aren't available from here. " + FREE_PAID_HINT);
   // Quick capacity check first, so a full pool doesn't use anyone's allowance.
@@ -1889,6 +1921,14 @@ app.post("/matches", async (c) => {
   const sanctioned = regionCheck(c, [], "");
   if (sanctioned) return sanctioned;
   const input: any = await c.req.json().catch(() => null);
+  // The screen reads the validated fields only (the match object validates again and gives the errors as before).
+  // Only the judge tiers send text to an AI: their rules, title, criteria and seat labels. Nothing else is screened.
+  const checked = validateCreate(input);
+  if (checked.ok && isJudgeTier(checked.value.tier)) {
+    const { rules, title, criteria, seats } = checked.value;
+    const secret = await screenIntake(c, { rules, title, criteria, seats }, "No match was created and nothing was charged.", input?.allow_secrets === true);
+    if (secret) return secret;
+  }
   if (isMultiJudgeTier(input?.tier) && !(await multiJudgeOn(c))) return err(503, "The multi-part judge tiers (judge-3x2, judge-3x3) aren't open yet.");
   if (isJudgeTier(input?.tier) && missingJudgeKey(c.env, tierModels(c.env, input.tier as JudgeTierName)))
     return err(503, "This judge tier is temporarily unavailable.");
@@ -1987,7 +2027,18 @@ for (const action of ["commit", "reveal", "submit", "retry-judge", "rematch"]) {
       // Refused before parsing past 128 KB (enough for 3 pieces of 6,000 characters, all JSON-escaped). Nothing changes.
       const body = await readJsonCapped(c.req.raw, MULTI_JUDGE_LIMITS.maxBodyBytes);
       if (body === TOO_BIG) return err(413, `The submit body is over ${MULTI_JUDGE_LIMITS.maxBodyBytes / 1024} KB. Nothing was changed; you can submit again before the deadline.`);
-      return forward(c.env, id, action, body ?? {});
+      // The content screen runs inside the match, after the seat check (match.ts submit); counted here: a refusal by
+      // its marker, a submission the sender passed with allow_secrets by checking the same text again (counts only).
+      const res = await forward(c.env, id, action, body ?? {});
+      if (res.headers.get("x-content-screen") === "refused") stat(c, "screen_2a_refused");
+      else if (res.status < 300 && (body as any)?.allow_secrets === true && screenMode(c.env) !== "off") {
+        // Only where the match screens submissions: its view carries content_rule (created while the screen was on).
+        const shown = !!((await res.clone().json().catch(() => null)) as any)?.match?.content_rule;
+        const b: any = body;
+        const fields = Array.isArray(b.pieces) ? { pieces: b.pieces.map((p: any) => ({ text: String(p?.text ?? "") })) } : { position: String(b.position ?? "") };
+        if (shown && intakeCheck(fields).length) stat(c, "screen_2a_allowed");
+      }
+      return res;
     }
     return forward(c.env, id, action, await c.req.json().catch(() => ({})));
   });

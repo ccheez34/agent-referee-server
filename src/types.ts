@@ -71,6 +71,8 @@ export interface Env {
   PANEL_2_MODELS?: string; // judge-2's own list (overrides PANEL_MODELS). "provider/model" ids go through OpenRouter
   PANEL_3_MODELS?: string; // judge-3's own list (overrides PANEL_MODELS)
   JUDGE_EXCLUDE?: string; // models that may not judge (named or drawn) until they pass a judge trial (README); comma-separated
+  CONTENT_SCREEN?: string; // "off" (default), "shadow" or "enforce": the content screen (screen.ts; content-screen design v1). 2a (secrets) refuses in shadow too
+  CONTENT_POLICY_SHA256?: string; // sha256 of the prohibited-content terms in force, signed into every refusal receipt
   CLAUDE_JUDGES_ENABLED?: string; // only "true" lets Claude models judge (off until the lawyer; judge-tier spec v2.1). Reviews aren't affected
   JUDGE_MODEL_POOL?: string; // what judge panels draw from and agents may name (default: MODEL_POOL's list); never Anthropic while the switch is off
   REVIEW_3_MODELS?: string; // review-3's default panel (default DEFAULT_REVIEW_3_MODELS in review.ts), apart from the judge settings

@@ -69,6 +69,7 @@ import { fakeAiConfig } from "./fakeai.ts";
 import { addUnjudged, recordAccountProblem } from "./health.ts";
 import { recordCutOff } from "./cutoffs.ts";
 import { GATE_MAX_WAIT_MS } from "./gate.ts";
+import { SUBMIT_RULE, intakeCheck, intakeRefusal, screenMode } from "./screen.ts";
 
 type Phase = "joining" | "commit" | "reveal" | "submit" | "judging" | "done" | "expired" | "error";
 
@@ -117,6 +118,7 @@ export type MatchState = {
   tally_after?: Tally; // rematch tiers: the series tally including this match
   rematch?: { requested_by: string[]; next_match_id?: string };
   demo?: boolean; // free practice match: joined via /demo/join, receipts and acks say demo, never recorded
+  content_rule_shown?: boolean; // the content screen was on at creation, so every view and payment request showed SUBMIT_RULE
   result?: Record<string, unknown>;
   receipt?: Receipt;
   error?: string;
@@ -426,6 +428,7 @@ export class MatchRoom {
       id: body.id,
       key: input.key,
       tier: input.tier,
+      ...(isJudgeTier(input.tier) && screenMode(this.env) !== "off" ? { content_rule_shown: true } : {}),
       title: input.title,
       created_at: now,
       expires_at: now + 24 * HOUR,
@@ -679,6 +682,8 @@ export class MatchRoom {
       if (m.submissions![seat] !== undefined) return bad(409, "Already submitted.");
       const v = validateMultiSubmit(body, m.tier);
       if (!v.ok) return bad(400, v.error);
+      const refused = await this.screenSubmission(seat, { pieces: v.texts.map((text) => ({ text })) }, body?.allow_secrets === true);
+      if (refused) return refused;
       const records = await sidePieceRecords(v.texts);
       const hash = await sidePiecesSha256(records);
       m.pieces ??= {};
@@ -692,9 +697,34 @@ export class MatchRoom {
     if (typeof p !== "string" || p.trim().length === 0 || p.length > LIMITS.maxPosition)
       return bad(400, `position must be 1 to ${LIMITS.maxPosition} characters.`);
     if (m.submissions![seat] !== undefined) return bad(409, "Already submitted.");
+    const refused = await this.screenSubmission(seat, { position: p }, body?.allow_secrets === true);
+    if (refused) return refused;
     m.submissions![seat] = p;
     const ack = await this.stepAck(seat, "submit", { position_sha256: await sha256Hex(p) });
     return this.afterSubmit(ack);
+  }
+
+  /** The content screen's layer 2a on a validated submission, after the seat check: a refused submission changes
+   * nothing (the seat may submit again before the deadline); the signed refusal names the match, seat and tier. */
+  private async screenSubmission(seat: string, fields: { position: string } | { pieces: { text: string }[] }, allow = false): Promise<Response | null> {
+    const m = this.m!;
+    // Only matches whose seats were told the rule before paying (created while the screen was on): turning the switch on
+    // never makes an earlier match's submission forfeit.
+    if (screenMode(this.env) === "off" || !m.content_rule_shown) return null;
+    const hits = intakeCheck(fields);
+    if (!hits.length) return null;
+    if (allow) {
+      // Fake keys on purpose, the sender says (allow_secrets: true): passed, counted.
+      console.log(JSON.stringify({ screen: "2a", passed: "allowed", route: "/matches/:id/submit", tier: m.tier, kinds: [...new Set(hits.map((h) => h.kind))], hits: hits.length }));
+      return null;
+    }
+    console.log(JSON.stringify({ screen: "2a", route: "/matches/:id/submit", tier: m.tier, kinds: [...new Set(hits.map((h) => h.kind))], hits: hits.length }));
+    const after = `Nothing was submitted. ${SUBMIT_RULE.slice(SUBMIT_RULE.indexOf("A refused submission"))}`;
+    const paidFor = m.joined[seat]?.paid || (m.host_pays ? !!m.joined[m.host_pays]?.paid : false);
+    const settled = paidFor && !m.demo && this.env.PAYMENTS_ENABLED !== "false";
+    const refusal = await intakeRefusal(this.env, "/matches/:id/submit", fields, hits, after, settled ? "already_settled" : false, { match_id: m.id, seat, tier: m.tier });
+    refusal.headers.set("x-content-screen", "refused"); // so the route counts screen refusals, not any 422
+    return refusal;
   }
 
   /** After an accepted submit: start judging once every side is in. */
@@ -1190,6 +1220,8 @@ export class MatchRoom {
       // Judge tiers, from creation on: the advisory sentence and the human-review marker (judge-tier spec v2.1, §4).
       advisory: judgeTier ? JUDGE_ADVISORY : undefined,
       human_review: judgeTier ? JUDGE_HUMAN_REVIEW : undefined,
+      // While the content screen is on: what a refused submission means, from creation on (customers told before paying).
+      content_rule: m.content_rule_shown ? SUBMIT_RULE : undefined,
       seat_wallets: m.seat_wallets,
       host_pays: m.host_pays,
       round: judgeTier ? undefined : m.rounds.length || undefined,

@@ -217,7 +217,7 @@ export type MultiInput = { task: string; pieces: Piece[]; title?: string; criter
 
 /** Control, format (zero-width, bidi), line and paragraph separator characters: not allowed in a piece name. */
 const NOT_PRINTABLE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
-const TOP_KEYS = new Set(["task", "pieces", "title", "criteria", "panel"]);
+const TOP_KEYS = new Set(["task", "pieces", "title", "criteria", "panel", "allow_secrets"]); // allow_secrets: the content screen (screen.ts)
 
 export function validateMultiReview(body: any, tier: MultiTier): { ok: true; value: MultiInput } | { ok: false; error: string } {
   const n = MULTI_PIECES[tier];
