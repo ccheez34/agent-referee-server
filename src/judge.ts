@@ -10,6 +10,7 @@
 // so anyone can recompute the panel's decision from the receipt.
 
 import { sha256Hex } from "./logic.ts";
+import { extractAnswerObject } from "./answer-json.ts";
 import { fakeModelResponse, type FakeAi } from "./fakeai.ts";
 import { ProviderCapError, accountOf, accountProblem, classifyStatus, rateInfo, type AccountProblem, type CallObservation } from "./providers.ts";
 export { panelShapeError } from "./logic.ts";
@@ -483,13 +484,8 @@ export function decide(rule: DecisionRule, picks: (string | null)[], parties: st
 // ---------- calling a model ----------
 
 export function parseVote(text: string, seats: string[], criteria: Criterion[] | undefined, v3: boolean) {
-  const json = text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1);
-  let parsed: any;
-  try {
-    parsed = JSON.parse(json);
-  } catch {
-    throw new Error("judge returned unparseable output");
-  }
+  // The first "{" to the last "}", as before; then, only if that fails, the one object with a winner (1.0-D191).
+  const parsed: any = extractAnswerObject(text, "winner", "judge");
   const mistrial = v3 && typeof parsed.winner === "string" && parsed.winner.trim().toUpperCase() === "MISTRIAL";
   if (!mistrial && !seats.includes(parsed.winner)) throw new Error("judge returned an invalid winner");
   if (typeof parsed.reasoning !== "string") throw new Error("judge returned no reasoning");

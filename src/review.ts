@@ -10,6 +10,7 @@
 // payment settles, so a failed review is never charged.
 
 import { LIMITS, canonicalJson, panelShapeError, sha256Hex, validateCriteria } from "./logic.ts";
+import { extractAnswerObject } from "./answer-json.ts";
 import { ProviderCapError, accountOf, accountProblem, classifyStatus, rateInfo, type AccountProblem, type CallObservation } from "./providers.ts";
 import type { CutOff } from "./cutoffs.ts";
 import { allowedModels, answerTokens, answerText, callModel, callUsage, choosePanel, modelPool, viaOpenRouter, JUDGE_TEMPERATURE, type Confidence, type Criterion, type JudgeKeys, type PanelEnv, type PanelRequest, type PanelSelection } from "./judge.ts";
@@ -205,12 +206,8 @@ export function parseReview(text: string, criteria?: Criterion[]): Omit<ReviewVo
 /** parseReview with a chosen issue cap, also saying how many usable issues the cap left out (the multi-part tiers
  * record that in the signed vote, so nothing disappears silently). */
 export function parseReviewCapped(text: string, criteria: Criterion[] | undefined, maxIssues: number): Omit<ReviewVote, "reviewer" | "model"> & { dropped: number } {
-  let parsed: any;
-  try {
-    parsed = JSON.parse(text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1));
-  } catch {
-    throw new Error("reviewer returned unparseable output");
-  }
+  // The first "{" to the last "}", as before; then, only if that fails, the one object with a verdict (1.0-D191).
+  const parsed: any = extractAnswerObject(text, "verdict", "reviewer");
   const verdict = String(parsed?.verdict ?? "").trim().toLowerCase();
   if (!(REVIEW_VERDICTS as readonly string[]).includes(verdict)) throw new Error("reviewer returned an invalid verdict");
   if (typeof parsed.reasoning !== "string") throw new Error("reviewer returned no reasoning");
