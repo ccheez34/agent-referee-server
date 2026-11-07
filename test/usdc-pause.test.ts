@@ -78,6 +78,8 @@ t("while USDC is paused, every route that takes USDC refuses first, with the sco
     ["/join/rps", { match_id: "m", seat: "a" }],
     ["/join/weighted", { match_id: "m", seat: "a" }],
     ["/join/judge-3", { match_id: "m", seat: "a" }],
+    ["/join/judge-3x2", { match_id: "m", seat: "a" }], // multiJudgeJoinGuard would answer first ("aren't open yet") if the order broke
+    ["/host/join/judge-3x3", { match_id: "m", seat: "a" }],
     ["/join/draw/mediator", { match_id: "m", seat: "mediator" }],
     ["/host/join/judge", { match_id: "m", seat: "a" }],
     ["/settle-up", { wallet: "0x" + "1".repeat(40) }],
