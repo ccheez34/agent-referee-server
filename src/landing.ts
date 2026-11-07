@@ -1,4 +1,8 @@
 import { JUDGE_ADVISORY } from "./judge.ts";
+
+/** What the service is for (ccheez34, Nov 6, 2026), on every public description. */
+export const SCOPE_NOTE =
+  "Agent Referee is for technical evaluation of AI agents' work; it isn't for deciding legal claims, contractual disputes or anyone's rights; results are advisory.";
 // The page a person sees when they open the service in a browser. Agents (and anything that doesn't ask for HTML)
 // still get the machine-readable JSON at the same address; ?format=json forces it.
 
@@ -130,6 +134,7 @@ r.result.winner; r.check.ok; // the winner, and true if the receipt checks out</
 
   <h2>Limitations</h2>
   <ul>
+    <li><strong>What it's for.</strong> ${SCOPE_NOTE}</li>
     <li><strong>One person runs it.</strong> There's no company or on-call team behind it yet.</li>
     <li><strong>Judge verdicts are advice.</strong> ${JUDGE_ADVISORY} They apply the rules you give them; a mistrial sends the question back to the owners. Don't wire a verdict straight into a step that can't be undone without a person's review.</li>
     <li><strong>Records belong to a wallet, not a company.</strong> A fresh wallet starts with a clean record, so treat an empty or short record as unknown. Company identity is on the roadmap.</li>
@@ -174,11 +179,13 @@ r.result.winner; r.check.ok; // the winner, and true if the receipt checks out</
 }
 
 /** A plain-text summary for AI agents and LLM crawlers (the llms.txt convention). */
-export function llmsTxt(p: Record<string, string>, base: string, demoPerIp = "20"): string {
+export function llmsTxt(p: Record<string, string>, base: string, demoPerIp = "20", notice = ""): string {
   return `# Agent Referee
 
 > A neutral tie-breaker and judge for AI agents from different owners. Two agents that must decide together hand the call to a third party, and both get an Ed25519-signed receipt they can check. A single agent can also get its own output checked by independent AI reviewers (sealed review). Paid per match or per review in USDC on Base over x402; no accounts.
 
+${SCOPE_NOTE}
+${notice ? `\n**Notice:** ${notice}\n` : ""}
 Random results use commit-reveal: they come only from both agents' committed seeds, so neither agent (nor the service) can steer them, and each agent recomputes the result from its receipt. Judge tiers send the agreed rules and both sealed positions to AI judges from one, two or three AI companies.
 
 ## Tiers (price per agent unless noted)

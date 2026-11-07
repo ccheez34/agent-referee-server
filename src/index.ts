@@ -5,7 +5,7 @@ import { paymentMiddleware } from "x402-hono";
 import { KEY_RE, MEDIATOR, MAX_SERIES_GAMES, doublePrice, idForKey, isJudgeTier, keyId, ipv6Prefix64, payerFromPaymentHeader, randomToken, sha256Hex, validateCreate, type Tier } from "./logic.ts";
 import { MatchRoom } from "./match.ts";
 import { Ledger, ledgerShardName, shardLimit } from "./ledger.ts";
-import { landingHtml, llmsTxt, wantsHtml } from "./landing.ts";
+import { SCOPE_NOTE, landingHtml, llmsTxt, wantsHtml } from "./landing.ts";
 import { JUDGE_ADVISORY, JUDGE_HUMAN_REVIEW, JUDGE_MESSAGE_FORMAT, JUDGE_SYSTEM, allowedModels, claudeJudgesOn, commitsClaudeWhileOff, judgeAllowed, judgeCommitment, judgeExcludedList, judgePool, judgeTierClosed, judgeTierWaitsForCompany, missingJudgeKey, modelPool, optInModels, panelModels, tierCommitment, tierModels, type JudgeTierName } from "./judge.ts";
 import type { Env } from "./types.ts";
 import { payaiToken } from "./payai.ts";
@@ -252,6 +252,12 @@ const PAUSED_MSG =
   "Paid matches are paused for a moment. Free demo matches work now: add \"demo\": true to POST /matches and join at /demo/join/<tier>. Nobody was charged.";
 const REVIEWS_PAUSED_MSG = "Sealed reviews are paused for a moment. Nobody was charged; try again later.";
 const paidPaused = (env: Env) => env.PAID_PAUSED === "true";
+/** Every USDC payment refused (ccheez34, Nov 6, 2026: until the card route is ready). Unlike PAID_PAUSED, free reviews, free
+ * demo matches and the team allowance keep working: this guards only the routes that take USDC. */
+const usdcPaused = (env: Env) => env.USDC_PAUSED === "true";
+const USDC_PAUSED_MSG = `Paid use (USDC) is paused for now. Nothing was charged. Free sealed reviews work: POST /free/review or /free/review-3 (GET /reviewers shows the daily allowance). Free demo matches work: add "demo": true to POST /matches and join at /demo/join/<tier>. ${SCOPE_NOTE}`;
+const usdcPausedRefusal = () =>
+  new Response(JSON.stringify({ error: USDC_PAUSED_MSG, code: "usdc_paused", scope: SCOPE_NOTE }), { status: 503, headers: { "content-type": "application/json" } });
 /** The wrangler secret or the phone switch (POST /admin/pause). */
 async function paidPausedNow(env: Env) {
   return paidPaused(env) || (await pauseState(env)).paid;
@@ -630,6 +636,14 @@ async function judgeJoinGuard(c: any, next: any) {
   return next();
 }
 
+/** First on every route that takes USDC, before any other check: refused while USDC is paused. A draw's parties join free, so
+ * /join/draw/party stays open (a paid draw's mediator can't pay, so none starts). */
+async function usdcPauseGuard(c: any, next: any) {
+  if (usdcPaused(c.env) && !String(c.req.path).startsWith("/join/draw/party")) return usdcPausedRefusal();
+  return next();
+}
+for (const p of ["/join/*", "/host/join/*", "/review", "/review-3", "/review-3x2", "/review-3x3"]) app.use(p, usdcPauseGuard);
+
 /** The multi-part judge seats are refused before payment while their switch is off (except for the operator). */
 async function multiJudgeJoinGuard(c: any, next: any) {
   if (!(await multiJudgeOn(c))) return err(503, "The multi-part judge tiers (judge-3x2, judge-3x3) aren't open yet. Nothing was charged.");
@@ -765,7 +779,8 @@ app.get("/", (c) => {
     summary:
       "A neutral third party that settles disagreements between AI agents. Every random outcome uses commit-reveal so no agent (and not this server) can rig it, and every result comes with an Ed25519-signed receipt.",
     payment: { protocol: "x402", network: c.env.NETWORK, asset: "USDC", pay_to: c.env.PAY_TO },
-    ...(paidPaused(c.env) ? { notice: PAUSED_MSG } : {}),
+    scope: SCOPE_NOTE,
+    ...(usdcPaused(c.env) ? { notice: USDC_PAUSED_MSG } : paidPaused(c.env) ? { notice: PAUSED_MSG } : {}),
     ...(screenMode(c.env) !== "off" ? { content_rule: `${REQUEST_RULE} ${SUBMIT_RULE}` } : {}),
     tiers: {
       "1 rps": { tier: "rps", seats: 2, price_per_seat: p.rps, what: "Rock-paper-scissors; ties replay free." },
@@ -830,7 +845,7 @@ app.get("/", (c) => {
 // Plain-text summary for AI agents and LLM crawlers.
 app.get("/llms.txt", (c) => {
   const base = new URL(c.req.url).origin;
-  return c.text(llmsTxt(docPrices(c.env), base, c.env.DEMO_PER_IP_LIMIT || "20"));
+  return c.text(llmsTxt(docPrices(c.env), base, c.env.DEMO_PER_IP_LIMIT || "20", usdcPaused(c.env) ? USDC_PAUSED_MSG : ""));
 });
 
 // Health check for uptime monitors (free, no AI calls, no payments). 200 + "status":"ok" = all good; "degraded" names
@@ -882,7 +897,7 @@ app.get("/health", async (c) => {
     checks: {
       receipts_signing: signing ? "ok" : "missing key",
       records,
-      payments: env.PAYMENTS_ENABLED === "false" ? "off" : paused ? "paused" : "on",
+      payments: env.PAYMENTS_ENABLED === "false" ? "off" : paused || usdcPaused(env) ? "paused" : "on",
       reviews: reviewsPaused || paused ? "paused" : "on",
       judges,
       ...(Object.values(judges).includes("closed")
@@ -948,6 +963,7 @@ app.get("/settle-up", async (c) => {
 // Pay what a blocked wallet owes (x402, priced at exactly that amount, paid from the blocked wallet itself). Once the
 // payment settles the wallet can pay again; its strike stays. A banned wallet can't settle up.
 app.post("/settle-up", async (c) => {
+  if (usdcPaused(c.env)) return usdcPausedRefusal(); // settling up is a USDC payment too
   const body: any = await c.req.json().catch(() => null);
   const wallet = typeof body?.wallet === "string" ? body.wallet.trim().toLowerCase() : "";
   if (!/^0x[0-9a-f]{40}$/.test(wallet)) return err(400, 'Send {"wallet":"0x..."}: the blocked wallet. Nothing was charged.');
@@ -1087,6 +1103,7 @@ app.get("/judge", async (c) => {
     return why ? { closed: why } : await tierCommitment(t, panelModels(c.env, t));
   };
   return c.json({
+    scope: SCOPE_NOTE,
     advisory: JUDGE_ADVISORY,
     human_review: JUDGE_HUMAN_REVIEW,
     ...(screenMode(c.env) !== "off" ? { content_rule: SUBMIT_RULE } : {}),
@@ -1921,6 +1938,8 @@ app.post("/matches", async (c) => {
   const sanctioned = regionCheck(c, [], "");
   if (sanctioned) return sanctioned;
   const input: any = await c.req.json().catch(() => null);
+  // A paid match could never be joined while USDC is paused, so none is created; demo matches still are.
+  if (usdcPaused(c.env) && input?.demo !== true) return usdcPausedRefusal();
   // The screen reads the validated fields only (the match object validates again and gives the errors as before).
   // Only the judge tiers send text to an AI: their rules, title, criteria and seat labels. Nothing else is screened.
   const checked = validateCreate(input);

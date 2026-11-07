@@ -33,6 +33,7 @@ export interface Env {
   LONG_REVIEW_CHARS?: string; // task + output longer than this: light models (LIGHT_REVIEW_MODELS) sit out of reviews (default 6000)
   LIGHT_REVIEW_MODELS?: string; // comma list, default "claude-haiku-5-5"
   PAID_PAUSED?: string; // "true" refuses paid matches (before any payment) and points agents to demo mode
+  USDC_PAUSED?: string; // "true" refuses every USDC payment (paid reviews and seats, invite seats, settle-up, creating a paid match); free reviews, demo matches and the team allowance keep working
   REVIEWS_PAUSED?: string; // "true" refuses sealed reviews only (before any payment)
   SETTLE_FAIL_PAUSE_AFTER?: string; // payments failing to settle after delivered work, per hour, before paid routes pause (default 5)
   GATES_ENABLED?: string; // "false" turns the admission gates off (they're on whenever GATES is bound)
