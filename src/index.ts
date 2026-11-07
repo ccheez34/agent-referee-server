@@ -963,7 +963,8 @@ app.get("/settle-up", async (c) => {
 // Pay what a blocked wallet owes (x402, priced at exactly that amount, paid from the blocked wallet itself). Once the
 // payment settles the wallet can pay again; its strike stays. A banned wallet can't settle up.
 app.post("/settle-up", async (c) => {
-  if (usdcPaused(c.env)) return usdcPausedRefusal(); // settling up is a USDC payment too
+  // Settling up is a USDC payment too. Its x402 middleware is called inside this handler, further down, so this runs first.
+  if (usdcPaused(c.env)) return usdcPausedRefusal();
   const body: any = await c.req.json().catch(() => null);
   const wallet = typeof body?.wallet === "string" ? body.wallet.trim().toLowerCase() : "";
   if (!/^0x[0-9a-f]{40}$/.test(wallet)) return err(400, 'Send {"wallet":"0x..."}: the blocked wallet. Nothing was charged.');
@@ -1935,11 +1936,11 @@ app.get("/pubkey", async (c) => {
 // ---------- matches ----------
 
 app.post("/matches", async (c) => {
+  const input: any = await c.req.json().catch(() => null);
+  // First: a paid match could never be joined while USDC is paused, so none is created; demo matches still are.
+  if (usdcPaused(c.env) && input?.demo !== true) return usdcPausedRefusal();
   const sanctioned = regionCheck(c, [], "");
   if (sanctioned) return sanctioned;
-  const input: any = await c.req.json().catch(() => null);
-  // A paid match could never be joined while USDC is paused, so none is created; demo matches still are.
-  if (usdcPaused(c.env) && input?.demo !== true) return usdcPausedRefusal();
   // The screen reads the validated fields only (the match object validates again and gives the errors as before).
   // Only the judge tiers send text to an AI: their rules, title, criteria and seat labels. Nothing else is screened.
   const checked = validateCreate(input);

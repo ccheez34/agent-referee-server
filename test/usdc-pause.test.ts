@@ -123,9 +123,54 @@ t("the public descriptions carry the scope note, and say USDC is paused while it
   const llms = await (await raw(e, "/llms.txt")).text();
   assert.ok(llms.includes(SCOPE_NOTE), "llms.txt has the scope note");
   assert.match(llms, /\*\*Notice:\*\* Paid use \(USDC\) is paused/);
-  // GET /reviewers stays byte for byte its snapshot (judge-no-claude.test.ts, re-read R5): its paid routes refuse with the note.
+  // This change leaves GET /reviewers as it was (judge-no-claude.test.ts pins it byte for byte); its paid routes refuse above.
   assert.equal((await call(e, "/judge")).body.scope, SCOPE_NOTE);
   const html = await (await raw(e, "/", undefined, { accept: "text/html" })).text();
   assert.ok(html.includes("technical evaluation of AI agents"), "the landing page says what it's for");
   assert.equal((await call(e, "/health")).body.checks.payments, "paused");
+});
+
+t("with payments on, a paused paid route answers the pause, never a payment request (402), and takes no reviewer slot", async () => {
+  const e = env({ ...PAUSED, PAYMENTS_ENABLED: "true" });
+  for (const [path, body] of [["/review", review], ["/review-3", review], ["/review-3x2", pieces], ["/join/rps", { match_id: "m", seat: "a" }], ["/host/join/weighted", { match_id: "m", seat: "a" }]] as const) {
+    const r = await call(e, path, body, { "x-payment": "e30=" });
+    assert.equal(r.status, 503, path);
+    assert.equal(r.body.code, "usdc_paused", path);
+  }
+  assert.equal(e.GATES.objs.size, 0, "no admission gate (reviewer slot) was touched");
+});
+
+t("while USDC is paused, the free review-3, demo joins, the demo invite flow and a demo draw all work", async () => {
+  const e = env(PAUSED);
+  const ip = { "cf-connecting-ip": "198.51.100.40" };
+  assert.equal((await call(e, "/free/review-3", review, ip)).status, 200);
+  const m = await call(e, "/matches", { tier: "rps", seats: ["a", "b"], demo: true });
+  assert.equal(m.status, 201, JSON.stringify(m.body));
+  // A seat waits until every seat is filled, so both join at once.
+  const both = await Promise.all(["a", "b"].map((seat) => call(e, "/demo/join/rps", { match_id: m.body.match_id, seat })));
+  for (const j of both) assert.ok(j.status < 400, JSON.stringify(j.body));
+  const inv = await call(e, "/matches", { tier: "rps", seats: ["a", "b"], demo: true, host_pays: "a" });
+  assert.equal(inv.status, 201, JSON.stringify(inv.body));
+  const guest = await call(e, "/invite/join", { match_id: inv.body.match_id, invite_token: inv.body.invite.invite_token });
+  assert.ok(guest.status < 400, JSON.stringify(guest.body));
+  const host = await call(e, "/demo/host/join/rps", { match_id: inv.body.match_id, seat: "a" });
+  assert.ok(host.status < 400, JSON.stringify(host.body));
+  const d = await call(e, "/matches", { tier: "draw", seats: ["p1", "p2"], options: ["x", "y"], demo: true });
+  assert.equal(d.status, 201, JSON.stringify(d.body));
+  const draw = await Promise.all([
+    call(e, "/demo/join/draw/mediator", { match_id: d.body.match_id, seat: "mediator" }),
+    call(e, "/demo/join/draw/party", { match_id: d.body.match_id, seat: "p1" }),
+    call(e, "/demo/join/draw/party", { match_id: d.body.match_id, seat: "p2" }),
+  ]);
+  for (const j of draw) assert.ok(j.status < 400, JSON.stringify(j.body));
+});
+
+t("a paid draw already running when USDC is paused: its parties still join (they never pay)", async () => {
+  const e = env();
+  const d = await call(e, "/matches", { tier: "draw", seats: ["p1", "p2"], options: ["x", "y"] });
+  assert.equal(d.status, 201, JSON.stringify(d.body));
+  e.USDC_PAUSED = "true";
+  const party = await call(e, "/join/draw/party", { match_id: d.body.match_id, seat: "p1" });
+  assert.notEqual(party.body?.code, "usdc_paused", JSON.stringify(party.body));
+  assert.ok(party.status < 400, JSON.stringify(party.body));
 });
