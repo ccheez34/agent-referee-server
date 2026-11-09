@@ -30,6 +30,11 @@ export const MEDIATOR = "mediator";
 // Seat names a plain object treats specially: assigning obj["__proto__"] sets the prototype instead of adding a key,
 // and "constructor" and "prototype" read as inherited values before they're set. Refused where every seat name comes in.
 export const RESERVED_SEATS = ["__proto__", "constructor", "prototype"];
+/** True for "prototype" and for every name a plain object already has (Object.prototype's: "__proto__", "constructor",
+ * "toString", "valueOf", "hasOwnProperty" ...). Such a key reads as an inherited value before it's set (a seat named
+ * "toString" looks already taken), and obj["__proto__"] = x sets the prototype instead of adding a key (a criterion
+ * named "__proto__" lost its scores). Refused as seat names and as criterion names. */
+export const objectName = (s: string) => RESERVED_SEATS.includes(s) || s in Object.prototype;
 
 const enc = new TextEncoder();
 
@@ -147,7 +152,11 @@ export function validateCreate(body: any): { ok: true; value: CreateInput } | { 
     return { ok: false, error: "seats must be an array of labels (letters, digits, _ or -, max 32 chars)." };
   if (new Set(seats).size !== seats.length) return { ok: false, error: "seats must be unique." };
   if (seats.includes(MEDIATOR)) return { ok: false, error: `"${MEDIATOR}" is reserved.` };
-  if (seats.some((s: string) => RESERVED_SEATS.includes(s))) return { ok: false, error: `"__proto__", "constructor" and "prototype" are reserved.` };
+  if (seats.some((s: string) => objectName(s)))
+    return { ok: false, error: `"__proto__", "constructor", "prototype", "toString" and the other names every JavaScript object has are reserved.` };
+  // A judge's mistrial vote is counted under "mistrial" (decide's tally), and a judge answering "mistrial" in any case
+  // is read as a mistrial, so a seat by that name would collect mistrial votes, or never be picked.
+  if (seats.some((s: string) => s.toLowerCase() === "mistrial")) return { ok: false, error: `"mistrial" is reserved, in any case.` };
 
   const title = body.title;
   if (title !== undefined && (typeof title !== "string" || title.length > LIMITS.maxTitle))
@@ -268,6 +277,7 @@ export function validateCriteria(v: unknown): Criterion[] | string {
     const name = c.name.trim();
     if (!name || name.length > LIMITS.maxCriterionName || /[\n\r]/.test(name)) return err;
     if (!Number.isInteger(c.weight) || c.weight < 1 || c.weight > 100) return err;
+    if (objectName(name)) return `criterion name "${name}" is reserved: "__proto__", "constructor", "toString" and the other names every JavaScript object has can't be criteria.`;
     if (out.some((x) => x.name === name)) return err;
     out.push({ name, weight: c.weight });
   }

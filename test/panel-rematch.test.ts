@@ -99,6 +99,24 @@ test("seats named __proto__, constructor or prototype are refused; criteria tota
   assert.equal(Object.getPrototypeOf(t), Object.prototype);
 });
 
+test("criteria and seats named like an object's own names, or \"mistrial\", are refused; a score counts only from an own key", () => {
+  // Found by 5.0 in its review of 1b5c106a4aa3 (Nov 9): a criterion named "__proto__" passed validateCriteria, parseVote's
+  // scores[seat][name] = n dropped its scores, every total became NaN and the first seat by name won; a seat named
+  // "mistrial" collected the panel's mistrial votes; a seat named "toString" looked already taken.
+  const crit = (name: string) => validateCreate({ tier: "judge-3", seats: ["a", "b"], rules: "Cheaper plan wins.", criteria: [{ name, weight: 1 }] });
+  for (const name of ["__proto__", "constructor", "prototype", "toString", "valueOf", "hasOwnProperty", " __proto__ "]) assert.equal(crit(name).ok, false, `criterion ${name}`);
+  for (const s of ["toString", "valueOf", "hasOwnProperty", "isPrototypeOf", "__defineGetter__", "mistrial", "Mistrial", "MISTRIAL"])
+    assert.equal(validateCreate({ tier: "judge-3", seats: [s, "b"], rules: "Cheaper plan wins." }).ok, false, `seat ${s}`);
+  // Ordinary names still pass, those that only contain a reserved one included.
+  assert.equal(validateCreate({ tier: "judge-3", seats: ["mistrial2", "toStrings"], rules: "Cheaper plan wins.", criteria: [{ name: "proto", weight: 1 }, { name: "the constructor's fee", weight: 2 }] }).ok, true);
+  // A score that isn't an own key counts 0: it read Object.prototype before, and every total was NaN.
+  const two = [{ name: "__proto__", weight: 5 }, { name: "price", weight: 1 }];
+  assert.deepEqual(criteriaTotals({ alpha: { price: 0 }, beta: { price: 10 } }, two), { alpha: 0, beta: 10 });
+  assert.equal(votePick({ winner: "alpha", scores: { alpha: { price: 0 }, beta: { price: 10 } } }, two), "beta");
+  // A seat named "mistrial" would have won a majority panel on two mistrial votes; decide itself is unchanged.
+  assert.equal(decide("majority", [null, null, "alpha"], ["alpha", "beta"]).winner, null);
+});
+
 test("validation: criteria, panels and demo", () => {
   const ok = (x: any) => validateCreate(x).ok;
   assert.equal(ok({ tier: "judge-2", seats: ["a", "b"], rules: "Cheaper plan wins." }), true);
