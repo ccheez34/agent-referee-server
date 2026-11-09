@@ -441,7 +441,10 @@ export function missingJudgeKey(env: JudgeKeys, models: string[]): string | null
 /** Weighted total per party from 0-10 scores. */
 export function criteriaTotals(scores: Record<string, Record<string, number>>, criteria: Criterion[]): Record<string, number> {
   const out: Record<string, number> = {};
-  for (const [party, s] of Object.entries(scores)) out[party] = criteria.reduce((sum, c) => sum + c.weight * (s[c.name] ?? 0), 0);
+  // An own key for every party, even one named "__proto__" (out[party] = ... would set the prototype instead). Seats
+  // can't take that name any more (validateCreate), but scores come from a judge's text.
+  for (const [party, s] of Object.entries(scores))
+    Object.defineProperty(out, party, { value: criteria.reduce((sum, c) => sum + c.weight * (s[c.name] ?? 0), 0), enumerable: true, writable: true, configurable: true });
   return out;
 }
 

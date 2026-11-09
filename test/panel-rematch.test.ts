@@ -89,6 +89,16 @@ test("pure rules: unanimous, majority, mistrial, criteria totals", () => {
   assert.equal(votePick({ winner: "alpha", scores: { alpha: { price: 5, speed: 5 }, beta: { price: 5, speed: 5 } } }, crit), null, "tied totals = mistrial vote");
 });
 
+test("seats named __proto__, constructor or prototype are refused; criteria totals keep an own key for every party", () => {
+  for (const s of ["__proto__", "constructor", "prototype"])
+    assert.equal(validateCreate({ tier: "judge-2", seats: [s, "b"], rules: "Cheaper plan wins." }).ok, false, s);
+  // Scores parsed from JSON, as a judge's text is: the "__proto__" party keeps its total, and the object stays ordinary.
+  const t = criteriaTotals(JSON.parse('{"__proto__": {"price": 9}, "beta": {"price": 1}}'), [{ name: "price", weight: 1 }]);
+  assert.deepEqual(Object.keys(t), ["__proto__", "beta"]);
+  assert.equal(Object.getOwnPropertyDescriptor(t, "__proto__")?.value, 9);
+  assert.equal(Object.getPrototypeOf(t), Object.prototype);
+});
+
 test("validation: criteria, panels and demo", () => {
   const ok = (x: any) => validateCreate(x).ok;
   assert.equal(ok({ tier: "judge-2", seats: ["a", "b"], rules: "Cheaper plan wins." }), true);
