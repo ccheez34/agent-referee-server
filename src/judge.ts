@@ -444,10 +444,11 @@ export function criteriaTotals(scores: Record<string, Record<string, number>>, c
   // An own key for every party, even one named "__proto__" (out[party] = ... would set the prototype instead). On the
   // server such a seat never got this far (parseVote's scores[seat] = {} lost it, and validateCreate refuses the name
   // now); the own key is for scores parsed straight from JSON, as when anyone recomputes a receipt (the client mirrors
-  // this). A score counts only from an own key: s[c.name] for a criterion named "__proto__" read Object.prototype and
-  // made every total NaN, so the first seat by name won whatever the judges scored (validateCriteria refuses it now).
+  // this). A score counts only from an own key, and an empty one counts 0 as before: s[c.name] for a criterion named
+  // "__proto__" read Object.prototype and made every total NaN, so the first seat by name won whatever the judges
+  // scored (validateCriteria refuses it now).
   for (const [party, s] of Object.entries(scores))
-    Object.defineProperty(out, party, { value: criteria.reduce((sum, c) => sum + c.weight * (Object.hasOwn(s, c.name) ? s[c.name] : 0), 0), enumerable: true, writable: true, configurable: true });
+    Object.defineProperty(out, party, { value: criteria.reduce((sum, c) => sum + c.weight * (Object.hasOwn(s, c.name) ? (s[c.name] ?? 0) : 0), 0), enumerable: true, writable: true, configurable: true });
   return out;
 }
 

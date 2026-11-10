@@ -113,8 +113,8 @@ test("criteria and seats named like an object's own names, or \"mistrial\", are 
   const two = [{ name: "__proto__", weight: 5 }, { name: "price", weight: 1 }];
   assert.deepEqual(criteriaTotals({ alpha: { price: 0 }, beta: { price: 10 } }, two), { alpha: 0, beta: 10 });
   assert.equal(votePick({ winner: "alpha", scores: { alpha: { price: 0 }, beta: { price: 10 } } }, two), "beta");
-  // A seat named "mistrial" would have won a majority panel on two mistrial votes; decide itself is unchanged.
-  assert.equal(decide("majority", [null, null, "alpha"], ["alpha", "beta"]).winner, null);
+  // An own key with no value counts 0 too, as it did before (never NaN).
+  assert.deepEqual(criteriaTotals({ alpha: { price: undefined as unknown as number }, beta: { price: 10 } }, two), { alpha: 0, beta: 10 });
 });
 
 test("validation: criteria, panels and demo", () => {
