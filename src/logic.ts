@@ -7,6 +7,12 @@ export const TIERS: Tier[] = ["rps", "rps-bo3", "weighted", "draw", "judge", "ju
 export const JUDGE_TIERS: Tier[] = ["judge", "judge-2", "judge-3", "judge-3x2", "judge-3x3"];
 export type JudgeTier = "judge" | "judge-2" | "judge-3" | "judge-3x2" | "judge-3x3";
 export const isJudgeTier = (t: string): t is JudgeTier => (JUDGE_TIERS as string[]).includes(t);
+/** The "compare" names of the judge tiers (3.0's 1301 of Nov 9, step 2), accepted beside the judge names, which stay. A
+ * request turns one into its judge tier where the tier is first read; after that only judge names are seen: the match,
+ * its key, the price, the panel and the signed receipt. */
+export const COMPARE_ALIASES: Readonly<Record<string, JudgeTier>> = Object.freeze({ compare: "judge", "compare-2": "judge-2", "compare-3": "judge-3", "compare-3x2": "judge-3x2", "compare-3x3": "judge-3x3" });
+/** A tier name with a compare alias turned into its judge tier; anything else as given. */
+export const canonicalTier = (t: unknown): unknown => (typeof t === "string" && Object.hasOwn(COMPARE_ALIASES, t) ? COMPARE_ALIASES[t] : t);
 /** Multi-part judge tiers: each side submits 2 or 3 pieces. */
 export const MULTI_JUDGE_PIECES = { "judge-3x2": 2, "judge-3x3": 3 } as const;
 export type MultiJudgeTier = keyof typeof MULTI_JUDGE_PIECES;
@@ -144,8 +150,8 @@ export type CreateInput = {
 
 export function validateCreate(body: any): { ok: true; value: CreateInput } | { ok: false; error: string } {
   if (!body || typeof body !== "object") return { ok: false, error: "Body must be a JSON object." };
-  const tier = body.tier as Tier;
-  if (!TIERS.includes(tier)) return { ok: false, error: `tier must be one of: ${TIERS.join(", ")}` };
+  const tier = canonicalTier(body.tier) as Tier;
+  if (!TIERS.includes(tier)) return { ok: false, error: `tier must be one of: ${TIERS.join(", ")} (or ${Object.keys(COMPARE_ALIASES).join(", ")}, the judge tiers' other names)` };
 
   const seats = body.seats;
   if (!Array.isArray(seats) || !seats.every((s) => typeof s === "string" && LABEL_RE.test(s)))

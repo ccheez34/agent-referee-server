@@ -2,7 +2,7 @@
 import { TRY_HTML, TRY_SCRIPT_HASHES } from "./try-page.ts";
 import { Hono, type MiddlewareHandler } from "hono";
 import { paymentMiddleware } from "x402-hono";
-import { KEY_RE, MEDIATOR, MAX_SERIES_GAMES, doublePrice, idForKey, isJudgeTier, keyId, ipv6Prefix64, payerFromPaymentHeader, randomToken, sha256Hex, validateCreate, type Tier } from "./logic.ts";
+import { KEY_RE, MEDIATOR, MAX_SERIES_GAMES, doublePrice, idForKey, isJudgeTier, keyId, ipv6Prefix64, payerFromPaymentHeader, randomToken, sha256Hex, validateCreate, type Tier, COMPARE_ALIASES, canonicalTier } from "./logic.ts";
 import { MatchRoom } from "./match.ts";
 import { Ledger, ledgerShardName, shardLimit } from "./ledger.ts";
 import { SCOPE_NOTE, landingHtml, llmsTxt, wantsHtml } from "./landing.ts";
@@ -215,7 +215,7 @@ function getPaywall(env: Env): MiddlewareHandler {
   });
   paywall = paymentMiddleware(
     env.PAY_TO as `0x${string}`,
-    {
+    withCompareAliases({
       "/join/rps": route(p.rps, "Agent Referee — settle a deadlock with another AI agent by fair rock-paper-scissors. Ties replay free. Each of the 2 agents pays this to join."),
       "/join/rps-bo3": route(p["rps-bo3"], "Agent Referee — best-of-3 rock-paper-scissors between two AI agents. Ties don't count. Each of the 2 agents pays this to join."),
       "/join/weighted": route(p.weighted, "Agent Referee — fair random pick between two AI agents with agreed odds (e.g. 70/30). Both agents add secret seeds so neither can steer it. Each agent pays this to join."),
@@ -242,10 +242,18 @@ function getPaywall(env: Env): MiddlewareHandler {
           ),
         ]),
       ),
-    },
+    }),
     facilitator as any,
   ) as unknown as MiddlewareHandler;
   return paywall;
+}
+
+/** Each judge tier's payment routes under its compare name too: the same entry, so the price and text can't drift (3.0's 1301). */
+function withCompareAliases<T>(routes: Record<string, T>): Record<string, T> {
+  const out = { ...routes };
+  for (const [alias, tier] of Object.entries(COMPARE_ALIASES))
+    for (const base of ["/join/", "/host/join/"]) if (routes[`${base}${tier}`] !== undefined) out[`${base}${alias}`] = routes[`${base}${tier}`];
+  return out;
 }
 
 const PAUSED_MSG =
@@ -657,6 +665,12 @@ for (const t of ["judge", "judge-2", "judge-3", ...MULTI_JUDGE_TIERS]) {
   app.use(`/join/${t}`, judgeJoinGuard);
   app.use(`/host/join/${t}`, judgeJoinGuard);
 }
+// The compare names get their judge tier's guards, before the paywall (3.0's 1301).
+for (const [alias, tier] of Object.entries(COMPARE_ALIASES))
+  for (const base of ["/join/", "/host/join/"]) {
+    if (isMultiJudgeTier(tier)) app.use(`${base}${alias}`, multiJudgeJoinGuard);
+    app.use(`${base}${alias}`, judgeJoinGuard);
+  }
 app.use("/review", reviewGuard);
 app.use("/review-3", reviewGuard);
 app.use("/review-3x2", multiGuard);
@@ -782,6 +796,8 @@ app.get("/", (c) => {
     scope: SCOPE_NOTE,
     ...(usdcPaused(c.env) ? { notice: USDC_PAUSED_MSG } : paidPaused(c.env) ? { notice: PAUSED_MSG } : {}),
     ...(screenMode(c.env) !== "off" ? { content_rule: `${REQUEST_RULE} ${SUBMIT_RULE}` } : {}),
+    // The compare names, each with its judge tier; a multi-part one only once that family is shown (its switch on).
+    compare_aliases: { ...Object.fromEntries(Object.entries(COMPARE_ALIASES).filter(([, t]) => !isMultiJudgeTier(t) || multiJudgeOnForAll(c.env))), note: "Each compare name is the judge tier it names: the same match, price and receipt (the receipt says judge)." },
     tiers: {
       "1 rps": { tier: "rps", seats: 2, price_per_seat: p.rps, what: "Rock-paper-scissors; ties replay free." },
       "2 rps-bo3": { tier: "rps-bo3", seats: 2, price_per_seat: p["rps-bo3"], what: "Best of 3 rock-paper-scissors; ties don't count." },
@@ -1090,7 +1106,7 @@ app.post("/admin/gate-reset", async (c) => {
 });
 
 // The exact judge setup, so anyone can check the prompt_sha256 in a match or receipt.
-app.get("/judge", async (c) => {
+app.on("GET", ["/judge", "/compare"], async (c) => { // GET /compare: the same page, by its compare name
   // Each tier's default panel, or "closed" with the reason (judge-tier spec v2.1, §3 rule 6).
   const closed = (t: "judge" | "judge-2" | "judge-3") => judgeTierClosed(c.env, t);
   const single = closed("judge");
@@ -1937,6 +1953,8 @@ app.get("/pubkey", async (c) => {
 
 app.post("/matches", async (c) => {
   const input: any = await c.req.json().catch(() => null);
+  // A compare name is its judge tier from here on: every check below, the key and the match see the judge name.
+  if (input && typeof input === "object" && typeof input.tier === "string") input.tier = canonicalTier(input.tier);
   // First: a paid match could never be joined while USDC is paused, so none is created; demo matches still are.
   if (usdcPaused(c.env) && input?.demo !== true) return usdcPausedRefusal();
   const sanctioned = regionCheck(c, [], "");
@@ -2109,6 +2127,7 @@ joinRoute("/join/judge-2", "judge-2", "party", true);
 joinRoute("/join/judge-3", "judge-3", "party", true);
 joinRoute("/join/judge-3x2", "judge-3x2", "party", true);
 joinRoute("/join/judge-3x3", "judge-3x3", "party", true);
+for (const [alias, tier] of Object.entries(COMPARE_ALIASES)) joinRoute(`/join/${alias}`, tier, "party", true);
 joinRoute("/join/draw/mediator", "draw", "mediator", true);
 joinRoute("/join/draw/party", "draw", "party", false);
 
@@ -2122,6 +2141,7 @@ joinRoute("/demo/join/draw/party", "draw", "party", false, true);
 
 // Invite matches: the host's seat pays for both (paid routes above; free demo versions for demo matches).
 for (const t of INVITE_TIERS) joinRoute(`/host/join/${t}`, t, "host", true);
+for (const [alias, tier] of Object.entries(COMPARE_ALIASES)) joinRoute(`/host/join/${alias}`, tier, "host", true);
 for (const t of ["rps", "rps-bo3", "weighted"] as const) joinRoute(`/demo/host/join/${t}`, t, "host", true, true);
 
 // ---------- agent records (free to read) ----------
