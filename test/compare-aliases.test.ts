@@ -132,17 +132,19 @@ t("with payments on, each compare name asks the same payment as its judge name: 
   const orig = globalThis.fetch;
   globalThis.fetch = (async () => new Response("{}")) as any; // no facilitator or AI call is made for an unpaid request
   try {
-    const e = env({ PAYMENTS_ENABLED: "true" });
-    for (const [alias, tier] of [["compare", "judge"], ["compare-2", "judge-2"], ["compare-3", "judge-3"]]) {
+    // The multi-part switch is on too, so the multi-part compare names reach the paywall (switched off, their guard refuses first).
+    const e = env({ PAYMENTS_ENABLED: "true", MULTI_JUDGE_ENABLED: "true" });
+    for (const [alias, tier] of Object.entries(COMPARE_ALIASES)) {
       const m = await call(e, "/matches", { tier, seats: ["alpha", "beta"], rules: "Pick the cheaper plan." }, from("US"));
-      assert.equal(m.status, 201, JSON.stringify(m.body));
+      assert.equal(m.status, 201, `${tier}: ${JSON.stringify(m.body)}`);
       const id = m.body.match_id ?? m.body.id;
       for (const base of ["/join/", "/host/join/"]) {
         const a = await call(e, `${base}${tier}`, { match_id: id, seat: "alpha" }, from("US"));
         const b = await call(e, `${base}${alias}`, { match_id: id, seat: "alpha" }, from("US"));
-        assert.equal(b.status, a.status, `${base}${alias}: ${JSON.stringify(b.body).slice(0, 200)}`);
-        if (base === "/join/") assert.equal(b.status, 402, `${base}${alias} must ask for payment`);
+        assert.equal(a.status, 402, `${base}${tier} asks for payment`);
+        assert.equal(b.status, 402, `${base}${alias} must ask for payment: ${JSON.stringify(b.body).slice(0, 200)}`);
         const price = (r: any) => JSON.stringify((r.body?.accepts ?? []).map((x: any) => x.maxAmountRequired));
+        assert.notEqual(price(a), "[]", `${base}${tier} names a price`);
         assert.equal(price(b), price(a), `${base}${alias}: the same price as ${tier}`);
       }
     }
