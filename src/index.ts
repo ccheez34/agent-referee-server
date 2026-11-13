@@ -797,7 +797,8 @@ app.get("/", (c) => {
     ...(usdcPaused(c.env) ? { notice: USDC_PAUSED_MSG } : paidPaused(c.env) ? { notice: PAUSED_MSG } : {}),
     ...(screenMode(c.env) !== "off" ? { content_rule: `${REQUEST_RULE} ${SUBMIT_RULE}` } : {}),
     // The compare names, each with its judge tier; a multi-part one only once that family is shown (its switch on).
-    compare_aliases: { ...Object.fromEntries(Object.entries(COMPARE_ALIASES).filter(([, t]) => !isMultiJudgeTier(t) || multiJudgeOnForAll(c.env))), note: "Each compare name is the judge tier it names: the same match, price and receipt (the receipt says judge)." },
+    compare_aliases: Object.fromEntries(Object.entries(COMPARE_ALIASES).filter(([, t]) => !isMultiJudgeTier(t) || multiJudgeOnForAll(c.env))),
+    compare_aliases_note: "Each compare name is the judge tier it names: the same match, price and receipt (the receipt says judge).",
     tiers: {
       "1 rps": { tier: "rps", seats: 2, price_per_seat: p.rps, what: "Rock-paper-scissors; ties replay free." },
       "2 rps-bo3": { tier: "rps-bo3", seats: 2, price_per_seat: p["rps-bo3"], what: "Best of 3 rock-paper-scissors; ties don't count." },

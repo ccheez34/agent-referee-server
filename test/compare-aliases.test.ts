@@ -89,6 +89,10 @@ t("GET /compare answers as GET /judge; the root JSON lists the compare names", a
   const root = await call(e, "/?format=json");
   assert.equal(root.body.compare_aliases["compare-2"], "judge-2");
   assert.equal(root.body.compare_aliases.compare, "judge");
+  assert.deepEqual(Object.keys(root.body.compare_aliases).sort(), ["compare", "compare-2", "compare-3"], "a plain map of names (2.0's nit), the multi-part ones off");
+  assert.match(root.body.compare_aliases_note, /receipt says judge/);
+  const llms = await app.fetch(new Request("https://x/llms.txt"), e, ctx);
+  assert.match(await llms.text(), /compare, compare-2, compare-3: other names for the judge tiers/);
 });
 
 t("a match made with a compare name is a judge match, and both names' join routes answer alike", async () => {

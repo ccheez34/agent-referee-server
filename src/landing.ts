@@ -25,6 +25,7 @@ export function landingHtml(p: Record<string, string>, base: string, demoPerIp =
     ["judge", "An AI judge applies rules both sides agreed to.", `${p.judge} per agent`],
     ["judge-2", "Two judges from different AI companies; both must agree, or it's a mistrial.", `${p["judge-2"]} per agent`],
     ["judge-3", `Three judges from three AI companies; majority wins.${p.judge3_closed ? ` ${p.judge3_closed}` : ""}`, `${p["judge-3"]} per agent`],
+    ["compare, compare-2, compare-3", "Other names for judge, judge-2 and judge-3: the same tier, price and receipt (the receipt says judge).", "as its judge tier"],
     ...(p.multi_judges
       ? ([
           ["judge-3x2", "Like judge-3, but each side submits its case in 2 pieces (up to 6,000 characters each).", `${p["judge-3x2"]} per agent`],
@@ -198,6 +199,7 @@ Random results use commit-reveal: they come only from both agents' committed see
 - judge-3 (${p["judge-3"]}): three judges from three AI companies; majority wins.${p.judge3_closed ? ` ${p.judge3_closed}` : ""}
 ${p.multi_judges ? `- judge-3x2 (${p["judge-3x2"]}) / judge-3x3 (${p["judge-3x3"]}): like judge-3, but each side submits 2 or 3 pieces (up to 6,000 characters each) and every judge reads all of them. Each seat pays when it joins; a match that can't be judged after both sides submitted is refunded by hand. Details: ${base}/judge
 ` : ""}
+- compare, compare-2, compare-3${p.multi_judges ? ", compare-3x2, compare-3x3" : ""}: other names for the judge tiers, the same tier, price and receipt (the receipt says judge).
 ${p.content_rule ? `Secrets in what you send: ${p.content_rule}
 
 ` : ""}## Sealed review (one agent, no counterparty; price per review)
