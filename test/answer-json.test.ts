@@ -2,7 +2,7 @@
 // in it, or an escape JSON refuses inside a string, no longer fails the review; two answers are refused, never guessed.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { balancedObjects, extractAnswerObject, repairJson } from "../src/answer-json.ts";
+import { MAX_UNCLOSED, balancedObjects, extractAnswerObject, repairJson } from "../src/answer-json.ts";
 import { parseReview } from "../src/review.ts";
 import { parseVote } from "../src/judge.ts";
 
@@ -57,4 +57,39 @@ test("the judge's parser takes the same care, with its own key", () => {
   assert.throws(() => parseVote(vote("A") + " or " + vote("B") + " {", ["A", "B"], undefined, false), /judge returned more than one answer/);
   assert.throws(() => parseVote("no answer", ["A", "B"], undefined, false), /judge returned unparseable output/);
   assert.equal(extractAnswerObject('x {"winner": "A", "reasoning": "a \\d b"} y {', "winner", "judge").reasoning, "a \\d b");
+});
+
+// 5.0's read before the paid review (Nov 21): three planted bugs got past the tests above (the repair on the search
+// path, the scan's escapes, the last whole-text repair), and two answers were picked between when one needed the repair.
+test("an answer that needs the repair is found among text with braces in it", () => {
+  const v = parseReview('Reading canonicalJson({b: 2}) first. {"verdict": "fail", "confidence": "low", "issues": ["misses \\d"], "reasoning": "a \\x b"} (see } above)');
+  assert.equal(v.verdict, "fail");
+  assert.equal(v.issues[0], "misses \\d", "the backslash kept as written");
+});
+
+test("two different answers are refused when only one of them needed the repair, in either order", () => {
+  const a = (verdict: string, reasoning: string) => `{"verdict": "${verdict}", "confidence": "high", "issues": [], "reasoning": "${reasoning}"}`;
+  assert.throws(() => parseReview(a("pass", "ok") + " On second thought: " + a("fail", "uses \\d")), /more than one answer/);
+  assert.throws(() => parseReview(a("pass", "uses \\d") + " On second thought: " + a("fail", "no")), /more than one answer/);
+  // the same answer written twice, once with the escape JSON refuses and once as JSON writes it, is one answer
+  assert.equal(parseReview(a("pass", "uses \\d") + " again: " + a("pass", "uses \\\\d")).verdict, "pass");
+});
+
+test("an escaped quote and a brace inside a string don't end the object, on the search path", () => {
+  const v = parseReview('Intro {. {"verdict": "pass", "confidence": "high", "issues": [], "reasoning": "it prints \\"} done\\" here"}');
+  assert.equal(v.verdict, "pass");
+  assert.equal(v.reasoning, 'it prints "} done" here');
+});
+
+test("a broken object with no answer key still reads as unparseable, as before the fix", () => {
+  assert.throws(() => parseReview('{"result": {"verdict": "pass"}, "note": "uses \\d"}'), /reviewer returned unparseable output/);
+});
+
+test("the search stops after MAX_UNCLOSED braces that never close, so the work stays linear", () => {
+  const ans = '{"verdict": "pass", "confidence": "high", "issues": [], "reasoning": "ok"}';
+  assert.equal(parseReview("{ ".repeat(MAX_UNCLOSED - 1) + ans).verdict, "pass", "fewer than the limit: found");
+  assert.throws(() => parseReview("{ ".repeat(MAX_UNCLOSED) + ans), /unparseable output/, "at the limit: the search stops");
+  const t0 = performance.now();
+  assert.throws(() => parseReview("{".repeat(40_000) + " " + ans), /unparseable output/);
+  assert.ok(performance.now() - t0 < 1_000, "40,000 unclosed braces end quickly (about 2 s before the limit)");
 });

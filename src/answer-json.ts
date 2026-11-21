@@ -18,9 +18,16 @@ function tryParse(s: string): Parsed {
   }
 }
 
+/** At most this many "{" that never close are tried before the search stops (5.0's read, Nov 21): each one is a scan
+ * to the end of the text, so a long run of them made the search quadratic (40,000 took about 2 s, inside the
+ * 10,000-token answer cap). Past it, what was found so far stands; an answer behind them reads as unparseable, as
+ * before the fix. */
+export const MAX_UNCLOSED = 64;
+
 /** Every top-level balanced {...} span in the text, in order, read the way JSON reads strings and escapes. */
 export function balancedObjects(text: string): string[] {
   const out: string[] = [];
+  let unclosed = 0;
   let i = text.indexOf("{");
   while (i >= 0) {
     let depth = 0;
@@ -41,6 +48,7 @@ export function balancedObjects(text: string): string[] {
       }
     }
     if (end < 0) {
+      if (++unclosed >= MAX_UNCLOSED) break; // the work stays linear in the text's length
       i = text.indexOf("{", i + 1); // this brace never closes: try the next one
       continue;
     }
@@ -92,23 +100,22 @@ const hasKey = (v: unknown, key: string) => !!v && typeof v === "object" && !Arr
 
 /**
  * The answer object: the first "{" to the last "}" if that parses (as before); else the one top-level object that
- * parses and carries `key`; else the same after repairJson. Throws "<who> returned unparseable output" when none does,
- * and "<who> returned more than one answer" when two different objects carry `key`.
+ * carries `key`, each object read as written or, only if that fails, after repairJson. Every object that carries `key`
+ * counts, whichever of them needed the repair, so two different answers are always refused, never one picked (5.0's
+ * read, Nov 21: with one pass per kind, an answer that needed the repair went unseen beside one that didn't).
+ * Throws "<who> returned more than one answer" for two, and "<who> returned unparseable output" for none.
  */
 export function extractAnswerObject(text: string, key: string, who: string): any {
   const span = text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1);
   const first = tryParse(span);
   if (first.ok) return first.value;
-  for (const repair of [false, true]) {
-    const found = new Map<string, unknown>();
-    for (const s of balancedObjects(text)) {
-      const p = tryParse(repair ? repairJson(s) : s);
-      if (p.ok && hasKey(p.value, key)) found.set(JSON.stringify(p.value), p.value);
-    }
-    if (found.size > 1) throw new Error(`${who} returned more than one answer`);
-    if (found.size === 1) return [...found.values()][0];
+  const found = new Map<string, unknown>();
+  for (const s of balancedObjects(text)) {
+    let p = tryParse(s);
+    if (!p.ok) p = tryParse(repairJson(s));
+    if (p.ok && hasKey(p.value, key)) found.set(JSON.stringify(p.value), p.value);
   }
-  const repaired = tryParse(repairJson(span));
-  if (repaired.ok) return repaired.value;
+  if (found.size > 1) throw new Error(`${who} returned more than one answer`);
+  if (found.size === 1) return [...found.values()][0];
   throw new Error(`${who} returned unparseable output`);
 }
