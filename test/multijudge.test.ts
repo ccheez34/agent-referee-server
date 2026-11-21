@@ -37,7 +37,7 @@ function ns<T extends { fetch(r: Request): Promise<Response> }>(make: () => T) {
 }
 
 function world(extra: Record<string, unknown> = {}) {
-  const env: any = { ...keys, ANTHROPIC_API_KEY: "a", OPENROUTER_API_KEY: "o", HEALTH: ns(() => new Health(mem() as any)), ...extra };
+  const env: any = { ...keys, ANTHROPIC_API_KEY: "a", OPENROUTER_API_KEY: "o", CLAUDE_JUDGES_ENABLED: "true", HEALTH: ns(() => new Health(mem() as any)), ...extra };
   const rooms = new Map<string, MatchRoom>();
   const roomFor = (id: string) => {
     if (!rooms.has(id)) rooms.set(id, new MatchRoom(mem() as any, env));
@@ -131,11 +131,14 @@ test("the panel is fixed at creation by the multi-part rules: eligible models fr
   assert.deepEqual(st.body.judge, j);
 });
 
+/** Claude judges on: these tests are about the draw rules, which hold either way (judge-no-claude.test.ts covers "off"). */
+const ON = { CLAUDE_JUDGES_ENABLED: "true" };
+
 test("random panel draws never pick Haiku, Opus (left out by default) or opt-in models", async () => {
   for (let i = 0; i < 60; i++) {
-    const c = await multiJudgeCommitment("judge-3x2", {});
+    const c = await multiJudgeCommitment("judge-3x2", ON);
     for (const p of c.panel!) assert.ok(![HAIKU, OPUS, KIMI].includes(p.model), p.model);
-    const picks = await multiJudgeCommitment("judge-3x3", {}, { picks: { alpha: SONNET, beta: ARGON } });
+    const picks = await multiJudgeCommitment("judge-3x3", ON, { picks: { alpha: SONNET, beta: ARGON } });
     const ms = picks.panel!.map((p) => p.model);
     assert.ok(ms.includes(SONNET) && ms.includes(ARGON) && ms.includes(LUNA), "the third is drawn from the company neither picked");
   }
@@ -158,7 +161,7 @@ test("refused at creation, before anyone pays: Haiku, opt-in, Opus while left ou
   const closed = await createMatch(world({ MULTI_PART_EXCLUDE: `${OPUS},${ARGON},${FLASH}` }), "judge-3x2");
   assert.equal(closed.created.status, 503);
   assert.match(closed.created.body.error, /judge-3x2 is closed for now: it needs an eligible judge from each of three AI companies, and google has none/);
-  await assert.rejects(multiJudgeCommitment("judge-3x2", { MULTI_PART_EXCLUDE: `${OPUS},${ARGON},${FLASH}` }), MultiClosedError);
+  await assert.rejects(multiJudgeCommitment("judge-3x2", { ...ON, MULTI_PART_EXCLUDE: `${OPUS},${ARGON},${FLASH}` }), MultiClosedError);
 });
 
 // ---------- submitting ----------

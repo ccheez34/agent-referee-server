@@ -138,7 +138,7 @@ export async function acquireSlots(env: Env, models: string[], opts: { leaseMs: 
 /** Every pool of a provider this server uses: caps are account-wide, so one cap closes them all. */
 export function poolsOfProvider(env: Env, provider: Provider): string[] {
   const models = [...allowedModels(env), env.REVIEW_MODEL || "claude-sonnet-5-5", env.JUDGE_MODEL || "claude-haiku-5-5", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"];
-  for (const k of ["PANEL_MODELS", "PANEL_2_MODELS", "PANEL_3_MODELS"] as const) models.push(...String(env[k] || "").split(",").map((s) => s.trim()).filter(Boolean));
+  for (const k of ["PANEL_MODELS", "PANEL_2_MODELS", "PANEL_3_MODELS", "REVIEW_3_MODELS", "JUDGE_MODEL_POOL"] as const) models.push(...String(env[k] || "").split(",").map((s) => s.trim()).filter(Boolean));
   return [...new Set(models.map(poolOf))].filter((p) => providerOfPool(p) === provider);
 }
 

@@ -29,7 +29,23 @@
     "NETWORK": "base",
     "FACILITATOR_URL": "https://facilitator.payai.network",
     "PAYMENTS_ENABLED": "true",
-    "JUDGE_MODEL": "claude-haiku-5-5",
+    // Every USDC payment refused (ccheez34, Nov 6, 15:02: "turn regular crypto off"; until the card route is ready, after
+    // the lawyer). Free reviews, free demo matches and the team allowance keep working. Undo: "false", then deploy.
+    "USDC_PAUSED": "true",
+    // The content screen (src/screen.ts; research\specs\content-screen-2026-11-03). "shadow" from the bundled deploy
+    // (ccheez34, Nov 3, 08:58: "shadow mode it is"; Nov 4, 13:55: "A-on for liability reasons"): layer 2a refuses secrets
+    // for real; 2b's labels, once built, are only logged. "enforce" waits for his yes after the lawyer.
+    "CONTENT_SCREEN": "shadow",
+    // No Claude judges until the lawyer approves (ccheez34, Oct 30, 16:57: "ok no claude on any judge panel until the
+    // lawyer approves"). Only "true" turns them back on (judge-tier spec v2.1, research\specs\judge-no-claude-2026-10-30).
+    // Wrangler doesn't pass vars down to environments, so env.staging.vars repeats every judge setting below.
+    "CLAUDE_JUDGES_ENABLED": "false",
+    "JUDGE_MODEL": "google/gemini-3.7-flash",
+    // What judge panels draw from and agents may name (reviews keep MODEL_POOL). Mistral is out for now (ccheez34, Oct 31,
+    // 10:13): it ran out of tokens on a long review and gave "unusable output" on 8 of 8 judge runs, so it may not judge
+    // until it passes a judge trial (README, "Judge trials"; research\checks\judge-tier-build-2026-10-30\MISTRAL-LIVE-CHECK.md).
+    "JUDGE_MODEL_POOL": "openai/gpt-6-luna,google/gemini-4-argon,google/gemini-3.7-flash",
+    "JUDGE_EXCLUDE": "mistralai/mistral-large-4-0",
     "REVEAL_WINDOW_SECONDS": "600",
 
     // Prices are PER SEAT (each agent pays this), except the draw mediator who pays for everyone
@@ -45,22 +61,26 @@
     "PRICE_REVIEW_3": "$0.20",
     // Panel judges, panelist 1 first, from different companies so a panel isn't one model family agreeing with itself.
     // Plain Claude ids go to Anthropic (ANTHROPIC_API_KEY); "provider/model" ids go through OpenRouter (OPENROUTER_API_KEY).
-    "PANEL_2_MODELS": "claude-opus-5-5,google/gemini-4-argon",
-    "PANEL_3_MODELS": "claude-opus-5-5,openai/gpt-6-luna,google/gemini-3.7-flash",
+    // judge-3's default waits for a third company that passes a judge trial: with two companies it's closed (agents can
+    // still name three companies), and /health stays ok (spec v2.2 rule 7).
+    "PANEL_2_MODELS": "openai/gpt-6-luna,google/gemini-4-argon",
+    "PANEL_3_MODELS": "openai/gpt-6-luna,google/gemini-3.7-flash",
+    // review-3's own default, apart from the judge settings: the list it used before (reviews may still use Claude).
+    "REVIEW_3_MODELS": "claude-opus-5-5,openai/gpt-6-luna,google/gemini-3.7-flash",
     // Concurrent AI calls per provider pool (code defaults: Opus 6, Sonnet 12, Haiku 12, OpenRouter 20).
     // Live starts from what the launch-day stress test ran at once with no 429s: 20 reviews (Sonnet) and 10 review-3s
     // (10 Opus + 20 OpenRouter calls). The Phase 2b ramp checks Sonnet above that; lower a pool if it shows "throttled".
     "GATE_SLOTS_ANTHROPIC_CLAUDE_SONNET_5_5": "20",
     "GATE_SLOTS_ANTHROPIC_CLAUDE_OPUS_5_5": "10",
     // Team allowance for the owner's own AI sessions (/team/*). Off until the TEAM_TOKEN secret is set. The experiment
-    // sessions S1, T3, T4, T5 have the default budget; 1.0-5.0 share one $10 pool (core-decisions, one-off) for the experiment's decisions.
+    // sessions S1, T3, T4, T5 have the default budget; 1.0-5.0 share one pool, now $110 (core-decisions, one-off: $10, raised to $35 in all by ccheez34, Oct 31, 17:57: "add it to make it $35 as the final decision"; $35 more, $70 in all, by ccheez34, Nov 3, 14:24: "ok $35 more"; $110 in all, his top-up of Nov 6, 5.0's 1943, live as 1cbfced0) for reviews and decisions.
     // S1Test (daily $0.30, pool $1.00) shows a daily refusal; S1TestPool (daily $1.00, pool $0.30) a pool refusal.
     // Same rules as S1, scaled down so the test costs $0.40 (ccheez34 asked for S1Test, 19:01).
     "TEAM_MEMBERS": "S1,T3,T4,T5,1.0,2.0,3.0,4.0,5.0,S1Test:0.30,S1TestPool:1.00",
     "TEAM_MEMBER_DAILY_USD": "25.00",
     "TEAM_DAILY_USD": "110.00",
-    // Pools per experiment agent and run (totals, not daily): $25 each for S1, T3, T4, T5 (ccheez34, Oct 29, after the kit review); 1.0-5.0 share $10.
-    "TEAM_GROUPS": "S1-run1=S1:25.00;T3-run1=T3:25.00;T4-run1=T4:25.00;T5-run1=T5:25.00;core-decisions=1.0,2.0,3.0,4.0,5.0:10.00;S1Test-run1=S1Test:1.00;S1TestPool-run1=S1TestPool:0.30",
+    // Pools per experiment agent and run (totals, not daily): $25 each for S1, T3, T4, T5 (ccheez34, Oct 29, after the kit review); 1.0-5.0 share $110 in all (the history is in the team allowance note above).
+    "TEAM_GROUPS": "S1-run1=S1:25.00;T3-run1=T3:25.00;T4-run1=T4:25.00;T5-run1=T5:25.00;core-decisions=1.0,2.0,3.0,4.0,5.0:110.00;S1Test-run1=S1Test:1.00;S1TestPool-run1=S1TestPool:0.30",
     // Free sealed reviews (the operator pays): 3 single + 1 review-3 per address per UTC day, all inside one
     // daily budget counted at list price ($3.00 = at most 60 single or 15 review-3 a day). "0" turns them off.
     "FREE_REVIEW_DAILY_BUDGET_USD": "3.00",
@@ -105,16 +125,21 @@
         "FAKE_AI": "true",
         "FAKE_AI_DELAY_MS": "2000-30000",
         "FAKE_AI_MIX": "",
-        "JUDGE_MODEL": "claude-haiku-5-5",
+        "CONTENT_SCREEN": "shadow",
+        "CLAUDE_JUDGES_ENABLED": "false",
+        "JUDGE_MODEL": "google/gemini-3.7-flash",
+        "JUDGE_MODEL_POOL": "openai/gpt-6-luna,google/gemini-4-argon,google/gemini-3.7-flash",
+        "JUDGE_EXCLUDE": "mistralai/mistral-large-4-0",
         "REVEAL_WINDOW_SECONDS": "600",
-        "PANEL_2_MODELS": "claude-opus-5-5,google/gemini-4-argon",
-        "PANEL_3_MODELS": "claude-opus-5-5,openai/gpt-6-luna,google/gemini-3.7-flash",
+        "PANEL_2_MODELS": "openai/gpt-6-luna,google/gemini-4-argon",
+        "PANEL_3_MODELS": "openai/gpt-6-luna,google/gemini-3.7-flash",
+        "REVIEW_3_MODELS": "claude-opus-5-5,openai/gpt-6-luna,google/gemini-3.7-flash",
         "GATE_SLOTS_ANTHROPIC_CLAUDE_SONNET_5_5": "20",
         "GATE_SLOTS_ANTHROPIC_CLAUDE_OPUS_5_5": "10",
         "TEAM_MEMBERS": "S1,T3,T4,T5,1.0,2.0,3.0,4.0,5.0,S1Test:0.30,S1TestPool:1.00",
         "TEAM_MEMBER_DAILY_USD": "25.00",
         "TEAM_DAILY_USD": "110.00",
-        "TEAM_GROUPS": "S1-run1=S1:25.00;T3-run1=T3:25.00;T4-run1=T4:25.00;T5-run1=T5:25.00;core-decisions=1.0,2.0,3.0,4.0,5.0:10.00;S1Test-run1=S1Test:1.00;S1TestPool-run1=S1TestPool:0.30",
+        "TEAM_GROUPS": "S1-run1=S1:25.00;T3-run1=T3:25.00;T4-run1=T4:25.00;T5-run1=T5:25.00;core-decisions=1.0,2.0,3.0,4.0,5.0:110.00;S1Test-run1=S1Test:1.00;S1TestPool-run1=S1TestPool:0.30",
         "DEMO_PER_IP_LIMIT": "20",
         "FREE_REVIEW_DAILY_BUDGET_USD": "3.00",
         "FREE_REVIEWS_PER_DAY": "3",

@@ -7,6 +7,12 @@ export const TIERS: Tier[] = ["rps", "rps-bo3", "weighted", "draw", "judge", "ju
 export const JUDGE_TIERS: Tier[] = ["judge", "judge-2", "judge-3", "judge-3x2", "judge-3x3"];
 export type JudgeTier = "judge" | "judge-2" | "judge-3" | "judge-3x2" | "judge-3x3";
 export const isJudgeTier = (t: string): t is JudgeTier => (JUDGE_TIERS as string[]).includes(t);
+/** The "compare" names of the judge tiers (3.0's 1301 of Nov 9, step 2), accepted beside the judge names, which stay. A
+ * request turns one into its judge tier where the tier is first read; after that only judge names are seen: the match,
+ * its key, the price, the panel and the signed receipt. */
+export const COMPARE_ALIASES: Readonly<Record<string, JudgeTier>> = Object.freeze({ compare: "judge", "compare-2": "judge-2", "compare-3": "judge-3", "compare-3x2": "judge-3x2", "compare-3x3": "judge-3x3" });
+/** A tier name with a compare alias turned into its judge tier; anything else as given. */
+export const canonicalTier = (t: unknown): unknown => (typeof t === "string" && Object.hasOwn(COMPARE_ALIASES, t) ? COMPARE_ALIASES[t] : t);
 /** Multi-part judge tiers: each side submits 2 or 3 pieces. */
 export const MULTI_JUDGE_PIECES = { "judge-3x2": 2, "judge-3x3": 3 } as const;
 export type MultiJudgeTier = keyof typeof MULTI_JUDGE_PIECES;
@@ -27,6 +33,14 @@ export type Move = "rock" | "paper" | "scissors";
 export const MOVES: Move[] = ["rock", "paper", "scissors"];
 
 export const MEDIATOR = "mediator";
+// Seat names a plain object treats specially: assigning obj["__proto__"] sets the prototype instead of adding a key,
+// and "constructor" reads as an inherited value before it's set ("prototype" is refused with them, for good measure).
+export const RESERVED_SEATS = ["__proto__", "constructor", "prototype"];
+/** True for "prototype" and for every name a plain object already has (Object.prototype's: "__proto__", "constructor",
+ * "toString", "valueOf", "hasOwnProperty" ...). Such a key reads as an inherited value before it's set (a seat named
+ * "toString" looks already taken), and obj["__proto__"] = x sets the prototype instead of adding a key (a criterion
+ * named "__proto__" lost its scores). Refused as seat names and as criterion names. */
+export const objectName = (s: string) => RESERVED_SEATS.includes(s) || s in Object.prototype;
 
 const enc = new TextEncoder();
 
@@ -136,14 +150,19 @@ export type CreateInput = {
 
 export function validateCreate(body: any): { ok: true; value: CreateInput } | { ok: false; error: string } {
   if (!body || typeof body !== "object") return { ok: false, error: "Body must be a JSON object." };
-  const tier = body.tier as Tier;
-  if (!TIERS.includes(tier)) return { ok: false, error: `tier must be one of: ${TIERS.join(", ")}` };
+  const tier = canonicalTier(body.tier) as Tier;
+  if (!TIERS.includes(tier)) return { ok: false, error: `tier must be one of: ${TIERS.join(", ")} (or ${Object.keys(COMPARE_ALIASES).join(", ")}, the judge tiers' other names)` };
 
   const seats = body.seats;
   if (!Array.isArray(seats) || !seats.every((s) => typeof s === "string" && LABEL_RE.test(s)))
     return { ok: false, error: "seats must be an array of labels (letters, digits, _ or -, max 32 chars)." };
   if (new Set(seats).size !== seats.length) return { ok: false, error: "seats must be unique." };
   if (seats.includes(MEDIATOR)) return { ok: false, error: `"${MEDIATOR}" is reserved.` };
+  if (seats.some((s: string) => objectName(s)))
+    return { ok: false, error: `"prototype" and every name a JavaScript object already has ("__proto__", "constructor", "toString" ...) are reserved as seat names.` };
+  // A judge's mistrial vote is counted under "mistrial" (decide's tally), and a judge answering "mistrial" in any case
+  // is read as a mistrial, so a seat by that name would collect mistrial votes, or never be picked.
+  if (seats.some((s: string) => s.toLowerCase() === "mistrial")) return { ok: false, error: `"mistrial" is reserved, in any case.` };
 
   const title = body.title;
   if (title !== undefined && (typeof title !== "string" || title.length > LIMITS.maxTitle))
@@ -264,6 +283,7 @@ export function validateCriteria(v: unknown): Criterion[] | string {
     const name = c.name.trim();
     if (!name || name.length > LIMITS.maxCriterionName || /[\n\r]/.test(name)) return err;
     if (!Number.isInteger(c.weight) || c.weight < 1 || c.weight > 100) return err;
+    if (objectName(name)) return `criterion name "${name}" is reserved: "prototype" and every name a JavaScript object already has ("__proto__", "constructor", "toString" ...) can't be criteria.`;
     if (out.some((x) => x.name === name)) return err;
     out.push({ name, weight: c.weight });
   }
@@ -355,7 +375,7 @@ const isPicks = (v: unknown): v is { picks: Record<string, string> } => !!v && t
 
 /** judge-3 { picks: { seatA: model, seatB: model } }: each of the two parties names one judge; the third is drawn. */
 function picksError(v: { picks?: unknown }, tier: string, seats: string[]): string | null {
-  const err = 'panel {"picks": {...}} is for the 3-judge tiers with two parties: one model id per party, like {"picks": {"buyer": "claude-sonnet-5-5", "seller": "openai/gpt-6-luna"}}. The third judge is drawn at random.';
+  const err = 'panel {"picks": {...}} is for the 3-judge tiers with two parties: one model id per party, like {"picks": {"buyer": "mistralai/mistral-large-4-0", "seller": "openai/gpt-6-luna"}}. The third judge is drawn at random.';
   const p = v.picks;
   if (!isPanel3Tier(tier) || seats.length !== 2 || Object.keys(v).length !== 1 || !p || typeof p !== "object" || Array.isArray(p)) return err;
   const keys = Object.keys(p);

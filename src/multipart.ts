@@ -10,7 +10,7 @@
 // "Characters" everywhere means UTF-16 code units, the way JavaScript's .length counts.
 
 import { LIMITS, canonicalJson, panelShapeError, randomToken, sha256Hex, validateCriteria } from "./logic.ts";
-import { allowedModels, choosePanel, companyOf, modelPool, optInModels, JUDGE_TEMPERATURE, type Criterion, type PanelRequest, type PanelSelection } from "./judge.ts";
+import { allowedModels, choosePanel, companyOf, judgeAllowed, judgePool, modelPool, optInModels, JUDGE_TEMPERATURE, type Criterion, type JudgeEnv, type PanelRequest, type PanelSelection } from "./judge.ts";
 import { REVIEW_LIMITS, decideReview, longReviewRule, parseReviewCapped, type ReviewCommitment, type ReviewVote, type ReviewerHow } from "./review.ts";
 
 export type MultiTier = "review-3x2" | "review-3x3";
@@ -131,15 +131,21 @@ export const multiExcluded = (env: MultiEnv): string[] => list(env.MULTI_PART_EX
  * eligible: what a request may name (drawable, plus opt-in models listed in MULTI_PART_OPT_IN).
  * missing: companies of the default pool with no drawable model; tooFewCompanies: the pool itself has fewer than 3.
  * While either holds, the tiers are closed (503).
+ * who "judge" counts from the judge pool (judge.ts: JUDGE_MODEL_POOL, without Anthropic while Claude judges are off), so
+ * the multi-part judge tiers stay closed until it holds three companies. Reviews ("review") are unchanged.
  */
-export function multiModels(env: MultiEnv): { drawable: string[]; eligible: string[]; missing: string[]; poolCompanies: number } {
+export function multiModels(env: MultiEnv & JudgeEnv, who: "review" | "judge" = "review"): { drawable: string[]; eligible: string[]; missing: string[]; poolCompanies: number } {
   const light = longReviewRule(env).light_models;
   const exclude = multiExcluded(env);
   const ok = (m: string) => !light.includes(m) && !exclude.includes(m);
-  const pool = modelPool(env);
-  const drawable = pool.filter(ok);
   const checked = (m: string) => Number.isInteger(MODEL_OUTPUT_LIMITS[m]) && (MODEL_OUTPUT_LIMITS[m] as number) > 0;
-  const optIn = list(env.MULTI_PART_OPT_IN).filter((m) => optInModels(env).includes(m) && allowedModels(env).includes(m) && ok(m) && checked(m));
+  // For the judge tiers, a pool model needs a checked output limit too: a model added to the judge pool (Mistral) only
+  // joins them once its limit is recorded here and their cost check is redone (judge-tier spec v2.1, §8). Until then
+  // they treat it as outside their pool. Reviews are as before (review 1, finding 1).
+  const pool = who === "judge" ? judgePool(env).filter(checked) : modelPool(env);
+  const allowed = who === "judge" ? judgeAllowed(env) : allowedModels(env);
+  const drawable = pool.filter(ok);
+  const optIn = list(env.MULTI_PART_OPT_IN).filter((m) => optInModels(env).includes(m) && allowed.includes(m) && ok(m) && checked(m));
   const eligible = [...new Set([...drawable, ...optIn])];
   const have = new Set(drawable.map(companyOf));
   const companies = [...new Set(pool.map(companyOf))];
@@ -156,17 +162,18 @@ export class MultiClosedError extends Error {}
  * MultiClosedError (503) when three companies can't be seated, or an Error with a readable message (400).
  */
 export function pickMultiPanel(env: MultiEnv, panel: PanelRequest | undefined, rand: (() => number) | undefined, who: "review" | "judge", tier: string): { models: string[]; selection: PanelSelection } {
-  const { drawable, eligible, missing, poolCompanies } = multiModels(env);
+  const { drawable, eligible, missing, poolCompanies } = multiModels(env, who);
   const what = who === "review" ? "reviewer" : "judge";
   const tiers = who === "review" ? "multi-part reviews" : "multi-part judge matches";
   const need = `${tier} is closed for now: it needs an eligible ${what} from each of three AI companies`;
-  if (poolCompanies < MULTI_SIZE) throw new MultiClosedError(`${need}, and the model pool has only ${poolCompanies}.`);
+  if (poolCompanies < MULTI_SIZE)
+    throw new MultiClosedError(`${need}, and the ${who === "judge" ? "judge pool has models with a recorded output limit from" : "model pool has"} only ${poolCompanies}.`);
   if (missing.length) throw new MultiClosedError(`${need}, and ${missing.length > 1 ? `these have none: ${missing.join(", ")}` : `${missing[0]} has none`}.`);
   const notEligible = (ms: string[]) => [...new Set(ms.filter((m) => !eligible.includes(m)))];
   const threeCompanies = (ms: string[]) => ms.length === MULTI_SIZE && new Set(ms.map(companyOf)).size === MULTI_SIZE;
   const notEligibleMsg = (bad: string[]) =>
     `Not eligible for ${tiers}: ${bad.join(", ")}. These tiers use only ${eligible.join(", ")}: light models and models the operator has taken off these tiers are refused, and opt-in models only work once the operator has made them eligible. ${who === "review" ? "GET /reviewers" : "GET /judge"} lists them.`;
-  const companyMsg = `A multi-part ${who === "review" ? "review" : "judge panel"} needs three models from three different AI companies (for example one Anthropic, one OpenAI, one Google).`;
+  const companyMsg = `A multi-part ${who === "review" ? "review" : "judge panel"} needs three models from three different AI companies (for example ${who === "review" ? "one Anthropic, one OpenAI, one Google" : "one OpenAI, one Google, one Mistral"}).`;
   if (panel === undefined || panel === "rotate") return choosePanel("rotate", MULTI_SIZE, drawable, rand);
   if (Array.isArray(panel) && (panel as unknown[]).every((x) => typeof x === "string")) {
     const ms = panel as string[];
@@ -210,7 +217,7 @@ export type MultiInput = { task: string; pieces: Piece[]; title?: string; criter
 
 /** Control, format (zero-width, bidi), line and paragraph separator characters: not allowed in a piece name. */
 const NOT_PRINTABLE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
-const TOP_KEYS = new Set(["task", "pieces", "title", "criteria", "panel"]);
+const TOP_KEYS = new Set(["task", "pieces", "title", "criteria", "panel", "allow_secrets"]); // allow_secrets: the content screen (screen.ts)
 
 export function validateMultiReview(body: any, tier: MultiTier): { ok: true; value: MultiInput } | { ok: false; error: string } {
   const n = MULTI_PIECES[tier];

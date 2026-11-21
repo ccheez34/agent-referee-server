@@ -36,6 +36,15 @@ jobs:
         run: |
           node -e 'const fs = require("fs"); const v = (p) => JSON.parse(fs.readFileSync("node_modules/" + p + "/package.json", "utf8")).version; console.log("::notice::node " + process.version + ", typescript " + v("typescript") + ", hono " + v("hono") + ", workers-types " + v("@cloudflare/workers-types"));'
       - name: Tests
-        run: npm test
+        shell: bash
+        run: |
+          set -o pipefail
+          npm test 2>&1 | tee /tmp/test.txt
+          # The counts as a notice, so a run's skips show without its log (GitHub keeps annotations).
+          echo "::notice::$(grep -E '^# (tests|pass|fail|skipped|cancelled) ' /tmp/test.txt | tr '\n' ' ')"
+          # Test files that skip when the app can't load must not pass quietly here, where everything is installed.
+          if grep -E 'route tests skipped|tests skipped \(dependencies not installed' /tmp/test.txt; then
+            echo "::error::a test file skipped its route tests in CI"; exit 1
+          fi
       - name: Type check
         run: npm run typecheck

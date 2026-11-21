@@ -38,11 +38,20 @@ import {
   judgeCommitment,
   tierCommitment,
   missingJudgeKey,
-  tierModels,
   choosePanel,
-  allowedModels,
-  modelPool,
   PANEL_SIZE,
+  CLAUDE_JUDGES_OFF,
+  JUDGE_ADVISORY,
+  JUDGE_HUMAN_REVIEW,
+  JudgeClosedError,
+  PanelShortError,
+  claudeJudgesOn,
+  commitsClaudeWhileOff,
+  defaultJudgeModels,
+  isClaudeModel,
+  judgeAllowed,
+  judgePool,
+  namedModels,
   runOneJudge,
   decide,
   votePick,
@@ -57,9 +66,10 @@ import type { RecordUpdate } from "./ledger.ts";
 import type { DOState, Env } from "./types.ts";
 import { acquireSlots } from "./gateclient.ts";
 import { fakeAiConfig } from "./fakeai.ts";
-import { addUnjudged } from "./health.ts";
+import { addUnjudged, recordAccountProblem } from "./health.ts";
 import { recordCutOff } from "./cutoffs.ts";
 import { GATE_MAX_WAIT_MS } from "./gate.ts";
+import { SUBMIT_RULE, intakeCheck, intakeRefusal, screenMode } from "./screen.ts";
 
 type Phase = "joining" | "commit" | "reveal" | "submit" | "judging" | "done" | "expired" | "error";
 
@@ -108,10 +118,12 @@ export type MatchState = {
   tally_after?: Tally; // rematch tiers: the series tally including this match
   rematch?: { requested_by: string[]; next_match_id?: string };
   demo?: boolean; // free practice match: joined via /demo/join, receipts and acks say demo, never recorded
+  content_rule_shown?: boolean; // the content screen was on at creation, so every view and payment request showed SUBMIT_RULE
   result?: Record<string, unknown>;
   receipt?: Receipt;
   error?: string;
   error_code?: "judges_busy" | "judge_failed" | "unjudged"; // judge tiers: why phase is "error"
+  unjudged_reason?: "claude_off"; // why an unjudged match won't be retried: committed to a Claude judge while they're off
   judge_runs?: number; // judging attempts that actually called the AI (busy refusals don't count)
   retry_at?: number; // the room retries judging on its own at this time (match alarm)
   auto_retries?: number; // how many automatic retries were scheduled (sets the next wait)
@@ -141,6 +153,10 @@ type JudgeTask = {
 const MAX_RPS_ROUNDS = 25;
 // Judging can wait up to 20 s for a free slot, then run two 50 s tries with a short wait between: 3 minutes covers it.
 const JUDGE_TIMEOUT_MS = 3 * 60_000;
+/** Why a match committed to a Claude judge ends unjudged while Claude judges are off. */
+const CLAUDE_COMMITTED_OFF = (id: string, partly: boolean) =>
+  `This match's judges are no longer offered: Claude judges are off for now, so ${partly ? "the panel couldn't finish (part of it had already voted, and no partial verdict is given)" : "it can't be judged"} and won't be retried. The seats that paid are on the operator's refund list; contact hello@agentreferee.ai with the match id (${id}).`;
+
 /** Judging runs that actually call the AI: the first one plus 3 retries. After that the match ends unjudged. */
 export const MAX_JUDGE_RUNS = 4;
 /** A judge slot is held for the whole job: two 50 s calls plus a wait of up to 5 s, plus 30 s of margin. */
@@ -277,6 +293,7 @@ export class MatchRoom {
             onCall: result.pieces ? (c) => calls.push(c) : undefined,
             observe: (o) => slots.lease.observe(i, o),
             onCutOff: (cut) => notes.push(recordCutOff(this.env, cut)),
+            onAccountProblem: (who, problem) => notes.push(recordAccountProblem(this.env, who, problem)),
           }),
         ),
       );
@@ -380,23 +397,38 @@ export class MatchRoom {
       }
       if (missingJudgeKey(this.env, judge.panel!.map((p) => p.model))) return bad(503, "This judge tier is temporarily unavailable.");
     } else if (isJudgeTier(input.tier)) {
-      const tier = input.tier as JudgeTierName;
+      const tier = input.tier as "judge" | "judge-2" | "judge-3";
       if (input.panel) {
+        // Panels the agents choose draw from the judge pool (judge.ts). Naming a Claude model while Claude judges are
+        // off is the agents' to fix (400); a pool that can't seat the panel is the service's (503, "closed for now").
+        if (!claudeJudgesOn(this.env) && namedModels(input.panel).some(isClaudeModel)) return bad(400, CLAUDE_JUDGES_OFF);
         let picked;
         try {
-          picked = choosePanel(input.panel, PANEL_SIZE[tier], modelPool(this.env), undefined, allowedModels(this.env));
+          picked = choosePanel(input.panel, PANEL_SIZE[tier], judgePool(this.env), undefined, judgeAllowed(this.env));
         } catch (e: any) {
+          if (e instanceof PanelShortError) return bad(503, `${tier} is closed for now: ${e.message}`);
           return bad(400, String(e?.message ?? e));
         }
         const missing = missingJudgeKey(this.env, picked.models);
         if (missing) return bad(503, "This judge tier is temporarily unavailable.");
         judge = { ...(await tierCommitment(tier, picked.models)), panel_selection: picked.selection };
-      } else judge = await tierCommitment(tier, tierModels(this.env, tier));
+      } else {
+        // The default panel: closed (503, before anyone pays) while it would seat a Claude model with the switch off,
+        // or fewer companies than seats (judge-tier spec v2.1, §3 rule 2).
+        let models: string[];
+        try {
+          models = defaultJudgeModels(this.env, tier);
+        } catch (e: any) {
+          return bad(e instanceof JudgeClosedError ? 503 : 400, String(e?.message ?? e));
+        }
+        judge = await tierCommitment(tier, models);
+      }
     }
     this.m = {
       id: body.id,
       key: input.key,
       tier: input.tier,
+      ...(isJudgeTier(input.tier) && screenMode(this.env) !== "off" ? { content_rule_shown: true } : {}),
       title: input.title,
       created_at: now,
       expires_at: now + 24 * HOUR,
@@ -650,6 +682,8 @@ export class MatchRoom {
       if (m.submissions![seat] !== undefined) return bad(409, "Already submitted.");
       const v = validateMultiSubmit(body, m.tier);
       if (!v.ok) return bad(400, v.error);
+      const refused = await this.screenSubmission(seat, { pieces: v.texts.map((text) => ({ text })) }, body?.allow_secrets === true);
+      if (refused) return refused;
       const records = await sidePieceRecords(v.texts);
       const hash = await sidePiecesSha256(records);
       m.pieces ??= {};
@@ -663,9 +697,34 @@ export class MatchRoom {
     if (typeof p !== "string" || p.trim().length === 0 || p.length > LIMITS.maxPosition)
       return bad(400, `position must be 1 to ${LIMITS.maxPosition} characters.`);
     if (m.submissions![seat] !== undefined) return bad(409, "Already submitted.");
+    const refused = await this.screenSubmission(seat, { position: p }, body?.allow_secrets === true);
+    if (refused) return refused;
     m.submissions![seat] = p;
     const ack = await this.stepAck(seat, "submit", { position_sha256: await sha256Hex(p) });
     return this.afterSubmit(ack);
+  }
+
+  /** The content screen's layer 2a on a validated submission, after the seat check: a refused submission changes
+   * nothing (the seat may submit again before the deadline); the signed refusal names the match, seat and tier. */
+  private async screenSubmission(seat: string, fields: { position: string } | { pieces: { text: string }[] }, allow = false): Promise<Response | null> {
+    const m = this.m!;
+    // Only matches whose seats were told the rule before paying (created while the screen was on): turning the switch on
+    // never makes an earlier match's submission forfeit.
+    if (screenMode(this.env) === "off" || !m.content_rule_shown) return null;
+    const hits = intakeCheck(fields);
+    if (!hits.length) return null;
+    if (allow) {
+      // Fake keys on purpose, the sender says (allow_secrets: true): passed, counted.
+      console.log(JSON.stringify({ screen: "2a", passed: "allowed", route: "/matches/:id/submit", tier: m.tier, kinds: [...new Set(hits.map((h) => h.kind))], hits: hits.length }));
+      return null;
+    }
+    console.log(JSON.stringify({ screen: "2a", route: "/matches/:id/submit", tier: m.tier, kinds: [...new Set(hits.map((h) => h.kind))], hits: hits.length }));
+    const after = `Nothing was submitted. ${SUBMIT_RULE.slice(SUBMIT_RULE.indexOf("A refused submission"))}`;
+    const paidFor = m.joined[seat]?.paid || (m.host_pays ? !!m.joined[m.host_pays]?.paid : false);
+    const settled = paidFor && !m.demo && this.env.PAYMENTS_ENABLED !== "false";
+    const refusal = await intakeRefusal(this.env, "/matches/:id/submit", fields, hits, after, settled ? "already_settled" : false, { match_id: m.id, seat, tier: m.tier });
+    refusal.headers.set("x-content-screen", "refused"); // so the route counts screen refusals, not any 422
+    return refusal;
   }
 
   /** After an accepted submit: start judging once every side is in. */
@@ -686,6 +745,7 @@ export class MatchRoom {
     if (seat instanceof Response) return seat;
     const m = this.m!;
     if (m.phase !== "error" || !isJudgeTier(m.tier)) return bad(409, "Nothing to retry.");
+    if (m.error_code === "unjudged" && m.unjudged_reason === "claude_off") return bad(409, m.error!, { match: this.publicView() });
     if (m.error_code === "unjudged")
       return bad(409, `Judging failed ${MAX_JUDGE_RUNS} times, so this match won't be retried again. The seats that paid are on the operator's refund list; contact hello@agentreferee.ai with the match id.`, { match: this.publicView() });
     return this.startJudging();
@@ -755,6 +815,20 @@ export class MatchRoom {
     m.error_code = undefined;
     m.retry_at = undefined;
     const needed = m.judge ? (m.judge.panel ?? [{ model: m.judge.model }]).map((p) => p.model) : [this.env.JUDGE_MODEL || "claude-haiku-5-5"];
+    // No Claude judge is called while Claude judges are off (judge-tier spec v2.1, §7): a match committed to one before
+    // the change (or an old match whose fallback is Claude) ends unjudged, and its payers go on the operator's refund
+    // list. A panel that has already voted in part ends the same way: its committed procedure can't run, so there's no
+    // partial verdict. The alarm and retry-judge both come through here. Checked before the keys, so a server without
+    // ANTHROPIC_API_KEY still lists the payers (review 1, finding 8).
+    if (commitsClaudeWhileOff(this.env, needed)) {
+      m.phase = "error";
+      m.error_code = "unjudged";
+      m.unjudged_reason = "claude_off";
+      m.error = CLAUDE_COMMITTED_OFF(m.id, (m.panel_votes ?? []).some(Boolean));
+      await this.listIfUnjudged("committed to a Claude judge, and Claude judges are off for now");
+      await this.save();
+      return json(200, { ok: true, match: this.publicView() });
+    }
     const missing = missingJudgeKey(this.env, needed);
     if (missing) {
       m.phase = "error";
@@ -965,6 +1039,10 @@ export class MatchRoom {
       host_pays: m.host_pays, // invite match: this seat's wallet paid for both seats
       paid_by: Object.fromEntries(Object.entries(m.joined).filter(([, j]) => j.paid_by).map(([seat, j]) => [seat, j.paid_by])),
       commitment_format: isJudgeTier(m.tier) ? undefined : 'sha256_hex(value + ":" + nonce)',
+      // Judge tiers (verdicts, mistrials and forfeits alike): the advisory sentence and the human-review marker, signed
+      // with the rest (judge-tier spec v2.1, §4). canonicalJson drops them for luck tiers, so those receipts don't change.
+      advisory: isJudgeTier(m.tier) ? JUDGE_ADVISORY : undefined,
+      human_review: isJudgeTier(m.tier) ? JUDGE_HUMAN_REVIEW : undefined,
       series: m.tally_after
         ? m.series
           ? { series_id: m.series.series_id, game: m.series.game, previous_match_id: m.series.previous_match_id, previous_receipt_sha256: m.series.previous_receipt_sha256, tally: m.tally_after, max_games: MAX_SERIES_GAMES }
@@ -1139,6 +1217,11 @@ export class MatchRoom {
       criteria: m.criteria,
       panel: m.panel, // the panel request both agents agreed to (the drawn result is judge.panel)
       judge: m.judge,
+      // Judge tiers, from creation on: the advisory sentence and the human-review marker (judge-tier spec v2.1, §4).
+      advisory: judgeTier ? JUDGE_ADVISORY : undefined,
+      human_review: judgeTier ? JUDGE_HUMAN_REVIEW : undefined,
+      // While the content screen is on: what a refused submission means, from creation on (customers told before paying).
+      content_rule: m.content_rule_shown ? SUBMIT_RULE : undefined,
       seat_wallets: m.seat_wallets,
       host_pays: m.host_pays,
       round: judgeTier ? undefined : m.rounds.length || undefined,

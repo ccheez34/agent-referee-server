@@ -13,7 +13,7 @@ const keys = { SIGNING_KEY: b64(await crypto.subtle.exportKey("pkcs8", kp.privat
 /** Several match rooms that can reach each other (like the MATCHES namespace), for rematches. */
 function world(extraEnv: Record<string, unknown> = {}) {
   const rooms = new Map<string, MatchRoom>();
-  const env: any = { ...keys, ANTHROPIC_API_KEY: "test", ...extraEnv };
+  const env: any = { ...keys, ANTHROPIC_API_KEY: "test", CLAUDE_JUDGES_ENABLED: "true", ...extraEnv };
   const roomFor = (name: string) => {
     if (!rooms.has(name)) {
       const data = new Map<string, unknown>();
@@ -87,6 +87,34 @@ test("pure rules: unanimous, majority, mistrial, criteria totals", () => {
   // with criteria, the scores decide even if the judge's "winner" field says otherwise
   assert.equal(votePick({ winner: "alpha", scores: { alpha: { price: 5, speed: 10 }, beta: { price: 8, speed: 2 } } }, crit), "beta");
   assert.equal(votePick({ winner: "alpha", scores: { alpha: { price: 5, speed: 5 }, beta: { price: 5, speed: 5 } } }, crit), null, "tied totals = mistrial vote");
+});
+
+test("seats named __proto__, constructor or prototype are refused; criteria totals keep an own key for every party", () => {
+  for (const s of ["__proto__", "constructor", "prototype"])
+    assert.equal(validateCreate({ tier: "judge-2", seats: [s, "b"], rules: "Cheaper plan wins." }).ok, false, s);
+  // Scores parsed from JSON, as a judge's text is: the "__proto__" party keeps its total, and the object stays ordinary.
+  const t = criteriaTotals(JSON.parse('{"__proto__": {"price": 9}, "beta": {"price": 1}}'), [{ name: "price", weight: 1 }]);
+  assert.deepEqual(Object.keys(t), ["__proto__", "beta"]);
+  assert.equal(Object.getOwnPropertyDescriptor(t, "__proto__")?.value, 9);
+  assert.equal(Object.getPrototypeOf(t), Object.prototype);
+});
+
+test("criteria and seats named like an object's own names, or \"mistrial\", are refused; a score counts only from an own key", () => {
+  // Found by 5.0 in its review of 1b5c106a4aa3 (Nov 9): a criterion named "__proto__" passed validateCriteria, parseVote's
+  // scores[seat][name] = n dropped its scores, every total became NaN and the first seat by name won; a seat named
+  // "mistrial" collected the panel's mistrial votes; a seat named "toString" looked already taken.
+  const crit = (name: string) => validateCreate({ tier: "judge-3", seats: ["a", "b"], rules: "Cheaper plan wins.", criteria: [{ name, weight: 1 }] });
+  for (const name of ["__proto__", "constructor", "prototype", "toString", "valueOf", "hasOwnProperty", " __proto__ "]) assert.equal(crit(name).ok, false, `criterion ${name}`);
+  for (const s of ["toString", "valueOf", "hasOwnProperty", "isPrototypeOf", "__defineGetter__", "mistrial", "Mistrial", "MISTRIAL"])
+    assert.equal(validateCreate({ tier: "judge-3", seats: [s, "b"], rules: "Cheaper plan wins." }).ok, false, `seat ${s}`);
+  // Ordinary names still pass, those that only contain a reserved one included.
+  assert.equal(validateCreate({ tier: "judge-3", seats: ["mistrial2", "toStrings"], rules: "Cheaper plan wins.", criteria: [{ name: "proto", weight: 1 }, { name: "the constructor's fee", weight: 2 }] }).ok, true);
+  // A score that isn't an own key counts 0: it read Object.prototype before, and every total was NaN.
+  const two = [{ name: "__proto__", weight: 5 }, { name: "price", weight: 1 }];
+  assert.deepEqual(criteriaTotals({ alpha: { price: 0 }, beta: { price: 10 } }, two), { alpha: 0, beta: 10 });
+  assert.equal(votePick({ winner: "alpha", scores: { alpha: { price: 0 }, beta: { price: 10 } } }, two), "beta");
+  // An own key with no value counts 0 too, as it did before (never NaN).
+  assert.deepEqual(criteriaTotals({ alpha: { price: undefined as unknown as number }, beta: { price: 10 } }, two), { alpha: 0, beta: 10 });
 });
 
 test("validation: criteria, panels and demo", () => {
@@ -614,7 +642,7 @@ test("a judge-3 match created with panel: rotate commits the drawn panel before 
   const { MatchRoom } = await import("../src/match.ts");
   const data = new Map();
   const state = { storage: { async get(k: string) { return structuredClone(data.get(k)); }, async put(k: string, v: unknown) { data.set(k, structuredClone(v)); }, async deleteAll() { data.clear(); }, async setAlarm() {} } };
-  const r = new MatchRoom(state as any, { ANTHROPIC_API_KEY: "a", OPENROUTER_API_KEY: "o" } as any);
+  const r = new MatchRoom(state as any, { ANTHROPIC_API_KEY: "a", OPENROUTER_API_KEY: "o", CLAUDE_JUDGES_ENABLED: "true" } as any);
   const call = async (action: string, body: unknown) => {
     const res = await r.fetch(new Request(`https://match/${action}`, { method: "POST", body: JSON.stringify(body) }));
     return { status: res.status, body: (await res.json()) as any };
@@ -640,7 +668,7 @@ test("panel is refused outside the panel tiers and for models outside the pool",
   const { MatchRoom } = await import("../src/match.ts");
   const data = new Map();
   const state = { storage: { async get(k: string) { return structuredClone(data.get(k)); }, async put(k: string, v: unknown) { data.set(k, structuredClone(v)); }, async deleteAll() { data.clear(); }, async setAlarm() {} } };
-  const r = new MatchRoom(state as any, { ANTHROPIC_API_KEY: "a", OPENROUTER_API_KEY: "o" } as any);
+  const r = new MatchRoom(state as any, { ANTHROPIC_API_KEY: "a", OPENROUTER_API_KEY: "o", CLAUDE_JUDGES_ENABLED: "true" } as any);
   const res = await r.fetch(new Request("https://match/create", { method: "POST", body: JSON.stringify({ id: "m2", input: { tier: "judge-2", seats: ["a", "b"], rules: "The cheaper plan wins.", panel: ["claude-opus-5-5", "evil/expensive-model"] } }) }));
   assert.equal(res.status, 400);
   assert.match(((await res.json()) as any).error, /Not in the approved model pool/);
@@ -696,7 +724,7 @@ test("a judge-3 match with picks: both agents send the same picks (in any key or
   const { MatchRoom } = await import("../src/match.ts");
   const data = new Map();
   const state = { storage: { async get(k: string) { return structuredClone(data.get(k)); }, async put(k: string, v: unknown) { data.set(k, structuredClone(v)); }, async deleteAll() { data.clear(); }, async setAlarm() {} } };
-  const r = new MatchRoom(state as any, { ANTHROPIC_API_KEY: "a", OPENROUTER_API_KEY: "o" } as any);
+  const r = new MatchRoom(state as any, { ANTHROPIC_API_KEY: "a", OPENROUTER_API_KEY: "o", CLAUDE_JUDGES_ENABLED: "true" } as any);
   const call = async (action: string, body: unknown) => {
     const res = await r.fetch(new Request(`https://match/${action}`, { method: "POST", body: JSON.stringify(body) }));
     return { status: res.status, body: (await res.json()) as any };
@@ -763,7 +791,7 @@ test("a judge-3 match where both agents pick opt-in judges is created, with a de
   const { MatchRoom } = await import("../src/match.ts");
   const data = new Map();
   const state = { storage: { async get(k: string) { return structuredClone(data.get(k)); }, async put(k: string, v: unknown) { data.set(k, structuredClone(v)); }, async deleteAll() { data.clear(); }, async setAlarm() {} } };
-  const r = new MatchRoom(state as any, { ANTHROPIC_API_KEY: "a", OPENROUTER_API_KEY: "o" } as any);
+  const r = new MatchRoom(state as any, { ANTHROPIC_API_KEY: "a", OPENROUTER_API_KEY: "o", CLAUDE_JUDGES_ENABLED: "true" } as any);
   const res = await r.fetch(new Request("https://match/create", { method: "POST", body: JSON.stringify({ id: "o1", input: { tier: "judge-3", seats: ["a", "b"], rules: "The cheaper plan wins.", panel: { picks: { a: "mistralai/mistral-large-4-0", b: "deepseek/deepseek-v4-pro-0813" } } } }) }));
   const body = (await res.json()) as any;
   assert.equal(res.status, 201, JSON.stringify(body));

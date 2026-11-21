@@ -12,7 +12,7 @@ const kp = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", 
 const b64 = (b: ArrayBuffer) => Buffer.from(b).toString("base64");
 const SIGNING_KEY = b64(await crypto.subtle.exportKey("pkcs8", kp.privateKey));
 const PUBLIC_KEY = b64((await crypto.subtle.exportKey("raw", kp.publicKey)) as ArrayBuffer);
-const env = { PANEL_3_MODELS: "claude-opus-5-5,openai/gpt-6-luna,google/gemini-3.7-flash" };
+const env = { REVIEW_3_MODELS: "claude-opus-5-5,openai/gpt-6-luna,google/gemini-3.7-flash" }; // review-3 reads REVIEW_3_MODELS (judge-tier spec v2.1, §3 rule 5)
 const input = { task: "Add 2 and 2 and give only the number.", output: "4" };
 
 // Stand-in for both AI APIs: answers with the verdict queued for each model.

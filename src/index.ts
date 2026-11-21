@@ -2,24 +2,26 @@
 import { TRY_HTML, TRY_SCRIPT_HASHES } from "./try-page.ts";
 import { Hono, type MiddlewareHandler } from "hono";
 import { paymentMiddleware } from "x402-hono";
-import { KEY_RE, MEDIATOR, MAX_SERIES_GAMES, doublePrice, idForKey, isJudgeTier, keyId, ipv6Prefix64, payerFromPaymentHeader, randomToken, sha256Hex, type Tier } from "./logic.ts";
+import { KEY_RE, MEDIATOR, MAX_SERIES_GAMES, doublePrice, idForKey, isJudgeTier, keyId, ipv6Prefix64, payerFromPaymentHeader, randomToken, sha256Hex, validateCreate, type Tier, COMPARE_ALIASES, canonicalTier } from "./logic.ts";
 import { MatchRoom } from "./match.ts";
 import { Ledger, ledgerShardName, shardLimit } from "./ledger.ts";
-import { landingHtml, llmsTxt, wantsHtml } from "./landing.ts";
-import { JUDGE_MESSAGE_FORMAT, JUDGE_SYSTEM, allowedModels, judgeCommitment, missingJudgeKey, modelPool, optInModels, panelModels, tierCommitment, tierModels, type JudgeTierName } from "./judge.ts";
+import { SCOPE_NOTE, landingHtml, llmsTxt, wantsHtml } from "./landing.ts";
+import { JUDGE_ADVISORY, JUDGE_HUMAN_REVIEW, JUDGE_MESSAGE_FORMAT, JUDGE_SYSTEM, allowedModels, claudeJudgesOn, commitsClaudeWhileOff, judgeAllowed, judgeCommitment, judgeExcludedList, judgePool, judgeTierClosed, judgeTierWaitsForCompany, missingJudgeKey, modelPool, optInModels, panelModels, tierCommitment, tierModels, type JudgeTierName } from "./judge.ts";
 import type { Env } from "./types.ts";
 import { payaiToken } from "./payai.ts";
 import { signReceipt } from "./receipt.ts";
+import { REQUEST_RULE, SUBMIT_RULE, intakeCheck, intakeRefusal, screenMode } from "./screen.ts";
+import { NEVER_AN_APPROVAL, observeGithub, parseProofRequest, proofPayload } from "./proof.ts";
 import {
   REVIEW_LIMITS, REVIEW_MESSAGE_FORMAT, longReviewRule, REVIEW_SYSTEM, REVIEW_VERDICTS, REVIEWER_BUDGET_MS, missingReviewKey, reviewCommitment, type ReviewerCall, reviewModels, reviewPayload, runOneReviewer, validateReview, type ReviewTier,
 } from "./review.ts";
 import { Gate, GATE_MAX_WAIT_MS } from "./gate.ts";
-import { Health, adminOk, evaluateHealth, healthEvents, listUnjudged, markRefunded, pauseState, recordEvent, recordSettleFailure, setPause, listBlocked, settledUp, unblockWallet, walletBlocked, walletStanding } from "./health.ts";
+import { Health, adminOk, evaluateHealth, healthEvents, legalDetail, listUnjudged, publicWarnings, markRefunded, pauseState, publicLegal, recordAccountProblem, recordEvent, recordSettleFailure, setPause, listBlocked, settledUp, unblockWallet, walletBlocked, walletStanding } from "./health.ts";
 import { acquireSlots, gateStats, gatesOn, poolsOfProvider, quickBusy, resetPools, type SlotLease } from "./gateclient.ts";
 import { classifyPaidResponse, plausiblePayment, priceMicro, reviewBudget, reviewLimitRefusal } from "./paywatch.ts";
 import { fakeAiConfig } from "./fakeai.ts";
 import { recordCutOff } from "./cutoffs.ts";
-import { blockedStat, countryStat, regionBlock, regionRefusal, whereFrom } from "./regions.ts";
+import { BASE_BLOCKED, blockedStat, countryStat, judgeRegionBlock, regionBlock, regionRefusal, regionRulesProblems, regionRulesWarnings, whereFrom } from "./regions.ts";
 import {
   MULTI_BUDGET_MS, MULTI_CALL_TIMEOUT_MS, MULTI_FORMAT_VERSION, MULTI_LEASE_MS, MULTI_LIMITS, MULTI_MAX_ISSUES, MULTI_MESSAGE_FORMAT, MULTI_PIECES, MULTI_RECEIPT_FORMAT, MULTI_SYSTEM,
   MultiClosedError, TOO_BIG, boundaryToken, multiCommitment, multiExcluded, multiMaxTokens, multiModels, MULTI_DEFAULT_PRICES, multiReviewPayload, multiReviewerHow, readJsonCapped, validateMultiReview, type MultiTier,
@@ -157,6 +159,9 @@ function getPaywall(env: Env): MiddlewareHandler {
     network,
     config: { description: description + how, mimeType: "application/json", inputSchema: joinInput(seatDesc), outputSchema: joinOutput, discoverable },
   });
+  // Every judge route's payment request carries the advisory sentence, before the "how" text (judge-tier spec v2.1, §4).
+  // While the content screen is on, the submission rule goes with it (customers are told before they pay).
+  const judged = (d: string) => `${d} ${JUDGE_ADVISORY}${screenMode(env) !== "off" ? ` ${SUBMIT_RULE}` : ""}`;
   const multiJudgeText = (n: number) =>
     `Agent Referee — a panel of 3 independent AI judges from three different companies decides between two AI agents by rules both agreed to; each side submits ${n} pieces of up to ${MULTI_JUDGE_LIMITS.maxPiece} characters, and every judge reads all of them. Majority wins; every vote is in the signed receipt. Each agent pays this to join; the payment settles once both seats are filled. A paid match that can't be judged is refunded by hand from the operator's refund list.`;
   // x402.org is testnet-only. For real money set FACILITATOR_URL to a mainnet facilitator (see README).
@@ -166,7 +171,7 @@ function getPaywall(env: Env): MiddlewareHandler {
     price,
     network,
     config: {
-      description,
+      description: screenMode(env) !== "off" ? `${description} ${REQUEST_RULE}` : description,
       mimeType: "application/json",
       // Reviewers can take a minute or two; keep the payment authorization valid until the review is done.
       maxTimeoutSeconds: 300,
@@ -192,7 +197,7 @@ function getPaywall(env: Env): MiddlewareHandler {
     price,
     network,
     config: {
-      description: `Agent Referee multi-part sealed review — one piece of work in ${n} pieces (up to ${MULTI_LIMITS.maxPiece} characters each, ${MULTI_LIMITS.maxTotal} in all): three independent AI reviewers from three different companies each read every piece in one call, in parallel, without seeing each other's verdicts; majority verdict, every vote in a signed receipt with each piece's hash. One agent, one call; charged only if the review completes.`,
+      description: `Agent Referee multi-part sealed review — one piece of work in ${n} pieces (up to ${MULTI_LIMITS.maxPiece} characters each, ${MULTI_LIMITS.maxTotal} in all): three independent AI reviewers from three different companies each read every piece in one call, in parallel, without seeing each other's verdicts; majority verdict, every vote in a signed receipt with each piece's hash. One agent, one call; charged only if the review completes.${screenMode(env) !== "off" ? ` ${REQUEST_RULE}` : ""}`,
       mimeType: "application/json",
       maxTimeoutSeconds: 300,
       inputSchema: {
@@ -215,17 +220,17 @@ function getPaywall(env: Env): MiddlewareHandler {
   });
   paywall = paymentMiddleware(
     env.PAY_TO as `0x${string}`,
-    {
+    withCompareAliases({
       "/join/rps": route(p.rps, "Agent Referee — settle a deadlock with another AI agent by fair rock-paper-scissors. Ties replay free. Each of the 2 agents pays this to join."),
       "/join/rps-bo3": route(p["rps-bo3"], "Agent Referee — best-of-3 rock-paper-scissors between two AI agents. Ties don't count. Each of the 2 agents pays this to join."),
       "/join/weighted": route(p.weighted, "Agent Referee — fair random pick between two AI agents with agreed odds (e.g. 70/30). Both agents add secret seeds so neither can steer it. Each agent pays this to join."),
       "/join/draw/mediator": route(p.draw, "Agent Referee — fair pick among 2-20 options for a group of 2-8 AI agents. A mediator agent pays once for everyone; parties join free at /join/draw/party.", 'Always "mediator" for this route'),
-      "/join/judge": route(p.judge, "Agent Referee — an AI judge decides between two AI agents by applying rules both agreed to in advance (optionally scored on weighted criteria). Positions stay hidden until both are in. It can declare a mistrial when no fair decision is possible. Each agent pays this to join."),
-      "/join/judge-2": route(p["judge-2"], "Agent Referee — a panel of 2 independent AI judges from different companies (sealed verdicts) decides between two AI agents by rules both agreed to. Both judges must agree, or it's a mistrial sent back to the owners. Each agent pays this to join."),
-      "/join/judge-3": route(p["judge-3"], "Agent Referee — a panel of 3 independent AI judges from three different companies (sealed verdicts) decides between two AI agents by rules both agreed to; the majority wins and dissent is kept in the signed receipt. Each agent pays this to join."),
+      "/join/judge": route(p.judge, judged("Agent Referee — an AI judge decides between two AI agents by applying rules both agreed to in advance (optionally scored on weighted criteria). Positions stay hidden until both are in. It can declare a mistrial when no fair decision is possible. Each agent pays this to join.")),
+      "/join/judge-2": route(p["judge-2"], judged("Agent Referee — a panel of 2 independent AI judges from different companies (sealed verdicts) decides between two AI agents by rules both agreed to. Both judges must agree, or it's a mistrial sent back to the owners. Each agent pays this to join.")),
+      "/join/judge-3": route(p["judge-3"], judged("Agent Referee — a panel of 3 independent AI judges from three different companies (sealed verdicts) decides between two AI agents by rules both agreed to; the majority wins and dissent is kept in the signed receipt. Each agent pays this to join.")),
       // Not listed in discovery catalogs until the tiers are open to everyone.
-      "/join/judge-3x2": route(p["judge-3x2"], multiJudgeText(2), undefined, multiJudgeOnForAll(env)),
-      "/join/judge-3x3": route(p["judge-3x3"], multiJudgeText(3), undefined, multiJudgeOnForAll(env)),
+      "/join/judge-3x2": route(p["judge-3x2"], judged(multiJudgeText(2)), undefined, multiJudgeOnForAll(env)),
+      "/join/judge-3x3": route(p["judge-3x3"], judged(multiJudgeText(3)), undefined, multiJudgeOnForAll(env)),
       "/review": reviewRoute(rp.review, "Agent Referee sealed review — one AI reviewer checks your agent's output against its task and returns a verdict (pass, needs_changes, fail or cannot_assess), the problems it found and a signed receipt. One agent, one call; charged only if the review completes."),
       "/review-3": reviewRoute(rp["review-3"], "Agent Referee sealed review — three independent AI reviewers from three different companies check your agent's output in parallel, without seeing each other's verdicts; majority verdict, every vote in a signed receipt. One agent, one call; charged only if the review completes."),
       "/review-3x2": multiRoute(mp["review-3x2"], 2),
@@ -234,19 +239,38 @@ function getPaywall(env: Env): MiddlewareHandler {
       ...Object.fromEntries(
         INVITE_TIERS.map((t) => [
           `/host/join/${t}`,
-          route(doublePrice(p[t]), `Agent Referee (${t}), invite match — the host agent pays for BOTH seats here, so the other agent can join free with an invite link (POST /matches with "host_pays"). Charged only once the guest has joined.`, "The host's seat (the one named in host_pays)", isMultiJudgeTier(t) ? multiJudgeOnForAll(env) : true),
+          route(
+            doublePrice(p[t]),
+            ((d: string) => (isJudgeTier(t) ? judged(d) : d))(`Agent Referee (${t}), invite match — the host agent pays for BOTH seats here, so the other agent can join free with an invite link (POST /matches with "host_pays"). Charged only once the guest has joined.`),
+            "The host's seat (the one named in host_pays)",
+            isMultiJudgeTier(t) ? multiJudgeOnForAll(env) : true,
+          ),
         ]),
       ),
-    },
+    }),
     facilitator as any,
   ) as unknown as MiddlewareHandler;
   return paywall;
+}
+
+/** Each judge tier's payment routes under its compare name too: the same entry, so the price and text can't drift (3.0's 1301). */
+function withCompareAliases<T>(routes: Record<string, T>): Record<string, T> {
+  const out = { ...routes };
+  for (const [alias, tier] of Object.entries(COMPARE_ALIASES))
+    for (const base of ["/join/", "/host/join/"]) if (routes[`${base}${tier}`] !== undefined) out[`${base}${alias}`] = routes[`${base}${tier}`];
+  return out;
 }
 
 const PAUSED_MSG =
   "Paid matches are paused for a moment. Free demo matches work now: add \"demo\": true to POST /matches and join at /demo/join/<tier>. Nobody was charged.";
 const REVIEWS_PAUSED_MSG = "Sealed reviews are paused for a moment. Nobody was charged; try again later.";
 const paidPaused = (env: Env) => env.PAID_PAUSED === "true";
+/** Every USDC payment refused (ccheez34, Nov 6, 2026: until the card route is ready). Unlike PAID_PAUSED, free reviews, free
+ * demo matches and the team allowance keep working: this guards only the routes that take USDC. */
+const usdcPaused = (env: Env) => env.USDC_PAUSED === "true";
+const USDC_PAUSED_MSG = `Paid use (USDC) is paused for now. Nothing was charged. Free sealed reviews work: POST /free/review or /free/review-3 (GET /reviewers shows the daily allowance). Free demo matches work: add "demo": true to POST /matches and join at /demo/join/<tier>. ${SCOPE_NOTE}`;
+const usdcPausedRefusal = () =>
+  new Response(JSON.stringify({ error: USDC_PAUSED_MSG, code: "usdc_paused", scope: SCOPE_NOTE }), { status: 503, headers: { "content-type": "application/json" } });
 /** The wrangler secret or the phone switch (POST /admin/pause). */
 async function paidPausedNow(env: Env) {
   return paidPaused(env) || (await pauseState(env)).paid;
@@ -315,16 +339,41 @@ async function walletBlockedRefusal(c: any, wallet: string) {
 }
 
 /**
+ * PLAN 0.4, review R1 (agreed by 4.0, 0934): while the region rules are off or fail their self-test (alerts A1, A2),
+ * every route that applies them refuses, wherever the request comes from, before anything is charged or used: a 503
+ * with code legal_pause. It needs no /health poll. /health reports the same problems under `legal`. Free reviews,
+ * the hosted connector's included, are refused too: sanctions rules cover providing a service, not only payments.
+ */
+function legalPause(c: any): Response | null {
+  const problems = regionRulesProblems(c.env);
+  if (!problems.length) return null;
+  stat(c, "legal_paused");
+  console.error(JSON.stringify({ legal_pause: problems, path: routePath(c) }));
+  return new Response(
+    JSON.stringify({ error: "legal_pause: this service is paused while a legal check is fixed. Nothing was charged or used; try again later.", code: "legal_pause" }),
+    { status: 503, headers: { "content-type": "application/json", "retry-after": "600" } },
+  );
+}
+
+/**
  * Region rule for a request that may reach these models (see regions.ts): null when it may go ahead, otherwise a 451
  * refusal (counted). `count`: also add one to today's count for the request's country (counts only, never who).
  */
-function regionCheck(c: any, models: string[], suffix: string, count = false): Response | null {
+function regionCheck(c: any, models: string[], suffix: string, count = false, judges = false): Response | null {
+  const legal = legalPause(c);
+  if (legal) return legal;
   const where = whereOf(c);
   if (count) stat(c, countryStat(where));
-  const block = regionBlock(c.env, models, where);
+  // Judge seats keep Anthropic's list while Claude judges are off (regions.ts, judgeRegionBlock).
+  const block = judges ? judgeRegionBlock(c.env, models, where) : regionBlock(c.env, models, where);
   if (!block) return null;
   stat(c, "region_blocked");
   stat(c, blockedStat(block.code));
+  // PLAN 0.4, alert A4: someone tried from a sanctioned location and was refused (the control worked). A warning on
+  // /health for 24 h, one entry per code (the Health store). Only the sanctioned codes in the code's own list: not
+  // Tor (T1), whose users' location is unknown, and not codes the operator added (fresh read, F2).
+  if (block.company === "all" && block.code !== "T1" && BASE_BLOCKED.includes(block.code))
+    void inBackground(c, recordEvent(c.env, "sanctions_region_attempt", block.code));
   return regionRefusal(block, suffix);
 }
 
@@ -333,22 +382,34 @@ function regionCheck(c: any, models: string[], suffix: string, count = false): R
  * judge-tier match shows no judges, every model agents may use: the strictest answer (fail closed, never open).
  */
 async function matchJudgeModels(c: any, id: string, judgeTier: boolean): Promise<string[]> {
+  return (await matchJudgeInfo(c, id, judgeTier)).models;
+}
+/** matchJudgeModels, plus whether the models are the match's own (false: the fail-closed list). */
+async function matchJudgeInfo(c: any, id: string, judgeTier: boolean): Promise<{ models: string[]; own: boolean; failed?: boolean }> {
   let status: any = null;
+  let failed = false; // the read itself failed (an error, or any answer but OK), as opposed to a match that doesn't exist (404)
   try {
     const res = await forward(c.env, id, "status");
     if (res.ok) status = await res.json();
-  } catch {}
+    else if (res.status !== 404) failed = true; // a 429 or 408 is a failed read too (re-read R1)
+  } catch {
+    failed = true;
+  }
   const models: unknown[] = status?.judge ? (status.judge.panel ?? [{ model: status.judge.model }]).map((p: any) => p?.model) : [];
   // A judge-tier match must show its judges, whichever route asks (the match's own tier counts, not only the route's).
   const needsJudges = judgeTier || isJudgeTier(status?.tier);
   const readable = !!status && models.every((m) => typeof m === "string" && m) && (!needsJudges || models.length > 0);
-  return readable ? (models as string[]) : allowedModels(c.env);
+  return readable ? { models: models as string[], own: true } : { models: allowedModels(c.env), own: false, failed };
 }
+
+/** A match whose judges can't be read right now: temporary, so it's a "busy" 503 with Retry-After (re-read R2). */
+const cantCheckMatch = () => busy(5, "can't check this match's judges right now.");
+const CLAUDE_MATCH_CLOSED = "This match's judges are no longer offered (Claude judges are off for now). Nothing was charged.";
 
 /** Region rule for a guest joining an invite match: its judges' companies (no judges: the sanctions list only). */
 async function matchRegionCheck(c: any, id: string, suffix: string): Promise<Response | null> {
   const models = await matchJudgeModels(c, id, false);
-  return regionCheck(c, models, suffix, models.length > 0);
+  return regionCheck(c, models, suffix, models.length > 0, models.length > 0);
 }
 
 const paidRoute = async (c: any, next: any) => {
@@ -416,6 +477,9 @@ async function reviewGuard(c: any, next: any) {
   // Counted once per paid review (the call carrying the payment), not again for the unpaid first call.
   const region = regionCheck(c, commitment.models, "Nothing was charged.", paying);
   if (region) return region;
+  // The content screen (2a) after the region and sanctions checks, before slots, allowances and the paywall.
+  const secret = await screenIntake(c, { task: v.value.task, output: v.value.output, title: v.value.title, criteria: v.value.criteria }, "Nothing was charged.", body?.allow_secrets === true);
+  if (secret) return secret;
   if (!paying) {
     // The first x402 call (no payment yet): answer busy now rather than after the agent signs a payment.
     const b = await quickBusy(c.env, commitment.models);
@@ -532,6 +596,9 @@ async function multiGuard(c: any, next: any) {
   const paying = c.env.PAYMENTS_ENABLED === "false" || !!c.req.header("x-payment") || !!team || !!credits;
   const region = regionCheck(c, commitment.models, "Nothing was charged.", paying);
   if (region) return region;
+  // The content screen (2a) after the region and sanctions checks, before slots, allowances and the paywall.
+  const secret = await screenIntake(c, { task: v.value.task, pieces: v.value.pieces, title: v.value.title, criteria: v.value.criteria }, "Nothing was charged.", (body as any)?.allow_secrets === true);
+  if (secret) return secret;
   if (!paying) {
     const b = await quickBusy(c.env, commitment.models);
     if (b) return busy(b.retryAfter, "the AI reviewers are at capacity.");
@@ -570,15 +637,28 @@ async function judgeJoinGuard(c: any, next: any) {
   const body: any = await c.req.json().catch(() => null);
   const id = body?.match_id;
   if (typeof id !== "string" || !ID_RE.test(id)) return next(); // the handler gives the proper error, before payment settles
-  const models = await matchJudgeModels(c, id, true);
+  const { models, own, failed } = await matchJudgeInfo(c, id, true);
   // Counted once per paid seat (the call carrying the payment).
-  const region = regionCheck(c, models, "Nothing was charged.", c.env.PAYMENTS_ENABLED === "false" || !!c.req.header("x-payment"));
+  const region = regionCheck(c, models, "Nothing was charged.", c.env.PAYMENTS_ENABLED === "false" || !!c.req.header("x-payment"), true);
   if (region) return region;
+  // A match committed to a Claude judge before Claude judges were switched off is never judged (match.ts,
+  // startJudging), so nobody new pays to join it (judge-tier spec v2.1, §7). If its status can't be read right now,
+  // nobody pays either (review 1, finding 6); a match that doesn't exist goes on to the handler's own 404.
+  if (failed) return cantCheckMatch();
+  if (own && commitsClaudeWhileOff(c.env, models)) return err(503, CLAUDE_MATCH_CLOSED);
   if (!gatesOn(c.env)) return next();
   const b = models.length ? await quickBusy(c.env, models) : null;
   if (b) return busy(b.retryAfter, "this match's AI judges are at capacity.");
   return next();
 }
+
+/** First on every route that takes USDC, before any other check: refused while USDC is paused. A draw's parties join free, so
+ * /join/draw/party stays open (a paid draw's mediator can't pay, so none starts). */
+async function usdcPauseGuard(c: any, next: any) {
+  if (usdcPaused(c.env) && !String(c.req.path).startsWith("/join/draw/party")) return usdcPausedRefusal();
+  return next();
+}
+for (const p of ["/join/*", "/host/join/*", "/review", "/review-3", "/review-3x2", "/review-3x3"]) app.use(p, usdcPauseGuard);
 
 /** The multi-part judge seats are refused before payment while their switch is off (except for the operator). */
 async function multiJudgeJoinGuard(c: any, next: any) {
@@ -593,6 +673,12 @@ for (const t of ["judge", "judge-2", "judge-3", ...MULTI_JUDGE_TIERS]) {
   app.use(`/join/${t}`, judgeJoinGuard);
   app.use(`/host/join/${t}`, judgeJoinGuard);
 }
+// The compare names get their judge tier's guards, before the paywall (3.0's 1301).
+for (const [alias, tier] of Object.entries(COMPARE_ALIASES))
+  for (const base of ["/join/", "/host/join/"]) {
+    if (isMultiJudgeTier(tier)) app.use(`${base}${alias}`, multiJudgeJoinGuard);
+    app.use(`${base}${alias}`, judgeJoinGuard);
+  }
 app.use("/review", reviewGuard);
 app.use("/review-3", reviewGuard);
 app.use("/review-3x2", multiGuard);
@@ -628,6 +714,25 @@ async function forward(env: Env, id: string, action: string, body?: unknown) {
   // Responses from a Durable Object have locked headers. Copy into a fresh Response
   // so the payment middleware can attach its X-PAYMENT-RESPONSE receipt header.
   return new Response(res.body, { status: res.status, headers: new Headers(res.headers) });
+}
+
+// The content screen's layer 2a (screen.ts): a secret in customer text is refused before any AI provider sees it.
+// Off unless CONTENT_SCREEN is "shadow" or "enforce". Logs the route and kinds only, never the text.
+async function screenIntake(c: any, fields: unknown, after: string, allow = false): Promise<Response | null> {
+  if (screenMode(c.env) === "off") return null;
+  const hits = intakeCheck(fields);
+  if (!hits.length) return null;
+  // Passed but counted: the sender says the keys are fake on purpose (allow_secrets: true), or it's the owner's own team,
+  // whose fixtures and decoys are daily work (2.0's 1125; rule 6's privacy scan is the guard there).
+  const pass = allow ? "allowed" : c.get("team") ? "team" : null;
+  if (pass) {
+    stat(c, `screen_2a_${pass}`);
+    console.log(JSON.stringify({ screen: "2a", passed: pass, route: routePath(c), kinds: [...new Set(hits.map((h) => h.kind))], hits: hits.length }));
+    return null;
+  }
+  stat(c, "screen_2a_refused");
+  console.log(JSON.stringify({ screen: "2a", route: routePath(c), kinds: [...new Set(hits.map((h) => h.kind))], hits: hits.length }));
+  return intakeRefusal(c.env, routePath(c), fields, hits, after, false);
 }
 
 const err = (status: number, error: string) =>
@@ -666,6 +771,12 @@ function docPrices(env: Env): Record<string, string> {
     free_reviews: freeReviewsLabel(env),
     ...(multiOnForAll(env) ? { ...multiPrices(env), multi_reviews: "on" } : {}),
     ...(multiJudgeOnForAll(env) ? { multi_judges: "on" } : {}),
+    ...(screenMode(env) !== "off" ? { content_rule: `${REQUEST_RULE} ${SUBMIT_RULE}` } : {}),
+    // judge-3's default panel closed (waiting for a third company, or Claude judges off): the docs say so, once. The
+    // wait's own reason already says agents can name a company (re-read R3).
+    ...(judgeTierClosed(env, "judge-3")
+      ? { judge3_closed: judgeTierWaitsForCompany(env, "judge-3") ? judgeTierClosed(env, "judge-3")! : `${judgeTierClosed(env, "judge-3")} Agents can still name three companies themselves (GET /judge).` }
+      : {}),
   };
 }
 
@@ -690,12 +801,17 @@ app.get("/", (c) => {
     wallet_rules: { ...BAN_RULES, check: "GET /settle-up?wallet=0x... shows a wallet's standing." },
     clients: { javascript: "npm install agent-referee-client", python: "pip install agent-referee-client (add [pay] to pay in USDC)", mcp: "npx -y agent-referee-mcp" },
     coming_next: "Batch reviews (one payment for many outputs) and company accounts (see plans).",
-    limitations: "Run by one person. AI judges can be wrong; a verdict is not legal arbitration. Records belong to a wallet, not a company, and a fresh wallet starts clean. Not a wager: both agents pay a fixed fee whoever wins; the service never holds stakes.",
+    limitations: `${JUDGE_ADVISORY} Run by one person. Records belong to a wallet, not a company, and a fresh wallet starts clean. Not a wager: both agents pay a fixed fee whoever wins; the service never holds stakes.`,
     plans: "Using this at volume? Company accounts are in the works: prepaid credit packs, monthly plans with matches included, card payment alongside USDC, and one bill covering both sides of every match. Tell us what you need: https://github.com/ccheez34/agent-referee-client/issues/new?title=Plans%20%2F%20company%20account",
     summary:
       "A neutral third party that settles disagreements between AI agents. Every random outcome uses commit-reveal so no agent (and not this server) can rig it, and every result comes with an Ed25519-signed receipt.",
     payment: { protocol: "x402", network: c.env.NETWORK, asset: "USDC", pay_to: c.env.PAY_TO },
-    ...(paidPaused(c.env) ? { notice: PAUSED_MSG } : {}),
+    scope: SCOPE_NOTE,
+    ...(usdcPaused(c.env) ? { notice: USDC_PAUSED_MSG } : paidPaused(c.env) ? { notice: PAUSED_MSG } : {}),
+    ...(screenMode(c.env) !== "off" ? { content_rule: `${REQUEST_RULE} ${SUBMIT_RULE}` } : {}),
+    // The compare names, each with its judge tier; a multi-part one only once that family is shown (its switch on).
+    compare_aliases: Object.fromEntries(Object.entries(COMPARE_ALIASES).filter(([, t]) => !isMultiJudgeTier(t) || multiJudgeOnForAll(c.env))),
+    compare_aliases_note: "Each compare name is the judge tier it names: the same match, price and receipt (the receipt says judge).",
     tiers: {
       "1 rps": { tier: "rps", seats: 2, price_per_seat: p.rps, what: "Rock-paper-scissors; ties replay free." },
       "2 rps-bo3": { tier: "rps-bo3", seats: 2, price_per_seat: p["rps-bo3"], what: "Best of 3 rock-paper-scissors; ties don't count." },
@@ -703,7 +819,7 @@ app.get("/", (c) => {
       "4 draw": { tier: "draw", seats: "2-8 parties + mediator", price: `${p.draw} paid by the mediator; parties join free`, what: "Fair pick among 2-20 options. A third agent mediates and pays; every seat contributes a seed." },
       "5 judge": { tier: "judge", seats: 2, price_per_seat: p.judge, what: "An AI judge picks a winner by applying rules both agents agreed to, with a confidence level. Optional weighted criteria: the judge scores each side 0-10 per criterion and the winner is computed from the scores. It can declare a mistrial (sent back to the owners) when no fair decision is possible. Submissions stay hidden until both are in." },
       "6 judge-2": { tier: "judge-2", seats: 2, price_per_seat: p["judge-2"], what: "Two independent AI judges from different companies decide in parallel, neither seeing the other's verdict. Both must agree, otherwise it's a mistrial. For decisions where a wrong winner costs more than a do-over." },
-      "7 judge-3": { tier: "judge-3", seats: 2, price_per_seat: p["judge-3"], what: "Three independent AI judges from three different companies decide in parallel; majority wins. Every vote, including dissent, is in the signed receipt, and anyone can recompute the decision from the votes." },
+      "7 judge-3": { tier: "judge-3", seats: 2, price_per_seat: p["judge-3"], what: "Three independent AI judges from three different companies decide in parallel; majority wins. Every vote, including dissent, is in the signed receipt, and anyone can recompute the decision from the votes.", ...(judgeTierClosed(c.env, "judge-3") ? { default_panel: judgeTierClosed(c.env, "judge-3") } : {}) },
       "8 review": { tier: "review", seats: 1, price: `${reviewPrices(c.env).review} per review`, what: "Sealed review, no second agent needed: one AI reviewer checks your agent's output against its task and returns pass, needs_changes, fail or cannot_assess, the problems found, and a signed receipt. POST /review." },
       "9 review-3": { tier: "review-3", seats: 1, price: `${reviewPrices(c.env)["review-3"]} per review`, what: "Sealed review by three independent AI reviewers from three different companies; majority verdict, every vote in the signed receipt. POST /review-3." },
       ...(multiOnForAll(c.env)
@@ -759,7 +875,7 @@ app.get("/", (c) => {
 // Plain-text summary for AI agents and LLM crawlers.
 app.get("/llms.txt", (c) => {
   const base = new URL(c.req.url).origin;
-  return c.text(llmsTxt(docPrices(c.env), base, c.env.DEMO_PER_IP_LIMIT || "20"));
+  return c.text(llmsTxt(docPrices(c.env), base, c.env.DEMO_PER_IP_LIMIT || "20", usdcPaused(c.env) ? USDC_PAUSED_MSG : ""));
 });
 
 // Health check for uptime monitors (free, no AI calls, no payments). 200 + "status":"ok" = all good; "degraded" names
@@ -782,36 +898,45 @@ app.get("/health", async (c) => {
       records = "error";
     }
   }
+  // A closed tier shows "closed". Only judge-3 waiting for a third company is a deliberate, known state that leaves the
+  // service "ok" (D7); any other closure (a misconfigured single judge or judge-2) degrades it, with judge_closed
+  // (judge-tier spec v2.2, §3 rule 7).
   const judges = Object.fromEntries(
-    (["judge", "judge-2", "judge-3"] as const).map((t) => [t, missingJudgeKey(env, tierModels(env, t)) ? "unavailable" : "ok"]),
+    (["judge", "judge-2", "judge-3"] as const).map((t) => [t, judgeTierClosed(env, t) ? "closed" : missingJudgeKey(env, tierModels(env, t)) ? "unavailable" : "ok"]),
   );
+  const badlyClosed = (["judge", "judge-2", "judge-3"] as const).some((t) => judges[t] === "closed" && !judgeTierWaitsForCompany(env, t));
   const pools = gatesOn(env) ? [...new Set([...poolsOfProvider(env, "anthropic"), "openrouter"])] : [];
   const gates = pools.length ? await gateStats(env, pools) : {};
-  const events = await healthEvents(env).catch(() => []);
+  let storeError = false;
+  const events = await healthEvents(env).catch(() => ((storeError = !!env.HEALTH), []));
   const unjudged = await listUnjudged(env).catch(() => []);
-  const verdict = evaluateHealth({ gates, events, ledger: records, unjudgedOpen: unjudged.filter((u) => !u.refunded).length });
+  const verdict = evaluateHealth({ gates, events, ledger: records, unjudgedOpen: unjudged.filter((u) => !u.refunded).length, regionProblems: regionRulesProblems(env as any), regionWarnings: regionRulesWarnings(env as any), storeError });
   const pause = await pauseState(env);
   if (pause.auto) verdict.reasons.push(`auto_paused: ${pause.auto}`), (verdict.degraded = true);
   const paused = paidPaused(env) || pause.paid;
   const reviewsPaused = env.REVIEWS_PAUSED === "true" || pause.reviews;
   const ok = signing && records !== "error";
-  const allJudges = Object.values(judges).every((v) => v === "ok");
+  const allJudges = Object.values(judges).every((v) => v === "ok" || v === "closed");
   // Credit packs: off, test, live, or misconfigured (a live Stripe key without CREDITS_LIVE, or the reverse).
   const credits = creditsConfig(env);
   if (credits.mode === "misconfigured") verdict.warnings.push("credits_misconfigured");
-  const status = !ok ? "down" : verdict.degraded || !allJudges ? "degraded" : paused || reviewsPaused ? "paused" : "ok";
+  const status = !ok ? "down" : verdict.degraded || !allJudges || badlyClosed ? "degraded" : paused || reviewsPaused ? "paused" : "ok";
   const body = {
     ok,
     status,
-    reasons: [...verdict.reasons, ...(allJudges ? [] : ["judge_key_missing"])],
-    warnings: verdict.warnings,
+    reasons: [...verdict.reasons, ...(allJudges ? [] : ["judge_key_missing"]), ...(badlyClosed ? ["judge_closed"] : [])],
+    legal: publicLegal(verdict.legal), // F10: the public sees only that a legal alert is on; the detail is in /admin/stats
+    warnings: publicWarnings(verdict.warnings), // the region lists' detail is in /admin/stats
     checks: {
       receipts_signing: signing ? "ok" : "missing key",
       records,
-      payments: env.PAYMENTS_ENABLED === "false" ? "off" : paused ? "paused" : "on",
+      payments: env.PAYMENTS_ENABLED === "false" ? "off" : paused || usdcPaused(env) ? "paused" : "on",
       reviews: reviewsPaused || paused ? "paused" : "on",
       judges,
       credits: credits.mode,
+      ...(Object.values(judges).includes("closed")
+        ? { judges_notice: (["judge", "judge-2", "judge-3"] as const).map((t) => judgeTierClosed(env, t)).filter(Boolean) }
+        : {}),
       providers: Object.fromEntries(
         Object.entries(gates).map(([p, g]: [string, any]) => [p, g?.error ? "unreachable" : g?.tripped ? "capped" : g?.full ? "full" : g?.throttled_until ? "throttled" : "ok"]),
       ),
@@ -872,6 +997,8 @@ app.get("/settle-up", async (c) => {
 // Pay what a blocked wallet owes (x402, priced at exactly that amount, paid from the blocked wallet itself). Once the
 // payment settles the wallet can pay again; its strike stays. A banned wallet can't settle up.
 app.post("/settle-up", async (c) => {
+  // Settling up is a USDC payment too. Its x402 middleware is called inside this handler, further down, so this runs first.
+  if (usdcPaused(c.env)) return usdcPausedRefusal();
   const body: any = await c.req.json().catch(() => null);
   const wallet = typeof body?.wallet === "string" ? body.wallet.trim().toLowerCase() : "";
   if (!/^0x[0-9a-f]{40}$/.test(wallet)) return err(400, 'Send {"wallet":"0x..."}: the blocked wallet. Nothing was charged.');
@@ -929,14 +1056,20 @@ app.post("/admin/unblock", async (c) => {
 app.get("/admin/stats", async (c) => {
   const denied = await admin(c);
   if (denied) return denied;
-  if (!c.env.LEDGER) return err(503, "Stats need the ledger.");
+  // F10: the legal detail doesn't depend on the ledger, so it's computed first and shown even when the stats fail
+  // (fresh read of 30802a6, #3). A health store that can't be read is named, never shown as an empty list (#4).
+  let healthStoreError = false;
+  const events = await healthEvents(c.env).catch(() => ((healthStoreError = true), []));
+  const legal = [...legalDetail(events, regionRulesProblems(c.env as any)), ...(healthStoreError ? [{ code: "health_store_unreachable", from: "error" as const }] : [])];
+  const regionDetail = regionRulesWarnings(c.env as any);
+  if (!c.env.LEDGER) return c.json({ error: "Stats need the ledger.", legal_now: legal, region_settings_detail: regionDetail }, 503);
   let s: any;
   try {
     s = await ledgerJson(c.env, undefined, "stats", {});
     if (!Array.isArray(s?.days) || !s.days.length) throw new Error("unexpected answer");
   } catch (e: any) {
     console.error(`admin stats: ${String(e?.message ?? e).slice(0, 200)}`);
-    return err(503, "Stats can't be read right now; try again in a minute.");
+    return c.json({ error: "Stats can't be read right now; try again in a minute.", legal_now: legal, region_settings_detail: regionDetail }, 503);
   }
   const usd = (micro: unknown) => (Number.isFinite(micro) ? Math.round((micro as number) / 10_000) / 100 : 0);
   const pub = freeReviewConfig(c.env);
@@ -969,11 +1102,14 @@ app.get("/admin/stats", async (c) => {
     // AI answers cut off at the token limit, per model (ids with "/" and "." shown as "-"), and the latest 100 in full.
     ran_out_of_tokens_7_days: total("ran_out_of_tokens"),
     ran_out_of_tokens_recent: Array.isArray(s.cutoffs) ? s.cutoffs.slice().reverse() : [],
+    // F10: the legal list's detail, which /health shows the public only as "alert", and the region lists' warnings.
+    legal_now: legal,
+    region_settings_detail: regionDetail,
     free_budget_today: {
       public: { spent_usd: usd(s.free_spent_micro?.public), budget_usd: usd(pub.budgetMicro) },
       ext: { spent_usd: usd(s.free_spent_micro?.ext), budget_usd: usd(ext.budgetMicro), note: "free reviews from the hosted MCP server (ChatGPT)" },
     },
-    key: "free_* = free reviews from the public routes; ext_* = free reviews from the hosted MCP server (ChatGPT); paid_* = paid reviews. ok_review / ok_review3 = completed, failed = a reviewer failed (not used / not charged), busy = at capacity, refused_caller = that address or user had used today's allowance, refused_budget = the shared budget was used up, bad_input = the request was rejected, region_blocked = refused because of where it came from. countries = AI requests by the country Cloudflare reports, approximate (paid reviews and judge seats on the call carrying a payment, whether or not it then settles; free reviews once their input passed, including ones then refused or busy; XX = unknown; not the hosted MCP server's, which come from its own location), ran_out_of_tokens = AI answers cut off at the model's token limit (max_tokens) and so unusable: raise that model's limit if it keeps happening (the recent list has each one's limit and prompt length; GET /health warns for 24 h), region_blocked by country = those refused by the region rules (CC-SUB is a region, e.g. UA-43 Crimea; T1 = Tor). Spending is counted at list price, not the real AI cost.",
+    key: "free_* = free reviews from the public routes; ext_* = free reviews from the hosted MCP server (ChatGPT); paid_* = paid reviews. ok_review / ok_review3 = completed, failed = a reviewer failed (not used / not charged), busy = at capacity, refused_caller = that address or user had used today's allowance, refused_budget = the shared budget was used up, bad_input = the request was rejected, region_blocked = refused because of where it came from, screen_2a_refused = refused by the content screen's local check (a secret in the text; paid and free reviews, match creation and submission), screen_2a_allowed = the same check's hits passed because the sender set allow_secrets (fake keys on purpose), screen_2a_team = hits on the team's own routes, counted, not refused. countries = AI requests by the country Cloudflare reports, approximate (paid reviews and judge seats on the call carrying a payment, whether or not it then settles; free reviews once their input passed, including ones then refused or busy; XX = unknown; not the hosted MCP server's, which come from its own location), ran_out_of_tokens = AI answers cut off at the model's token limit (max_tokens) and so unusable: raise that model's limit if it keeps happening (the recent list has each one's limit and prompt length; GET /health warns for 24 h), region_blocked by country = those refused by the region rules (CC-SUB is a region, e.g. UA-43 Crimea; T1 = Tor). Spending is counted at list price, not the real AI cost.",
   });
 });
 
@@ -988,13 +1124,29 @@ app.post("/admin/gate-reset", async (c) => {
 });
 
 // The exact judge setup, so anyone can check the prompt_sha256 in a match or receipt.
-app.get("/judge", async (c) => {
-  const commit = await judgeCommitment(c.env.JUDGE_MODEL || "claude-haiku-5-5");
+app.on("GET", ["/judge", "/compare"], async (c) => { // GET /compare: the same page, by its compare name
+  // Each tier's default panel, or "closed" with the reason (judge-tier spec v2.1, §3 rule 6).
+  const closed = (t: "judge" | "judge-2" | "judge-3") => judgeTierClosed(c.env, t);
+  const single = closed("judge");
+  // The prompt fields stay even when the single judge is closed, so a match's prompt_sha256 can always be checked here.
+  // `model` stays the configured id (a string, as on main), with `closed` beside it (re-read R4).
+  const commit = single
+    ? { ...(await judgeCommitment(c.env.JUDGE_MODEL || "claude-haiku-5-5")), closed: single }
+    : await judgeCommitment(c.env.JUDGE_MODEL || "claude-haiku-5-5");
+  const panel = async (t: "judge-2" | "judge-3") => {
+    const why = closed(t);
+    return why ? { closed: why } : await tierCommitment(t, panelModels(c.env, t));
+  };
   return c.json({
+    scope: SCOPE_NOTE,
+    advisory: JUDGE_ADVISORY,
+    human_review: JUDGE_HUMAN_REVIEW,
+    ...(screenMode(c.env) !== "off" ? { content_rule: SUBMIT_RULE } : {}),
+    claude_judges_enabled: claudeJudgesOn(c.env),
     ...commit,
     panels: {
-      "judge-2": await tierCommitment("judge-2", panelModels(c.env, "judge-2")),
-      "judge-3": await tierCommitment("judge-3", panelModels(c.env, "judge-3")),
+      "judge-2": await panel("judge-2"),
+      "judge-3": await panel("judge-3"),
       how_votes_combine: {
         unanimous: "judge-2: if both judges pick the same party it wins; otherwise mistrial.",
         majority: "judge-3: a party with 2 or more of the 3 votes wins; otherwise mistrial.",
@@ -1003,9 +1155,11 @@ app.get("/judge", async (c) => {
         independence: "Panelists run in parallel and never see each other's verdicts. Panelist 2 sees the parties in reverse order.",
       },
     },
-    model_pool: modelPool(c.env),
-    opt_in_models: optInModels(c.env),
-    opt_in_note: OPT_IN_NOTE,
+    model_pool: judgePool(c.env),
+    opt_in_models: judgeAllowed(c.env).filter((m) => !judgePool(c.env).includes(m)),
+    opt_in_note: JUDGE_OPT_IN_NOTE,
+    // Models that may not judge, named or drawn, until they pass a judge trial (JUDGE_EXCLUDE).
+    ...(judgeExcludedList(c.env).length ? { not_judging_for_now: { models: judgeExcludedList(c.env), why: "They didn't finish long answers reliably in live tests. Naming one is refused before payment; each comes back after it passes a judge trial." } } : {}),
     choosing_the_panel: PANEL_CHOICE_HELP,
     fingerprint_formula: "sha256_hex(format_version + \"\\n\" + system_prompt + \"\\n\" + message_format)",
     system_prompt: JUDGE_SYSTEM,
@@ -1018,7 +1172,7 @@ app.get("/judge", async (c) => {
 /** What GET /judge says about the multi-part judge tiers (judge-3x2, judge-3x3). */
 async function multiJudgeInfo(env: Env) {
   const p = prices(env);
-  const m = multiModels(env);
+  const m = multiModels(env, "judge");
   return {
     status: !multiJudgeOnForAll(env) ? "not open yet" : m.missing.length || m.poolCompanies < 3 ? "closed (fewer than three companies have an eligible model)" : "on",
     tiers: Object.fromEntries(MULTI_JUDGE_TIERS.map((t) => [t, { price_per_seat: p[t], judges: 3, pieces_per_side: MULTI_JUDGE_PIECES[t], decision_rule: "majority" }])),
@@ -1026,7 +1180,7 @@ async function multiJudgeInfo(env: Env) {
     limits: { piece_text: `1 to ${MULTI_JUDGE_LIMITS.maxPiece}`, piece_names: "not accepted, so a name can't show the judges who wrote what", submit_body_bytes: MULTI_JUDGE_LIMITS.maxBodyBytes, counting: "characters are UTF-16 code units (JavaScript .length)" },
     submit_refusals: "A submit that is too big or malformed, or has the wrong number of pieces, is refused (400 or 413) and changes nothing: the seat can submit again until the step deadline. A seat that never submits a valid entry forfeits.",
     paying_and_refunds: "As on judge-3, each seat pays when it joins, and the payment settles once both seats are filled, before anything is submitted. You pay even if no verdict comes: when both sides have submitted but the match can't be judged (judging failed 4 times, or the match is deleted after 7 days still without a verdict), it goes on the operator's refund list and the seats that paid are refunded from there by hand. Contact hello@agentreferee.ai with the match id. A side that doesn't submit in time forfeits and the other side wins; if neither submits, both forfeit. Neither case is refunded.",
-    panel: 'Default and "rotate": one judge from each of three companies, drawn from drawn_from when the match is created. An exact list, agreed sets or {"picks": {...}} must name eligible models from three different companies. Light models (Haiku) are refused, and opt-in models are refused unless the operator has made them eligible (eligible_models lists them). The drawn panel is in the match status before anyone pays.',
+    panel: 'Default and "rotate": one judge from each of three companies, drawn from drawn_from when the match is created. An exact list, agreed sets or {"picks": {...}} must name eligible models from three different companies. Light models are refused, and opt-in models are refused unless the operator has made them eligible (eligible_models lists them). The drawn panel is in the match status before anyone pays.',
     eligible_models: m.eligible,
     drawn_from: m.drawable,
     max_tokens: Object.fromEntries(m.eligible.map((x) => [x, multiMaxTokens(x, env)])),
@@ -1042,6 +1196,10 @@ async function multiJudgeInfo(env: Env) {
 
 const OPT_IN_NOTE =
   "opt_in_models come from companies outside model_pool (Mistral, EU; DeepSeek, Qwen/Alibaba, Kimi/Moonshot and GLM/Z.ai, China). Agents may name them in an exact list, an agreed set or a judge-3 pick, but they are never drawn at random: rotate and the drawn third judge use model_pool only. Their requests go through OpenRouter only to hosts that don't collect request data; submissions still reach whichever host runs the model, so leave secrets and personal data out.";
+
+// GET /reviewers keeps OPT_IN_NOTE byte for byte; the judges' pool can differ from the reviewers', so they get their own note.
+const JUDGE_OPT_IN_NOTE =
+  "model_pool here is the judges' own pool (JUDGE_MODEL_POOL), which can differ from the reviewers' (GET /reviewers). opt_in_models are models agents may name in an exact list, an agreed set or a judge-3 pick, but they are never drawn at random: rotate and the drawn third judge use model_pool only. Requests to models outside OpenAI and Google go through OpenRouter only to hosts that don't collect request data; submissions still reach whichever host runs the model, so leave secrets and personal data out.";
 
 const PANEL_CHOICE_HELP =
   'Optional "panel" on POST /matches (judge-2, judge-3), part of the settings both agents agree to: "rotate" seats one model from each AI company, choosing which model at random within each company from model_pool; ["model", ...] uses exactly those models (each from model_pool or opt_in_models); [["a","b","c"], ["d","e","f"]] draws one of up to 5 agreed sets at random; judge-3 only: {"picks": {"<seat>": "model", "<seat>": "model"}} lets each party name one judge, and the third comes at random from a company neither picked, so neither side controls the majority. Every panel uses models from different AI companies. The draw happens before anyone pays, and the chosen models plus how they were chosen (panel_selection) are in the match status and the signed receipt. Without it, the default panel is used.';
@@ -1074,7 +1232,7 @@ function runReviewers(c: any, commitment: any, input: any, lease: SlotLease, bud
   const fake = fakeAiConfig(c.env, { mix: c.req.header("x-test-fake-mix"), delay: c.req.header("x-test-fake-delay") });
   const keys = { ANTHROPIC_API_KEY: c.env.ANTHROPIC_API_KEY, OPENROUTER_API_KEY: c.env.OPENROUTER_API_KEY, fake };
   return Promise.allSettled(
-    commitment.models.map((m: string, i: number) => runOneReviewer(keys, m, i + 1, input, undefined, { budgetMs, observe: (o) => lease.observe(i, o), onCutOff: (cut) => void inBackground(c, recordCutOff(c.env, cut)) })),
+    commitment.models.map((m: string, i: number) => runOneReviewer(keys, m, i + 1, input, undefined, { budgetMs, observe: (o) => lease.observe(i, o), onCutOff: (cut) => void inBackground(c, recordCutOff(c.env, cut)), onAccountProblem: (who, problem) => void inBackground(c, recordAccountProblem(c.env, who, problem)) })),
   );
 }
 
@@ -1225,6 +1383,7 @@ async function handleMultiReview(c: any, tier: MultiTier) {
             how: multiReviewerHow(m, input, token, c.env),
             observe: (o) => lease.observe(i, o),
             onCutOff: (cut) => void inBackground(c, recordCutOff(c.env, cut)),
+            onAccountProblem: (who, problem) => void inBackground(c, recordAccountProblem(c.env, who, problem)),
             onCall: (call) => {
               calls.push(call);
               console.log(JSON.stringify({ multi_call: { tier, ...call } }));
@@ -1288,6 +1447,64 @@ app.post("/credits/review", (c) => handleReview(c, "review"));
 app.post("/credits/review-3", (c) => handleReview(c, "review-3"));
 app.post("/credits/review-3x2", (c) => handleMultiReview(c, "review-3x2"));
 app.post("/credits/review-3x3", (c) => handleMultiReview(c, "review-3x3"));
+
+// ---------- proof receipts (research\specs\proof-receipts-2026-10-31\SPEC.md v0.5) ----------
+// Signed records that use no AI model: L0 a claim and a hash, L1 a public GitHub fact the service checked itself.
+// For now team members only, free, and unlisted: it isn't in GET /, llms.txt or any tool text until the experiment's
+// last arm ends (4.0's 1020). Nothing that exists changes. A receipt never stands in for the owner's yes.
+app.post("/team/proof", teamAuth, async (c: any) => {
+  const sanctioned = regionCheck(c, [], "Nothing was issued.");
+  if (sanctioned) return sanctioned;
+  const team = c.get("team") as TeamCaller;
+  // Read at most 8 KB (code review 1): a proof request is small.
+  const body = await readJsonCapped(c.req.raw, 8_192);
+  if (body === TOO_BIG) return err(413, "Too big: a proof request is at most 8 KB. Nothing was issued.");
+  const parsed = parseProofRequest(body);
+  if (!parsed.ok) return err(400, `${parsed.error} Nothing was issued.`);
+  const request = parsed.value;
+  if (!c.env.LEDGER) return err(503, "Proof receipts are unavailable here. Nothing was issued.");
+  // A daily limit per member and level, counted per attempt (an L1 attempt asks GitHub even when it fails).
+  // A setting that isn't a whole number falls back to the default instead of refusing everything (code review 1).
+  const raw = String((request.level === "L0" ? c.env.PROOF_L0_DAILY : c.env.PROOF_L1_DAILY) ?? "").trim();
+  const setting = raw === "" ? NaN : Number(raw);
+  const limit = Number.isInteger(setting) && setting >= 0 ? setting : request.level === "L0" ? 500 : 200;
+  let q: any;
+  try {
+    q = await ledgerJson(c.env, undefined, "proof-quota", { member: team.member, level: request.level, limit }, true);
+  } catch (e: any) {
+    await recordEvent(c.env, "ledger_error", `proof-quota: ${String(e?.message ?? e)}`);
+    // A timeout may come after the ledger counted the attempt (as on /team/review), so don't promise it wasn't counted.
+    return err(503, "The proof limit can't be checked right now. Nothing was issued, but this attempt may have been counted against today's limit.");
+  }
+  if (q.__status === 429) return err(429, `${q.error ?? "Today's proof receipts are used up."} Nothing was issued.`);
+  let observation: { repo: string; observed: Record<string, unknown> } | undefined;
+  if (request.level === "L1") {
+    const o = await observeGithub(request.check, request.repo, request.sha, { token: c.env.GITHUB_TOKEN });
+    if (!o.ok) {
+      stat(c, "proof_unobserved");
+      return err(o.status, `${o.error}. No receipt was issued.`);
+    }
+    observation = o;
+  }
+  const payload = proofPayload({ request, member: team.member, id: randomToken(12), issuedAt: new Date().toISOString(), observation });
+  let receipt;
+  try {
+    receipt = await signReceipt(payload, c.env.SIGNING_KEY, c.env.PUBLIC_KEY);
+  } catch (e: any) {
+    console.error(`proof receipt signing failed: ${String(e?.message ?? e).slice(0, 200)}`);
+    return err(503, "The receipt couldn't be signed right now. Nothing was issued.");
+  }
+  stat(c, `proof_${request.level.toLowerCase()}`);
+  return c.json({
+    receipt,
+    what_it_proves:
+      request.level === "L0"
+        ? "That this claim and hash reached Agent Referee at issued_at from a holder of the team token (the member name is declared, not verified). Not that the claim is true."
+        : "That Agent Referee itself read these facts from GitHub at observed_at (the member name is declared, not verified). Not that the work is good.",
+    never_an_approval: NEVER_AN_APPROVAL,
+  });
+});
+
 app.get("/team/allowance", teamAuth, async (c: any) => {
   const cfg = teamConfig(c.env);
   const team = c.get("team") as TeamCaller;
@@ -2210,11 +2427,17 @@ async function handleFreeReview(c: any, tier: ReviewTier, ext?: { caller: string
     return err(400, `${String(e?.message ?? e)} Your free review wasn't used.`);
   }
   if (missingReviewKey(c.env, commitment.models)) return err(503, "Sealed review is temporarily unavailable. Your free review wasn't used.");
-  // Not for ext: those requests come from the hosted MCP server's own location, not the person's.
+  // Not for ext: those requests come from the hosted MCP server's own location, not the person's. A legal pause
+  // (PLAN 0.4, R1) applies to them all the same.
   if (!ext) {
     const region = regionCheck(c, commitment.models, "Your free review wasn't used.", true);
     if (region) return region;
+  } else {
+    const legal = legalPause(c);
+    if (legal) return legal;
   }
+  const secret = await screenIntake(c, { task: v.value.task, output: v.value.output, title: v.value.title, criteria: v.value.criteria }, "Your free review wasn't used.", body?.allow_secrets === true);
+  if (secret) return secret;
   const caller = ext ? ext.caller : await callerHash(c);
   if (!caller || !c.env.LEDGER) return err(503, "Free reviews aren't available from here. " + FREE_PAID_HINT);
   // Quick capacity check first, so a full pool doesn't use anyone's allowance.
@@ -2437,9 +2660,21 @@ app.get("/pubkey", async (c) => {
 // ---------- matches ----------
 
 app.post("/matches", async (c) => {
+  const input: any = await c.req.json().catch(() => null);
+  // A compare name is its judge tier from here on: every check below, the key and the match see the judge name.
+  if (input && typeof input === "object" && typeof input.tier === "string") input.tier = canonicalTier(input.tier);
+  // First: a paid match could never be joined while USDC is paused, so none is created; demo matches still are.
+  if (usdcPaused(c.env) && input?.demo !== true) return usdcPausedRefusal();
   const sanctioned = regionCheck(c, [], "");
   if (sanctioned) return sanctioned;
-  const input: any = await c.req.json().catch(() => null);
+  // The screen reads the validated fields only (the match object validates again and gives the errors as before).
+  // Only the judge tiers send text to an AI: their rules, title, criteria and seat labels. Nothing else is screened.
+  const checked = validateCreate(input);
+  if (checked.ok && isJudgeTier(checked.value.tier)) {
+    const { rules, title, criteria, seats } = checked.value;
+    const secret = await screenIntake(c, { rules, title, criteria, seats }, "No match was created and nothing was charged.", input?.allow_secrets === true);
+    if (secret) return secret;
+  }
   if (isMultiJudgeTier(input?.tier) && !(await multiJudgeOn(c))) return err(503, "The multi-part judge tiers (judge-3x2, judge-3x3) aren't open yet.");
   if (isJudgeTier(input?.tier) && missingJudgeKey(c.env, tierModels(c.env, input.tier as JudgeTierName)))
     return err(503, "This judge tier is temporarily unavailable.");
@@ -2492,7 +2727,7 @@ app.get("/invite/:id", async (c) => {
   return c.json({
     invite: `You're invited to an Agent Referee match as seat "${guest}". The other agent ("${m.host_pays}") pays for both seats, so joining is free.`,
     accept: `POST ${base}/invite/join {"match_id":"${id}","invite_token":"<the token in your link>"}, or with the client: ref.acceptInvite("<your link>").`,
-    check_first: "Read the settings below (tier, odds, rules, judge models) before accepting: they're what both of you are bound by, and they're in the signed receipt.",
+    check_first: "Read the settings below (tier, odds, rules, judge models) before accepting: they're the settings both of you agree to, and they're in the signed receipt.",
     docs: "https://github.com/ccheez34/agent-referee-client",
     match: m,
   });
@@ -2504,6 +2739,10 @@ app.post("/invite/join", async (c) => {
   if (typeof body.invite_token !== "string" || body.invite_token.length > 200) return err(400, "invite_token is required.");
   const region = await matchRegionCheck(c, body.match_id, "");
   if (region) return region;
+  // The guest's seat is free, but the host's payment is waiting on it: the same refusal as a paid judge seat (finding 7).
+  const info = await matchJudgeInfo(c, body.match_id, false);
+  if (info.failed) return cantCheckMatch();
+  if (info.own && commitsClaudeWhileOff(c.env, info.models)) return err(503, CLAUDE_MATCH_CLOSED);
   return forward(c.env, body.match_id, "join", { role: "guest", invite_token: body.invite_token, seat: body.seat });
 });
 
@@ -2534,7 +2773,18 @@ for (const action of ["commit", "reveal", "submit", "retry-judge", "rematch"]) {
       // Refused before parsing past 128 KB (enough for 3 pieces of 6,000 characters, all JSON-escaped). Nothing changes.
       const body = await readJsonCapped(c.req.raw, MULTI_JUDGE_LIMITS.maxBodyBytes);
       if (body === TOO_BIG) return err(413, `The submit body is over ${MULTI_JUDGE_LIMITS.maxBodyBytes / 1024} KB. Nothing was changed; you can submit again before the deadline.`);
-      return forward(c.env, id, action, body ?? {});
+      // The content screen runs inside the match, after the seat check (match.ts submit); counted here: a refusal by
+      // its marker, a submission the sender passed with allow_secrets by checking the same text again (counts only).
+      const res = await forward(c.env, id, action, body ?? {});
+      if (res.headers.get("x-content-screen") === "refused") stat(c, "screen_2a_refused");
+      else if (res.status < 300 && (body as any)?.allow_secrets === true && screenMode(c.env) !== "off") {
+        // Only where the match screens submissions: its view carries content_rule (created while the screen was on).
+        const shown = !!((await res.clone().json().catch(() => null)) as any)?.match?.content_rule;
+        const b: any = body;
+        const fields = Array.isArray(b.pieces) ? { pieces: b.pieces.map((p: any) => ({ text: String(p?.text ?? "") })) } : { position: String(b.position ?? "") };
+        if (shown && intakeCheck(fields).length) stat(c, "screen_2a_allowed");
+      }
+      return res;
     }
     return forward(c.env, id, action, await c.req.json().catch(() => ({})));
   });
@@ -2585,6 +2835,7 @@ joinRoute("/join/judge-2", "judge-2", "party", true);
 joinRoute("/join/judge-3", "judge-3", "party", true);
 joinRoute("/join/judge-3x2", "judge-3x2", "party", true);
 joinRoute("/join/judge-3x3", "judge-3x3", "party", true);
+for (const [alias, tier] of Object.entries(COMPARE_ALIASES)) joinRoute(`/join/${alias}`, tier, "party", true);
 joinRoute("/join/draw/mediator", "draw", "mediator", true);
 joinRoute("/join/draw/party", "draw", "party", false);
 
@@ -2598,6 +2849,7 @@ joinRoute("/demo/join/draw/party", "draw", "party", false, true);
 
 // Invite matches: the host's seat pays for both (paid routes above; free demo versions for demo matches).
 for (const t of INVITE_TIERS) joinRoute(`/host/join/${t}`, t, "host", true);
+for (const [alias, tier] of Object.entries(COMPARE_ALIASES)) joinRoute(`/host/join/${alias}`, tier, "host", true);
 for (const t of ["rps", "rps-bo3", "weighted"] as const) joinRoute(`/demo/host/join/${t}`, t, "host", true, true);
 
 // ---------- agent records (free to read) ----------

@@ -21,7 +21,7 @@ function room() {
     async deleteAll() { data.clear(); },
     async setAlarm() {},
   } };
-  const r = new MatchRoom(state as any, keys as any);
+  const r = new MatchRoom(state as any, { ...keys, CLAUDE_JUDGES_ENABLED: "true" } as any);
   const call = async (action: string, body?: unknown) => {
     r.m = undefined;
     const res = await r.fetch(new Request(`https://match/${action}`, body === undefined ? {} : { method: "POST", body: JSON.stringify(body) }));
@@ -266,7 +266,7 @@ test("judge submissions get a signed acknowledgment, including the last submitte
   try {
     const data = new Map<string, unknown>();
     const state = { storage: { async get(k: string) { return structuredClone(data.get(k)); }, async put(k: string, v: unknown) { data.set(k, structuredClone(v)); }, async deleteAll() { data.clear(); }, async setAlarm() {} } };
-    const r = new MatchRoom(state as any, { ...keys, ANTHROPIC_API_KEY: "x" } as any);
+    const r = new MatchRoom(state as any, { ...keys, ANTHROPIC_API_KEY: "x", CLAUDE_JUDGES_ENABLED: "true" } as any);
     const call = async (action: string, body?: unknown) => (await (await r.fetch(new Request(`https://match/${action}`, body === undefined ? {} : { method: "POST", body: JSON.stringify(body) }))).json()) as any;
     const id = randomToken(12);
     await call("create", { id, input: { tier: "judge", seats: ["buyer", "seller"], rules: "Late delivery means the buyer wins." } });

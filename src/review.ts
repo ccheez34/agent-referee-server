@@ -10,9 +10,9 @@
 // payment settles, so a failed review is never charged.
 
 import { LIMITS, canonicalJson, panelShapeError, sha256Hex, validateCriteria } from "./logic.ts";
-import { ProviderCapError, classifyStatus, rateInfo, type CallObservation } from "./providers.ts";
+import { ProviderCapError, accountOf, accountProblem, classifyStatus, rateInfo, type AccountProblem, type CallObservation } from "./providers.ts";
 import type { CutOff } from "./cutoffs.ts";
-import { allowedModels, answerTokens, answerText, callModel, callUsage, choosePanel, modelPool, panelModels, viaOpenRouter, JUDGE_TEMPERATURE, type Confidence, type Criterion, type JudgeKeys, type PanelEnv, type PanelRequest, type PanelSelection } from "./judge.ts";
+import { allowedModels, answerTokens, answerText, callModel, callUsage, choosePanel, modelPool, viaOpenRouter, JUDGE_TEMPERATURE, type Confidence, type Criterion, type JudgeKeys, type PanelEnv, type PanelRequest, type PanelSelection } from "./judge.ts";
 
 export type ReviewTier = "review" | "review-3";
 export const REVIEW_TIERS: ReviewTier[] = ["review", "review-3"];
@@ -148,10 +148,15 @@ export async function reviewCommitment(
   };
 }
 
-/** review: one model (REVIEW_MODEL, default Claude Sonnet). review-3: the judge-3 panel, three AI companies. */
-export function reviewModels(tier: ReviewTier, env: PanelEnv & { REVIEW_MODEL?: string }): string[] {
+/** review-3's default panel when REVIEW_3_MODELS isn't set: the list review-3 used before the judge settings changed
+ * (judge-tier spec v2.1, §3 rule 5). A fixed constant, never the judge settings, so judge changes can't move reviews. */
+export const DEFAULT_REVIEW_3_MODELS = "claude-opus-5-5,openai/gpt-6-luna,google/gemini-3.7-flash";
+
+/** review: one model (REVIEW_MODEL, default Claude Sonnet). review-3: three AI companies (REVIEW_3_MODELS). Claude may
+ * still review: reviews aren't judge panels. */
+export function reviewModels(tier: ReviewTier, env: PanelEnv & { REVIEW_MODEL?: string; REVIEW_3_MODELS?: string }): string[] {
   if (tier === "review") return [env.REVIEW_MODEL || "claude-sonnet-5-5"];
-  return panelModels(env, "judge-3").slice(0, 3);
+  return (env.REVIEW_3_MODELS || DEFAULT_REVIEW_3_MODELS).split(",").map((x) => x.trim()).filter(Boolean).slice(0, 3);
 }
 
 export type ReviewInput = { task: string; output: string; title?: string; criteria?: Criterion[]; panel?: PanelRequest };
@@ -295,7 +300,7 @@ export async function runOneReviewer(
   reviewer: number,
   input: ReviewInput,
   timeoutMs = REVIEWER_CALL_TIMEOUT_MS,
-  opts: { budgetMs?: number; sleep?: (ms: number) => Promise<unknown>; now?: () => number; observe?: (o: CallObservation) => void; onCutOff?: (c: CutOff) => void; how?: ReviewerHow; onCall?: (c: ReviewerCall) => void } = {},
+  opts: { budgetMs?: number; sleep?: (ms: number) => Promise<unknown>; now?: () => number; observe?: (o: CallObservation) => void; onCutOff?: (c: CutOff) => void; onAccountProblem?: (account: string, problem: AccountProblem) => void; how?: ReviewerHow; onCall?: (c: ReviewerCall) => void } = {},
 ): Promise<ReviewVote> {
   const observe = opts.observe ?? (() => {});
   const how = opts.how;
@@ -338,6 +343,8 @@ export async function runOneReviewer(
         detail = String(e?.error?.message ?? e?.error?.type ?? "").replace(/\s+/g, " ").slice(0, 200);
       } catch {}
       const kind = classifyStatus(model, res.status, raw);
+      const problem = accountProblem(res.status, raw); // alert A8 and its neighbours
+      if (problem) opts.onAccountProblem?.(accountOf(model), problem);
       call({ outcome: "error", status: res.status });
       observe({ kind, status: res.status, rate: rateInfo(res.headers) });
       lastErr = `reviewer API returned ${res.status}${detail ? `: ${detail}` : ""}`;

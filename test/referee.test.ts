@@ -25,7 +25,7 @@ function newRoom(env: Record<string, unknown> = {}) {
       async setAlarm() {},
     },
   };
-  const room = new MatchRoom(state as any, { ...keys, ...env } as any);
+  const room = new MatchRoom(state as any, { ...keys, CLAUDE_JUDGES_ENABLED: "true", ...env } as any);
   // Fresh object each call, like a real DO waking from storage
   const call = async (action: string, body?: unknown) => {
     room.m = undefined;

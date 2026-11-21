@@ -15,6 +15,9 @@ export interface Env {
   FREE_REVIEWS_PER_DAY?: string; // free single-reviewer reviews per address per UTC day (default 3)
   FREE_REVIEW3_PER_DAY?: string; // free review-3 reviews per address per UTC day (default 1)
   TEAM_TOKEN?: string; // secret: the owner's team allowance token (sent as x-team-token); enables /team/*
+  GITHUB_TOKEN?: string; // secret (optional): a read-only GitHub token for proof receipts' L1 checks, for a higher rate limit
+  PROOF_L0_DAILY?: string; // proof receipts per team member per UTC day, level L0 (default 500)
+  PROOF_L1_DAILY?: string; // the same for level L1 (default 200)
   TEAM_MEMBERS?: string; // comma-separated members allowed on /team/* (x-team-member): "name" or "name:usd" for its own daily budget, e.g. "S1,T3,T4,T5,2.0:0"
   TEAM_GROUPS?: string; // shared pools, a total each (not daily): "name=member,member:usd;..." e.g. "TB-run1=T3,T4,T5:8.00"
   TEAM_MEMBER_DAILY_USD?: string; // each member's daily review budget at list price (default 8.00)
@@ -38,6 +41,7 @@ export interface Env {
   LONG_REVIEW_CHARS?: string; // task + output longer than this: light models (LIGHT_REVIEW_MODELS) sit out of reviews (default 6000)
   LIGHT_REVIEW_MODELS?: string; // comma list, default "claude-haiku-5-5"
   PAID_PAUSED?: string; // "true" refuses paid matches (before any payment) and points agents to demo mode
+  USDC_PAUSED?: string; // "true" refuses every USDC payment (paid reviews and seats, invite seats, settle-up, creating a paid match); free reviews, demo matches and the team allowance keep working
   REVIEWS_PAUSED?: string; // "true" refuses sealed reviews only (before any payment)
   SETTLE_FAIL_PAUSE_AFTER?: string; // payments failing to settle after delivered work, per hour, before paid routes pause (default 5)
   GATES_ENABLED?: string; // "false" turns the admission gates off (they're on whenever GATES is bound)
@@ -75,6 +79,12 @@ export interface Env {
   PANEL_MODELS?: string; // comma separated, panelist 1 first (default: JUDGE_MODEL, claude-sonnet-5-5, claude-opus-5-5)
   PANEL_2_MODELS?: string; // judge-2's own list (overrides PANEL_MODELS). "provider/model" ids go through OpenRouter
   PANEL_3_MODELS?: string; // judge-3's own list (overrides PANEL_MODELS)
+  JUDGE_EXCLUDE?: string; // models that may not judge (named or drawn) until they pass a judge trial (README); comma-separated
+  CONTENT_SCREEN?: string; // "off" (default), "shadow" or "enforce": the content screen (screen.ts; content-screen design v1). 2a (secrets) refuses in shadow too
+  CONTENT_POLICY_SHA256?: string; // sha256 of the prohibited-content terms in force, signed into every refusal receipt
+  CLAUDE_JUDGES_ENABLED?: string; // only "true" lets Claude models judge (off until the lawyer; judge-tier spec v2.1). Reviews aren't affected
+  JUDGE_MODEL_POOL?: string; // what judge panels draw from and agents may name (default: MODEL_POOL's list); never Anthropic while the switch is off
+  REVIEW_3_MODELS?: string; // review-3's default panel (default DEFAULT_REVIEW_3_MODELS in review.ts), apart from the judge settings
   REVEAL_WINDOW_SECONDS?: string;
   JOIN_WAIT_SECONDS?: string; // how long a paid join waits for the other seats (default 15, max 60)
   DEMO_DAILY_LIMIT?: string; // free demo matches allowed per day (UTC), across everyone (default 2000)

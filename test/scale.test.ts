@@ -325,7 +325,7 @@ test("callers spread over 16 ledger shards; shard ceilings add up to no more tha
 test("health turns degraded for each reason and names it", () => {
   const now = Date.now();
   const okGate = { tripped: false, last_15_min: { calls: 50, failure_rate: 0.02 } };
-  assert.deepEqual(evaluateHealth({ gates: { openrouter: okGate }, events: [], ledger: "ok", now }), { degraded: false, reasons: [], warnings: [] });
+  assert.deepEqual(evaluateHealth({ gates: { openrouter: okGate }, events: [], ledger: "ok", now }), { degraded: false, reasons: [], warnings: [], legal: [] });
   assert.deepEqual(evaluateHealth({ gates: { openrouter: { ...okGate, tripped: true } }, events: [], ledger: "ok", now }).reasons, ["provider_cap:openrouter"]);
   assert.deepEqual(evaluateHealth({ gates: { openrouter: { last_15_min: { calls: 20, failure_rate: 0.3 } } }, events: [], ledger: "ok", now }).reasons, ["failure_rate:openrouter"]);
   assert.equal(evaluateHealth({ gates: { openrouter: { last_15_min: { calls: 3, failure_rate: 1 } } }, events: [], ledger: "ok", now }).degraded, false, "too few calls to judge");

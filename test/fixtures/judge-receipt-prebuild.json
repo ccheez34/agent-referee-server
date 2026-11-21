@@ -1,0 +1,128 @@
+{
+  "source": "main 2aa89f2 (before the judge-tier build), test/fixtures/multi-judge-vectors.json, case valid-3x2: a real judge receipt signed by that build, with a Claude judge and no advisory",
+  "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI=",
+  "receipt": {
+    "payload": {
+      "service": "agent-referee",
+      "receipt_format": "judge-multi-v1",
+      "match_id": "a1b2c3d4e5f6a1b2c3d4e5f6",
+      "tier": "judge-3x2",
+      "title": "Which plan",
+      "parties": [
+        "alpha",
+        "beta"
+      ],
+      "decided_at": "2026-10-29T05:19:54.178Z",
+      "outcome": {
+        "winner": "alpha",
+        "decision_rule": "majority",
+        "tally": {
+          "alpha": 2,
+          "beta": 1,
+          "mistrial": 0
+        },
+        "votes": [
+          {
+            "panelist": 1,
+            "model": "claude-sonnet-5-5",
+            "order": "sorted",
+            "winner": "alpha",
+            "confidence": "high",
+            "rule_applied": "costs less wins",
+            "reasoning": "[side alpha, piece 1] is cheaper.",
+            "model_reported": "claude-sonnet-5-5"
+          },
+          {
+            "panelist": 2,
+            "model": "openai/gpt-6-luna",
+            "order": "reversed",
+            "winner": "beta",
+            "confidence": "high",
+            "rule_applied": "costs less wins",
+            "reasoning": "[side alpha, piece 1] is cheaper.",
+            "model_reported": "openai/gpt-6-luna"
+          },
+          {
+            "panelist": 3,
+            "model": "google/gemini-4-argon",
+            "order": "sorted",
+            "winner": "alpha",
+            "confidence": "high",
+            "rule_applied": "costs less wins",
+            "reasoning": "[side alpha, piece 1] is cheaper.",
+            "model_reported": "google/gemini-4-argon"
+          }
+        ]
+      },
+      "proof": {
+        "rules_sha256": "a2e5d468e512b466deb0748aba123888e130e4a71f259feb1f88f98be067705b",
+        "pieces": {
+          "alpha": [
+            {
+              "index": 1,
+              "sha256": "4b7275bd6b1ba1d51ae6a67b52d2f20d4a8e6f24428f59ccdeb0983560f9c6cc",
+              "chars": 20
+            },
+            {
+              "index": 2,
+              "sha256": "c9d0cbd5f1b6c39060afd8baf6557183d12079626eccfc7c2db9bd0ce68549b6",
+              "chars": 16
+            }
+          ],
+          "beta": [
+            {
+              "index": 1,
+              "sha256": "fc50e3e335fccab7c266e01ee9cc398a46d84040b5249e84c99a0e66e6d2f03e",
+              "chars": 19
+            },
+            {
+              "index": 2,
+              "sha256": "891470ed5ec62a42bf27fd7f8d96abb24a2bdaa56c38b5e2d69cdd4a9c3d9b38",
+              "chars": 16
+            }
+          ]
+        },
+        "pieces_sha256": {
+          "alpha": "e9f5507dcab94a8f8b8a33a6aaeb1e2752648008f51999a889e5a8b4d60d16f5",
+          "beta": "1de523c62eb8fe6c7f97935fff74acc66af36db57f7f34dfa1b8c49d37b14b69"
+        },
+        "judge": {
+          "model": "claude-sonnet-5-5",
+          "temperature": null,
+          "format_version": "agent-referee-judge-v5-multi",
+          "prompt_sha256": "f99d08cb4dd1b1b2739b032d38db5f3100f4c170ac0f99b1e9870ff80bd27a05",
+          "panel": [
+            {
+              "model": "claude-sonnet-5-5",
+              "order": "sorted"
+            },
+            {
+              "model": "openai/gpt-6-luna",
+              "order": "reversed"
+            },
+            {
+              "model": "google/gemini-4-argon",
+              "order": "sorted"
+            }
+          ],
+          "decision_rule": "majority",
+          "panel_selection": {
+            "mode": "custom"
+          },
+          "max_tokens": {
+            "claude-sonnet-5-5": 12000,
+            "openai/gpt-6-luna": 4000,
+            "google/gemini-4-argon": 4000
+          }
+        }
+      },
+      "paid_by": {
+        "alpha": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "beta": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      }
+    },
+    "signature": "Id5mgr8PkMML1VZz6IJ1ksok9bDHxPnpLOa5WSirpUjU3KFIA+8Y5+/lwE/3fxOQP2JwF1/AMbB00gtpKlLYAA==",
+    "algorithm": "Ed25519",
+    "public_key": "enRK5haNU5LsglcmPa/47cKNarV/ErNsdgH6INUspUI="
+  }
+}

@@ -13,7 +13,7 @@ const keys = { SIGNING_KEY: b64(await crypto.subtle.exportKey("pkcs8", kp.privat
 /** The real match rooms behind a fake HTTP service, so the real client can talk to them (no payments). */
 function service() {
   const rooms = new Map<string, MatchRoom>();
-  const env: any = { ...keys, ANTHROPIC_API_KEY: "test" };
+  const env: any = { ...keys, ANTHROPIC_API_KEY: "test", CLAUDE_JUDGES_ENABLED: "true" };
   const roomFor = (name: string) => {
     if (!rooms.has(name)) {
       const data = new Map<string, unknown>();
