@@ -20,6 +20,7 @@ import { Health, adminOk, evaluateHealth, healthEvents, legalDetail, listUnjudge
 import { acquireSlots, gateStats, gatesOn, poolsOfProvider, quickBusy, resetPools, type SlotLease } from "./gateclient.ts";
 import { classifyPaidResponse, plausiblePayment, priceMicro, reviewBudget, reviewLimitRefusal } from "./paywatch.ts";
 import { fakeAiConfig } from "./fakeai.ts";
+import type { AccountProblem } from "./providers.ts";
 import { PREJUDGE_BUDGET_MS, PREJUDGE_CALL_TIMEOUT_MS, checkPrejudge, chooseWriter, prejudgeConfig, prejudgeHow, prejudgeInfo, prejudgePayload, validatePrejudge, type PrejudgeDraft } from "./prejudge.ts";
 import { recordCutOff } from "./cutoffs.ts";
 import { BASE_BLOCKED, blockedStat, countryStat, judgeRegionBlock, regionBlock, regionRefusal, regionRulesProblems, regionRulesWarnings, whereFrom } from "./regions.ts";
@@ -1938,7 +1939,7 @@ async function handlePrejudge(c: any) {
   // What each try did (runOneReviewer's onCall): an answer (usable or not), a cut-off, a timeout, or a provider error;
   // and whether the provider said our own account was refused (onAccountProblem).
   const tries: { outcome: string; status?: number }[] = [];
-  const accountTrouble = new Set<string>();
+  const accountTrouble = new Set<AccountProblem>(); // typed, so "account" below can't drift from providers.ts
   try {
     const slots = await acquireSlots(c.env, [writer], { leaseMs: PREJUDGE_BUDGET_MS + 30_000, waitMs: GATE_MAX_WAIT_MS });
     if (!slots.ok) {
@@ -2001,7 +2002,7 @@ async function handlePrejudge(c: any) {
     // Kinds only: the provider's or the parser's words can quote the question (F5).
     console.error(`prejudge failed after ${Date.now() - started}ms: ${kinds}; the use ${giveBack ? "given back" : "counted"}${capped ? " (today's give-backs used)" : ""}`);
     if (giveBack) await release(lease.capHit() || nothingWritten);
-    stat(c, giveBack ? "prejudge_failed" : "prejudge_unusable");
+    stat(c, giveBack ? "prejudge_failed" : capped ? "prejudge_failed_counted" : "prejudge_unusable");
     if (lease.capHit()) return busy(600, "the AI provider's account limit was reached; the pre-judge resumes when it's lifted. Your pre-judge wasn't used.");
     const after = "or send your review without a brief.";
     if (giveBack)
