@@ -4,7 +4,7 @@
 import type { Env } from "./types.ts";
 import { recordEvent } from "./health.ts";
 
-export type CutOff = { where: "review" | "judge"; model: string; max_tokens: number; prompt_chars: number; try_number?: number };
+export type CutOff = { where: "review" | "judge" | "prejudge"; model: string; max_tokens: number; prompt_chars: number; try_number?: number };
 
 /** Usage-count name for a model's cut-offs, e.g. "oot_openai-gpt-6-luna" (fits the ledger's stat-name pattern). */
 export const cutoffStat = (model: string) => `oot_${model.toLowerCase().replace(/[^a-z0-9_-]/g, "-").slice(0, 44)}`;

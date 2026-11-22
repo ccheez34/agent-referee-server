@@ -148,7 +148,13 @@ export async function reviewCommitment(
       throw new Error(`${writer.join(", ")} wrote this brief (the pre-judge), so it can't review it: name a panel without ${writer.length > 1 ? "them" : "it"}, or send the review without prejudge.`);
   }
   // Throws a readable Error if the request names a model outside the pool.
-  const picked = panel ? choosePanel(panel, REVIEW_SIZE[tier], pool, rand, allowedModels(env)) : undefined;
+  let picked;
+  try {
+    picked = panel ? choosePanel(panel, REVIEW_SIZE[tier], pool, rand, allowedModels(env)) : undefined;
+  } catch (e: any) {
+    if (!exclude.length) throw e;
+    throw new Error(`${String(e?.message ?? e)} (The brief's writer, ${exclude.join(", ")}, is left out of this panel: name a panel from three other companies' models, or send the review without prejudge.)`);
+  }
   return {
     ...(picked ? { panel_selection: picked.selection } : {}),
     models: picked ? picked.models : reviewModels(tier, env),
@@ -260,6 +266,11 @@ export type ReviewerHow = {
   /** Taken off the time left when capping a call's limit (the remaining budget less this). */
   callMarginMs: number;
   parse: (text: string) => Omit<ReviewVote, "reviewer" | "model">;
+  /** What the logs and cut-off records call this call ("review" when not set). */
+  where?: CutOff["where"];
+  /** Logs say what kind of failure it was (a status, a timeout, an unusable answer), never the provider's or the
+   * parser's words, which can quote the prompt (the pre-judge's question never reaches the logs). */
+  quiet?: boolean;
 };
 
 /** One provider call, for the operator's live tests (cost and speed per model). Never signed into a receipt. */
@@ -323,6 +334,7 @@ export async function runOneReviewer(
   const now = opts.now ?? Date.now;
   const sleep = opts.sleep ?? sleepMs;
   const deadline = now() + (opts.budgetMs ?? REVIEWER_BUDGET_MS);
+  const label = how?.where ?? "review";
   let lastErr = "unknown error";
   let hangsOrBadAnswers = 0;
   for (let tryNumber = 1; tryNumber <= maxTries; tryNumber++) {
@@ -341,7 +353,7 @@ export async function runOneReviewer(
       call({ outcome: timedOut ? "timeout" : "network" });
       observe({ kind: timedOut ? "timeout" : "network" });
       lastErr = timedOut ? `reviewer timed out after ${Math.round(callTimeoutMs / 1000)}s` : `reviewer request failed: ${String(e?.message ?? e).slice(0, 150)}`;
-      console.error(`review ${model} reviewer ${reviewer}: ${lastErr}`);
+      console.error(`${label} ${model} reviewer ${reviewer}: ${how?.quiet ? (timedOut ? "timed out" : "request failed") : lastErr}`);
       if (timedOut && ++hangsOrBadAnswers >= 2) break; // a provider that hangs twice won't answer a third time in time
       if (!timedOut && !(await waitBeforeRetry(tryNumber, null))) break;
       continue;
@@ -359,7 +371,7 @@ export async function runOneReviewer(
       call({ outcome: "error", status: res.status });
       observe({ kind, status: res.status, rate: rateInfo(res.headers) });
       lastErr = `reviewer API returned ${res.status}${detail ? `: ${detail}` : ""}`;
-      console.error(`review ${model} reviewer ${reviewer} (try ${tryNumber}): ${lastErr}`);
+      console.error(`${label} ${model} reviewer ${reviewer} (try ${tryNumber}): ${how?.quiet ? `API returned ${res.status}` : lastErr}`);
       // A spend cap or credit problem is account-wide and lasts: stop now, don't retry into it.
       if (kind === "cap") throw new ProviderCapError(model, res.status, detail || raw.slice(0, 160));
       if (res.status >= 400 && res.status < 500 && res.status !== 429) break; // won't fix itself on a retry
@@ -384,7 +396,7 @@ export async function runOneReviewer(
         v = parse(answerText(model, data));
       } catch (pe: any) {
         if (cutOff)
-          opts.onCutOff?.({ where: "review", model, max_tokens: answerTokens(model, how?.anthropicMaxTokens ?? REVIEWER_MAX_TOKENS, how?.openRouterMaxTokens), prompt_chars: system.length + user.length, try_number: tryNumber });
+          opts.onCutOff?.({ where: label, model, max_tokens: answerTokens(model, how?.anthropicMaxTokens ?? REVIEWER_MAX_TOKENS, how?.openRouterMaxTokens), prompt_chars: system.length + user.length, try_number: tryNumber });
         throw new Error(cutOff ? "reviewer ran out of tokens before finishing its answer" : pe?.message ?? "reviewer returned unusable output");
       }
       const vote: ReviewVote = { reviewer, model, ...v };
@@ -394,7 +406,7 @@ export async function runOneReviewer(
       return vote;
     } catch (e: any) {
       lastErr = e?.message ?? "reviewer returned unusable output";
-      console.error(`review ${model} reviewer ${reviewer} (try ${tryNumber}): ${lastErr}`);
+      console.error(`${label} ${model} reviewer ${reviewer} (try ${tryNumber}): ${how?.quiet ? "unusable or cut-off answer" : lastErr}`);
       if (++hangsOrBadAnswers >= 2) break;
     }
   }
@@ -456,7 +468,7 @@ export async function reviewPayload(opts: {
     output_sha256: await sha256Hex(opts.input.output),
     criteria: opts.input.criteria,
     // The brief came from the pre-judge: what was asked (question_sha256) and what was judged (brief_sha256), and its writer.
-    ...(opts.input.prejudge ? { brief: { source: "prejudge", prejudge_id: opts.input.prejudge.prejudge_id, question_sha256: opts.input.prejudge.question_sha256, brief_sha256: opts.input.prejudge.brief_sha256, writer: opts.input.prejudge.writer } } : {}),
+    ...(opts.input.prejudge ? { brief: { source: "prejudge", prejudge_id: opts.input.prejudge.prejudge_id, question_sha256: opts.input.prejudge.question_sha256, brief_sha256: opts.input.prejudge.brief_sha256, writer: opts.input.prejudge.writer, note: "The pre-judge's brief: this service signed the question's and the brief's SHA-256 and named the writer. It doesn't check that the brief is faithful to the question." } } : {}),
     reviewers: opts.commitment,
     votes: opts.votes,
     result: { verdict: decision.verdict, tally: decision.tally, unanimous: new Set(opts.votes.map((v) => v.verdict)).size === 1 },
