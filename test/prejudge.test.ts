@@ -187,13 +187,18 @@ test("reviewCommitment's exclude: a named or default panel holding the writer is
     reviewCommitment("review-3", { MODEL_POOL: "claude-sonnet-5-5,openai/gpt-6-luna,google/gemini-4-argon" } as any, "rotate", undefined, 0, ["openai/gpt-6-luna"]),
     /brief's writer, openai\/gpt-6-luna, is left out of this panel/,
   );
+  // A pool too short even with the writer: the refusal stands as it is, with no word of the writer (paid check round 3).
+  await assert.rejects(
+    reviewCommitment("review-3", { MODEL_POOL: "claude-sonnet-5-5,openai/gpt-6-luna" } as any, "rotate", undefined, 0, ["openai/gpt-6-luna"]),
+    (e: any) => /only/.test(e.message) && !/brief's writer/.test(e.message),
+  );
   // Any other refusal stands as it is (fresh read of e5153fa, N5).
   await assert.rejects(reviewCommitment("review", {}, ["made-up-model"] as any, undefined, 0, ["claude-haiku-5-5"]), (e: any) => !/brief's writer/.test(e.message));
 });
 
 test("checkPrejudge: only this service's signature, only for this brief", async () => {
   const task = "Return the sum of two whole numbers.";
-  const payload = { type: "prejudge", format_version: PREJUDGE_FORMAT_VERSION, prejudge_id: "p1", question_sha256: "q", brief_sha256: await briefSha256(task), writer: "claude-haiku-5-5", allowance_ref: "2026-11-22|x" };
+  const payload = { type: "prejudge", format_version: PREJUDGE_FORMAT_VERSION, prejudge_id: "p1", question_sha256: "q", brief_sha256: await briefSha256(task), lists_sha256: await listsSha256([], []), writer: "claude-haiku-5-5", allowance_ref: "2026-11-22|x" };
   const r = await signWith(payload, kp);
   const ok = await checkPrejudge(r, { task }, keys.PUBLIC_KEY);
   assert.ok(ok.ok && ok.use.writer === "claude-haiku-5-5" && ok.use.allowance_ref === "2026-11-22|x");
@@ -208,6 +213,9 @@ test("checkPrejudge: only this service's signature, only for this brief", async 
   const review = await signWith({ ...payload, type: "review" }, kp);
   assert.match((await checkPrejudge(review, { task }, keys.PUBLIC_KEY) as any).error, /isn't a pre-judge receipt/);
   assert.match((await checkPrejudge(r, { task }, undefined) as any).error, /isn't signed/);
+  // Every hash the record holds is required, the lists' too (paid check round 3).
+  const { lists_sha256: _l, ...noLists } = payload;
+  assert.match((await checkPrejudge(await signWith(noLists, kp), { task }, keys.PUBLIC_KEY) as any).error, /missing its lists_sha256/);
   // The routes pass their network: a receipt signed for another network is refused (the fresh read's F6).
   const here = await signWith({ ...payload, network: "base-sepolia" }, kp);
   assert.ok((await checkPrejudge(here, { task }, keys.PUBLIC_KEY, "base-sepolia")).ok);

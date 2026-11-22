@@ -203,7 +203,7 @@ export async function checkPrejudge(
   if (!publicKey || typeof r.signature !== "string" || r.algorithm !== "Ed25519") return bad("isn't signed by this service");
   const signed = await verifyReceipt(r, publicKey).catch(() => false);
   if (!signed) return bad("isn't signed by this service");
-  for (const k of ["prejudge_id", "question_sha256", "brief_sha256", "writer"]) if (typeof p[k] !== "string" || !p[k]) return bad("is missing its " + k);
+  for (const k of ["prejudge_id", "question_sha256", "brief_sha256", "lists_sha256", "writer"]) if (typeof p[k] !== "string" || !p[k]) return bad("is missing its " + k);
   if (network !== undefined && String(p.network ?? "") !== network) return bad(`was signed for another network (${String(p.network ?? "none")}), not this one (${network || "none"})`);
   if (p.brief_sha256 !== (await briefSha256(input.task, input.criteria))) return bad("is for another brief: this task or these criteria aren't the ones it signed");
   return {

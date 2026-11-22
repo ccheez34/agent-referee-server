@@ -140,6 +140,7 @@ export async function reviewCommitment(
         `${tooSmall.join(", ")} can't reliably review inputs this long (task + output is ${inputChars} characters; the limit for ${tooSmall.length > 1 ? "these models" : "this model"} is ${rule.max_chars_for_light_models}). Choose other reviewers, use "rotate" (it leaves them out for long inputs), or shorten the input.`,
       );
   }
+  const withWriter = pool; // the pool before the writer is left out, to tell whether leaving it out is why a draw fails
   if (exclude.length) {
     pool = pool.filter((m) => !exclude.includes(m));
     const named = panel === "rotate" || panel === undefined ? reviewModels(tier, env) : (Array.isArray(panel) ? (panel as any[]).flat() : Object.values((panel as any).picks ?? {})).map(String);
@@ -152,8 +153,14 @@ export async function reviewCommitment(
   try {
     picked = panel ? choosePanel(panel, REVIEW_SIZE[tier], pool, rand, allowedModels(env)) : undefined;
   } catch (e: any) {
-    // Only when leaving the writer out is why the pool is short; any other refusal stands as it is.
+    // Only when leaving the writer out is why the pool is short (the same draw from the pool with the writer would
+    // seat the panel); any other refusal stands as it is (paid check round 3, review 23ff27fb0cbb38731e786327).
     if (!exclude.length || !(e instanceof PanelShortError)) throw e;
+    try {
+      choosePanel(panel!, REVIEW_SIZE[tier], withWriter, rand, allowedModels(env));
+    } catch {
+      throw e;
+    }
     throw new Error(`${String(e?.message ?? e)} (The brief's writer, ${exclude.join(", ")}, is left out of this panel: name reviewers without it, or send the review without prejudge.)`);
   }
   return {
