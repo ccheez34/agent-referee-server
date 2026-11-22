@@ -595,3 +595,25 @@ t("writers the service doesn't know are named in the logs (fresh read of e5153fa
   assert.equal(r.status, 503, "no known writer: off");
   assert.ok(cap.lines.some((l) => l.includes("doesn't know, left out: claude-haiku-5.5")), cap.lines.join("\n"));
 });
+
+// ---------- after round 1 of the paid check (review d872db18b02e834be929a368) ----------
+
+test("a multi-part review refuses prejudge as an unknown field, before payment (round 1, S3 and L2)", async () => {
+  const { validateMultiReview } = await import("../src/multipart.ts");
+  const piece = { text: "function add(a, b) { return a + b; }" };
+  const r = validateMultiReview({ task: question, pieces: [piece, piece, piece], prejudge: { payload: {} } }, "review-3x3");
+  assert.equal(r.ok, false);
+  assert.match((r as any).error, /Unknown field: prejudge/);
+});
+
+t("an account cap gives the use and the budget back, and closes the writer's provider to every caller, so it can't loop (round 1, L1)", async () => {
+  const e = env({ ...ON, PREJUDGE_PER_DAY: "1", FREE_REVIEW_DAILY_BUDGET_USD: "0.01" });
+  const capped = await call(e, "/prejudge", { question }, { "x-test-fake-mix": "cap:1" });
+  assert.equal(capped.status, 503, JSON.stringify(capped.body));
+  assert.match(capped.body.error, /account limit was reached.*wasn't used/s);
+  for (const ip of ["198.51.100.2", "198.51.100.3"]) {
+    const next = await call(e, "/prejudge", { question }, { "cf-connecting-ip": ip });
+    assert.equal(next.status, 503, `${ip}: ${JSON.stringify(next.body)}`);
+    assert.match(next.body.error, /account limit was reached|at capacity/);
+  }
+});
