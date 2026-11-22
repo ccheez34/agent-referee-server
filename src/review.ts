@@ -12,6 +12,7 @@
 import { LIMITS, canonicalJson, panelShapeError, sha256Hex, validateCriteria } from "./logic.ts";
 import { ProviderCapError, accountOf, accountProblem, classifyStatus, rateInfo, type AccountProblem, type CallObservation } from "./providers.ts";
 import type { CutOff } from "./cutoffs.ts";
+import type { PrejudgeUse } from "./prejudge.ts";
 import { allowedModels, answerTokens, answerText, callModel, callUsage, choosePanel, modelPool, viaOpenRouter, JUDGE_TEMPERATURE, type Confidence, type Criterion, type JudgeKeys, type PanelEnv, type PanelRequest, type PanelSelection } from "./judge.ts";
 
 export type ReviewTier = "review" | "review-3";
@@ -122,6 +123,9 @@ export async function reviewCommitment(
   panel?: PanelRequest,
   rand?: () => number,
   inputChars = 0,
+  /** Models that may not sit on this panel: a pre-judge's writer, for the review of the brief it wrote. A request
+   * naming one, or a default panel holding one, is refused before payment; "rotate" draws without them. */
+  exclude: string[] = [],
 ): Promise<ReviewCommitment> {
   const rule = longReviewRule(env);
   const long = inputChars > rule.max_chars_for_light_models;
@@ -135,6 +139,13 @@ export async function reviewCommitment(
       throw new Error(
         `${tooSmall.join(", ")} can't reliably review inputs this long (task + output is ${inputChars} characters; the limit for ${tooSmall.length > 1 ? "these models" : "this model"} is ${rule.max_chars_for_light_models}). Choose other reviewers, use "rotate" (it leaves them out for long inputs), or shorten the input.`,
       );
+  }
+  if (exclude.length) {
+    pool = pool.filter((m) => !exclude.includes(m));
+    const named = panel === "rotate" || panel === undefined ? reviewModels(tier, env) : (Array.isArray(panel) ? (panel as any[]).flat() : Object.values((panel as any).picks ?? {})).map(String);
+    const writer = [...new Set(named.filter((m) => exclude.includes(m)))];
+    if (writer.length && panel !== "rotate")
+      throw new Error(`${writer.join(", ")} wrote this brief (the pre-judge), so it can't review it: name a panel without ${writer.length > 1 ? "them" : "it"}, or send the review without prejudge.`);
   }
   // Throws a readable Error if the request names a model outside the pool.
   const picked = panel ? choosePanel(panel, REVIEW_SIZE[tier], pool, rand, allowedModels(env)) : undefined;
@@ -159,7 +170,7 @@ export function reviewModels(tier: ReviewTier, env: PanelEnv & { REVIEW_MODEL?: 
   return (env.REVIEW_3_MODELS || DEFAULT_REVIEW_3_MODELS).split(",").map((x) => x.trim()).filter(Boolean).slice(0, 3);
 }
 
-export type ReviewInput = { task: string; output: string; title?: string; criteria?: Criterion[]; panel?: PanelRequest };
+export type ReviewInput = { task: string; output: string; title?: string; criteria?: Criterion[]; panel?: PanelRequest; prejudge?: PrejudgeUse };
 
 export function validateReview(body: any, tier: ReviewTier = "review-3"): { ok: true; value: ReviewInput } | { ok: false; error: string } {
   if (!body || typeof body !== "object") return { ok: false, error: "Send JSON: {task, output, title?, criteria?, panel?}." };
@@ -444,6 +455,8 @@ export async function reviewPayload(opts: {
     task_sha256: await sha256Hex(opts.input.task),
     output_sha256: await sha256Hex(opts.input.output),
     criteria: opts.input.criteria,
+    // The brief came from the pre-judge: what was asked (question_sha256) and what was judged (brief_sha256), and its writer.
+    ...(opts.input.prejudge ? { brief: { source: "prejudge", prejudge_id: opts.input.prejudge.prejudge_id, question_sha256: opts.input.prejudge.question_sha256, brief_sha256: opts.input.prejudge.brief_sha256, writer: opts.input.prejudge.writer } } : {}),
     reviewers: opts.commitment,
     votes: opts.votes,
     result: { verdict: decision.verdict, tally: decision.tally, unanimous: new Set(opts.votes.map((v) => v.verdict)).size === 1 },

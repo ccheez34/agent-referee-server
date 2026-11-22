@@ -338,7 +338,8 @@ export class Ledger {
         return json(200, { released: true });
       }
       const who = typeof body?.caller === "string" ? body.caller : "";
-      const tier = body?.tier === "review-3" ? "review-3" : "review";
+      // "prejudge": the pre-judge (prejudge.ts), with its own count per caller inside the same budget.
+      const tier = body?.tier === "review-3" ? "review-3" : body?.tier === "prejudge" ? "prejudge" : "review";
       const cost = Number.isFinite(body?.cost_micro) ? Math.max(0, body.cost_micro) : 0;
       const budget = Number.isFinite(body?.budget_micro) ? Math.max(0, body.budget_micro) : 0;
       const limit = Number.isFinite(body?.per_caller) ? Math.max(0, body.per_caller) : 0;

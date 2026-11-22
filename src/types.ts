@@ -14,6 +14,11 @@ export interface Env {
   FREE_REVIEW_DAILY_BUDGET_USD?: string;
   FREE_REVIEWS_PER_DAY?: string; // free single-reviewer reviews per address per UTC day (default 3)
   FREE_REVIEW3_PER_DAY?: string; // free review-3 reviews per address per UTC day (default 1)
+  // The pre-judge (prejudge.ts): off unless PREJUDGE_ENABLED is "true" and free reviews have a budget (it shares it).
+  PREJUDGE_ENABLED?: string;
+  PREJUDGE_WRITERS?: string; // comma-separated writer models, the cheap class (default claude-haiku-5-5)
+  PREJUDGE_PER_DAY?: string; // pre-judges per address per UTC day (default 3)
+  PREJUDGE_COST_USD?: string; // what one counts against the shared free budget (default 0.01)
   TEAM_TOKEN?: string; // secret: the owner's team allowance token (sent as x-team-token); enables /team/*
   GITHUB_TOKEN?: string; // secret (optional): a read-only GitHub token for proof receipts' L1 checks, for a higher rate limit
   PROOF_L0_DAILY?: string; // proof receipts per team member per UTC day, level L0 (default 500)

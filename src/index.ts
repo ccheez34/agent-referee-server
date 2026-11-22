@@ -20,6 +20,7 @@ import { Health, adminOk, evaluateHealth, healthEvents, legalDetail, listUnjudge
 import { acquireSlots, gateStats, gatesOn, poolsOfProvider, quickBusy, resetPools, type SlotLease } from "./gateclient.ts";
 import { classifyPaidResponse, plausiblePayment, priceMicro, reviewBudget, reviewLimitRefusal } from "./paywatch.ts";
 import { fakeAiConfig } from "./fakeai.ts";
+import { PREJUDGE_BUDGET_MS, PREJUDGE_CALL_TIMEOUT_MS, checkPrejudge, chooseWriter, prejudgeConfig, prejudgeHow, prejudgeInfo, prejudgePayload, validatePrejudge, type PrejudgeDraft } from "./prejudge.ts";
 import { recordCutOff } from "./cutoffs.ts";
 import { BASE_BLOCKED, blockedStat, countryStat, judgeRegionBlock, regionBlock, regionRefusal, regionRulesProblems, regionRulesWarnings, whereFrom } from "./regions.ts";
 import {
@@ -460,9 +461,15 @@ async function reviewGuard(c: any, next: any) {
   const body = await c.req.json().catch(() => null);
   const v = validateReview(body, tier);
   if (!v.ok) return err(400, `${v.error} Nothing was charged.`);
+  // A brief from the pre-judge (prejudge.ts): its receipt, signed here, for exactly this task and criteria.
+  if (body?.prejudge !== undefined) {
+    const pj = await checkPrejudge(body.prejudge, v.value, c.env.PUBLIC_KEY);
+    if (!pj.ok) return err(400, `${pj.error} Nothing was charged.`);
+    v.value.prejudge = pj.use;
+  }
   let commitment;
   try {
-    commitment = await reviewCommitment(tier, c.env, v.value.panel, undefined, v.value.task.length + v.value.output.length);
+    commitment = await reviewCommitment(tier, c.env, v.value.panel, undefined, v.value.task.length + v.value.output.length, v.value.prejudge ? [v.value.prejudge.writer] : []);
   } catch (e: any) {
     return err(400, `${String(e?.message ?? e)} Nothing was charged.`);
   }
@@ -1274,6 +1281,12 @@ async function handleReview(c: any, tier: ReviewTier) {
   const votes = settled.map((r) => (r as PromiseFulfilledResult<any>).value);
   console.log(`review ${tier} ok in ${Date.now() - started}ms: ${votes.map((v) => `${v.model}=${v.verdict}`).join(" ")}`);
   await record("record_ok");
+  // A paid review that uses a pre-judge's brief gives that caller the pre-judge back, once (the allowance's own
+  // reference can be given back only once; the budget keeps the writer's cost).
+  if (!c.get("team") && input.prejudge?.allowance_ref && c.env.LEDGER) {
+    const back = await ledgerJson(c.env, undefined, "free-review", { release_token: input.prejudge.allowance_ref, refund_budget: false }).catch(() => null);
+    if (back?.released) stat(c, "prejudge_earned_back");
+  }
   if (!c.get("team")) stat(c, `paid_ok_${tier.replace("-", "")}`);
   const payload = await reviewPayload({
     tier,
@@ -1712,9 +1725,17 @@ async function handleFreeReview(c: any, tier: ReviewTier, ext?: { caller: string
     stat(c, `${p}bad_input`);
     return err(400, `${v.error} Your free review wasn't used.`);
   }
+  if (body?.prejudge !== undefined) {
+    const pj = await checkPrejudge(body.prejudge, v.value, c.env.PUBLIC_KEY);
+    if (!pj.ok) {
+      stat(c, `${p}bad_input`);
+      return err(400, `${pj.error} Your free review wasn't used.`);
+    }
+    v.value.prejudge = pj.use;
+  }
   let commitment;
   try {
-    commitment = await reviewCommitment(tier, c.env, v.value.panel, undefined, v.value.task.length + v.value.output.length);
+    commitment = await reviewCommitment(tier, c.env, v.value.panel, undefined, v.value.task.length + v.value.output.length, v.value.prejudge ? [v.value.prejudge.writer] : []);
   } catch (e: any) {
     stat(c, `${p}bad_input`);
     return err(400, `${String(e?.message ?? e)} Your free review wasn't used.`);
@@ -1836,6 +1857,135 @@ async function handleFreeReview(c: any, tier: ReviewTier, ext?: { caller: string
 app.post("/free/review", (c) => handleFreeReview(c, "review"));
 app.post("/free/review-3", (c) => handleFreeReview(c, "review-3"));
 
+// ---------- the pre-judge (prejudge.ts): a free brief from the customer's question, before anything is judged ----------
+
+async function handlePrejudge(c: any) {
+  const cfg = prejudgeConfig(c.env);
+  const free = freeReviewConfig(c.env);
+  if (!cfg.enabled || !free.budgetMicro) return err(503, "The pre-judge isn't available right now. You can send a review without a brief.");
+  if (await paidPausedNow(c.env)) return err(503, PAUSED_MSG);
+  if (await reviewsPausedNow(c.env)) return err(503, REVIEWS_PAUSED_MSG);
+  const body = await c.req.json().catch(() => null);
+  const v = validatePrejudge(body);
+  if (!v.ok) {
+    stat(c, "prejudge_bad_input");
+    return err(400, `${v.error} Your pre-judge wasn't used.`);
+  }
+  const w = chooseWriter(cfg.writers, v.value.writer);
+  if (!w.ok) {
+    stat(c, "prejudge_bad_input");
+    return err(400, `${w.error} Your pre-judge wasn't used.`);
+  }
+  const writer = w.writer;
+  if (missingReviewKey(c.env, [writer])) return err(503, "The pre-judge is temporarily unavailable. Your pre-judge wasn't used.");
+  const region = regionCheck(c, [writer], "Your pre-judge wasn't used.", true);
+  if (region) return region;
+  const secret = await screenIntake(c, { question: v.value.question }, "Your pre-judge wasn't used.", body?.allow_secrets === true);
+  if (secret) return secret;
+  const caller = await callerHash(c);
+  if (!caller || !c.env.LEDGER) return err(503, "The pre-judge isn't available from here. You can send a review without a brief.");
+  const b = await quickBusy(c.env, [writer]);
+  if (b) {
+    stat(c, "prejudge_busy");
+    return busy(b.retryAfter, "the pre-judge's writer is at capacity. Your pre-judge wasn't used.");
+  }
+  let q: any;
+  try {
+    q = await ledgerJson(c.env, undefined, "free-review", { caller, tier: "prejudge", cost_micro: cfg.costMicro, budget_micro: free.budgetMicro, per_caller: cfg.perDay }, true);
+  } catch (e: any) {
+    await recordEvent(c.env, "ledger_error", `prejudge: ${String(e?.message ?? e)}`);
+    return err(503, "The pre-judge is temporarily unavailable (its limits can't be checked right now). Your pre-judge wasn't used; try again in a minute.");
+  }
+  if (q.__status === 429) {
+    stat(c, q.reason === "per_caller" ? "prejudge_refused_caller" : "prejudge_refused_budget");
+    return err(
+      429,
+      q.reason === "per_caller"
+        ? `You've used today's free pre-judges (${q.limit} per day from one address). They reset at 00:00 UTC, and a paid review that uses a brief gives one back. You can send a review without a brief.`
+        : "Today's free allowance is used up for everyone (the pre-judge shares the free reviews' budget). It resets at 00:00 UTC. You can send a review without a brief.",
+    );
+  }
+  const token: string = q.token;
+  let released = false;
+  const release = async (refundBudget: boolean) => {
+    if (released) return;
+    released = true;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        await ledgerJson(c.env, undefined, "free-review", { release_token: token, refund_budget: refundBudget });
+        return;
+      } catch (e: any) {
+        if (attempt === 2) await recordEvent(c.env, "ledger_error", `prejudge release: ${String(e?.message ?? e)}`);
+      }
+    }
+  };
+  let lease: SlotLease;
+  let called = false; // set once the writer may have been called (and cost money)
+  let settled: PromiseSettledResult<any>;
+  const started = Date.now();
+  try {
+    const slots = await acquireSlots(c.env, [writer], { leaseMs: PREJUDGE_BUDGET_MS + 30_000, waitMs: GATE_MAX_WAIT_MS });
+    if (!slots.ok) {
+      await release(true);
+      stat(c, "prejudge_busy");
+      return busy(slots.retryAfter, `${busyWhat(slots.reason)} Your pre-judge wasn't used.`);
+    }
+    lease = slots.lease;
+    try {
+      called = true;
+      const fake = fakeAiConfig(c.env, { mix: c.req.header("x-test-fake-mix"), delay: c.req.header("x-test-fake-delay") });
+      const keys = { ANTHROPIC_API_KEY: c.env.ANTHROPIC_API_KEY, OPENROUTER_API_KEY: c.env.OPENROUTER_API_KEY, fake };
+      [settled] = await Promise.allSettled([
+        runOneReviewer(keys, writer, 1, { task: v.value.question, output: "" }, PREJUDGE_CALL_TIMEOUT_MS, {
+          budgetMs: PREJUDGE_BUDGET_MS,
+          how: prejudgeHow(v.value.question),
+          observe: (o) => lease.observe(0, o),
+          onCutOff: (cut) => void inBackground(c, recordCutOff(c.env, cut)),
+          onAccountProblem: (who, problem) => void inBackground(c, recordAccountProblem(c.env, who, problem)),
+          // Counts and the model only: the first real-cost figures for any route (ADDENDUM-2, point 6). Never the question.
+          onCall: (call) => console.log(JSON.stringify({ prejudge_call: call })),
+        }),
+      ]);
+    } finally {
+      await lease.release();
+    }
+  } catch (e: any) {
+    await release(!called);
+    throw e;
+  }
+  if (settled.status === "rejected") {
+    const msg = String(settled.reason?.message ?? settled.reason);
+    console.error(`prejudge failed after ${Date.now() - started}ms: ${msg.slice(0, 200)}`);
+    // The caller gets the use back; the budget only when the provider refused at its account limit (nothing spent).
+    await release(lease.capHit());
+    stat(c, "prejudge_failed");
+    if (lease.capHit()) return busy(600, "the AI provider's account limit was reached; the pre-judge resumes when it's lifted. Your pre-judge wasn't used.");
+    return err(502, `The pre-judge's writer didn't return a usable brief (${msg.slice(0, 200)}). Your pre-judge wasn't used; try again.`);
+  }
+  const vote: any = settled.value;
+  const draft: PrejudgeDraft = { task: vote.task, ...(vote.criteria ? { criteria: vote.criteria } : {}), changes: vote.changes, please_confirm: vote.please_confirm };
+  stat(c, "prejudge_ok");
+  console.log(`prejudge ok in ${Date.now() - started}ms: ${writer}`);
+  const payload = await prejudgePayload({ id: randomToken(12), writer, question: v.value.question, draft, network: c.env.NETWORK, allowanceRef: token });
+  const receipt = await signReceipt(payload, c.env.SIGNING_KEY, c.env.PUBLIC_KEY);
+  return c.json({
+    prejudge_id: payload.prejudge_id,
+    brief: { task: draft.task, ...(draft.criteria ? { criteria: draft.criteria } : {}) },
+    changes: draft.changes,
+    please_confirm: draft.please_confirm,
+    saw: "your question only, not the work",
+    writer,
+    ...(vote.model_reported ? { writer_reported: vote.model_reported } : {}),
+    question_sha256: payload.question_sha256,
+    brief_sha256: payload.brief_sha256,
+    receipt,
+    free: { used_today: q.used, per_day: q.limit, left_today: Math.max(0, q.limit - q.used) },
+    next: "Read the brief, the changes and what to confirm. If it says what you meant, send its task and criteria unchanged as your review's task and criteria, with this receipt as prejudge (POST /review, /review-3, /free/review or /free/review-3). If it doesn't, change your question and ask again, or send your review without a brief.",
+  });
+}
+
+app.post("/prejudge", handlePrejudge);
+
 // ---------- internal: free reviews sent by the hosted MCP server (ChatGPT) ----------
 // Every ChatGPT request comes from OpenAI's addresses, so the hosted server passes its own anonymous id for the
 // person (ChatGPT's "openai/subject") in x-caller-id, proven by the shared INTERNAL_TOKEN secret. Its reviews use a
@@ -1881,6 +2031,8 @@ app.get("/reviewers", async (c) => {
     },
     how: `POST /review or /review-3 (x402 paid, one agent) with {task, output, title?, criteria?}. Returns result, votes and a signed receipt. If a reviewer fails, the request fails and nothing is charged.`,
     free: freeReviewInfo(c.env),
+    // Only once it's switched on, so the page stays as it was until then (judge-no-claude.test.ts R5's snapshot).
+    ...(prejudgeConfig(c.env).enabled && freeReviewConfig(c.env).budgetMicro ? { prejudge: prejudgeInfo(c.env, true) } : {}),
     verdicts: REVIEW_VERDICTS,
     model_pool: modelPool(c.env),
     opt_in_models: optInModels(c.env),

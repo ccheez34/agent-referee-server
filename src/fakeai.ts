@@ -56,7 +56,18 @@ export async function fakeModelResponse(cfg: FakeAi, model: string, user: string
   // A good answer: a review verdict, or a judge verdict naming the first party in the message.
   const isReview = user.includes("<task>") && (user.includes("<output>") || user.includes("=====PIECE 1 of "));
   const party = /party="([^"]+)"/.exec(user)?.[1] ?? /^=====SIDE (\S+) [0-9a-f]{16}=====$/m.exec(user)?.[1] ?? "alpha";
-  const text = isReview
+  // The pre-judge's writer (prejudge.ts): a brief restating the question. "WEIGHTED" in the question adds criteria and
+  // "BROKEN-WRITER" makes the answer unusable, so the tests can reach both paths.
+  const question = /^<question>\n([\s\S]*)\n<\/question>$/.exec(user)?.[1];
+  const brief = question === undefined ? "" : question.includes("BROKEN-WRITER") ? "not a JSON answer" : JSON.stringify({
+    task: `Check that the work does exactly this, and nothing less: ${question}`,
+    ...(question.includes("WEIGHTED") ? { criteria: [{ name: "correctness", weight: 3 }, { name: "clarity", weight: 1 }] } : {}),
+    changes: ["Restated the question as one checkable instruction."],
+    please_confirm: [],
+  });
+  const text = question !== undefined
+    ? brief
+    : isReview
     ? JSON.stringify({ verdict: "pass", confidence: "high", issues: [], reasoning: "Fake staging answer." })
     : JSON.stringify({ winner: party, confidence: "high", rule_applied: "Fake staging answer.", reasoning: "Fake staging answer." });
   const cut = kind === "cut";

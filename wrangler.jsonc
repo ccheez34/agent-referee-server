@@ -86,6 +86,10 @@
     "FREE_REVIEW_DAILY_BUDGET_USD": "3.00",
     "FREE_REVIEWS_PER_DAY": "3",
     "FREE_REVIEW3_PER_DAY": "1",
+    // The pre-judge (POST /prejudge, src/prejudge.ts): a free brief from the customer's question, inside the free
+    // reviews' budget (PREJUDGE_PER_DAY a day per address, default 3; PREJUDGE_COST_USD each, default 0.01; writers
+    // PREJUDGE_WRITERS, default claude-haiku-5-5). Off until the owner switches it on ("true").
+    "PREJUDGE_ENABLED": "false",
     // Free reviews sent by the hosted MCP server (ChatGPT), with their own budget so they can't use up the public
     // one: $1.00 = at most 20 single or 5 review-3 a day. Only used once the INTERNAL_TOKEN secret is set.
     "EXT_FREE_DAILY_BUDGET_USD": "1.00",
@@ -144,6 +148,7 @@
         "FREE_REVIEW_DAILY_BUDGET_USD": "3.00",
         "FREE_REVIEWS_PER_DAY": "3",
         "FREE_REVIEW3_PER_DAY": "1",
+        "PREJUDGE_ENABLED": "false",
         "EXT_FREE_DAILY_BUDGET_USD": "1.00",
         "EXT_FREE_REVIEWS_PER_DAY": "3",
         "EXT_FREE_REVIEW3_PER_DAY": "1"
