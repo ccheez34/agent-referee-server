@@ -1977,10 +1977,8 @@ async function handlePrejudge(c: any) {
   }
   if (settled.status === "rejected") {
     const msg = String(settled.reason?.message ?? settled.reason);
-    // The provider's side failed: it couldn't be reached, was busy or erred (429, 5xx), refused our own account (401,
-    // 403, 404), or its envelope was unreadable. Those the question can't cause, so the caller gets the use back. An
-    // answer (unusable, or cut off at the token limit), a timeout or a refusal of the request itself (other 4xx) can
-    // follow from the question, so the use counts, and one address can't spend the shared budget with failures (F1).
+    // Whose failure was it? The use comes back only for the provider's (or ours), capped per caller below; an answer
+    // the parser refused, a cut-off answer, or a refusal the question can cause counts it (F1, N1).
     // An error status the question can't cause: busy (429), the provider's own failure (5xx), our account or key
     // refused (401, a 400 or 403 the provider worded as an account problem), our model id unknown (404). A moderation
     // 403, a region refusal or another 4xx can follow from the question.
