@@ -13,7 +13,7 @@ import { LIMITS, canonicalJson, panelShapeError, sha256Hex, validateCriteria } f
 import { ProviderCapError, accountOf, accountProblem, classifyStatus, rateInfo, type AccountProblem, type CallObservation } from "./providers.ts";
 import type { CutOff } from "./cutoffs.ts";
 import type { PrejudgeUse } from "./prejudge.ts";
-import { allowedModels, answerTokens, answerText, callModel, callUsage, choosePanel, modelPool, viaOpenRouter, JUDGE_TEMPERATURE, type Confidence, type Criterion, type JudgeKeys, type PanelEnv, type PanelRequest, type PanelSelection } from "./judge.ts";
+import { PanelShortError, allowedModels, answerTokens, answerText, callModel, callUsage, choosePanel, modelPool, viaOpenRouter, JUDGE_TEMPERATURE, type Confidence, type Criterion, type JudgeKeys, type PanelEnv, type PanelRequest, type PanelSelection } from "./judge.ts";
 
 export type ReviewTier = "review" | "review-3";
 export const REVIEW_TIERS: ReviewTier[] = ["review", "review-3"];
@@ -152,8 +152,9 @@ export async function reviewCommitment(
   try {
     picked = panel ? choosePanel(panel, REVIEW_SIZE[tier], pool, rand, allowedModels(env)) : undefined;
   } catch (e: any) {
-    if (!exclude.length) throw e;
-    throw new Error(`${String(e?.message ?? e)} (The brief's writer, ${exclude.join(", ")}, is left out of this panel: name a panel from three other companies' models, or send the review without prejudge.)`);
+    // Only when leaving the writer out is why the pool is short; any other refusal stands as it is.
+    if (!exclude.length || !(e instanceof PanelShortError)) throw e;
+    throw new Error(`${String(e?.message ?? e)} (The brief's writer, ${exclude.join(", ")}, is left out of this panel: name reviewers without it, or send the review without prejudge.)`);
   }
   return {
     ...(picked ? { panel_selection: picked.selection } : {}),

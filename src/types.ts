@@ -18,6 +18,7 @@ export interface Env {
   PREJUDGE_ENABLED?: string;
   PREJUDGE_WRITERS?: string; // comma-separated writer models, the cheap class (default claude-haiku-5-5)
   PREJUDGE_PER_DAY?: string; // pre-judges per address per UTC day (default 3)
+  PREJUDGE_GIVEBACKS_PER_DAY?: string; // pre-judges given back after a provider-side failure, per address per UTC day (default 2)
   PREJUDGE_COST_USD?: string; // what one counts against the shared free budget (default 0.01)
   TEAM_TOKEN?: string; // secret: the owner's team allowance token (sent as x-team-token); enables /team/*
   GITHUB_TOKEN?: string; // secret (optional): a read-only GitHub token for proof receipts' L1 checks, for a higher rate limit

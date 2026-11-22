@@ -338,8 +338,9 @@ export class Ledger {
         return json(200, { released: true });
       }
       const who = typeof body?.caller === "string" ? body.caller : "";
-      // "prejudge": the pre-judge (prejudge.ts), with its own count per caller inside the same budget.
-      const tier = body?.tier === "review-3" ? "review-3" : body?.tier === "prejudge" ? "prejudge" : "review";
+      // "prejudge": the pre-judge (prejudge.ts), with its own count per caller inside the same budget; "prejudge-retry":
+      // the pre-judges given back after a provider-side failure, capped per caller so a failure can't become a loop.
+      const tier = body?.tier === "review-3" ? "review-3" : body?.tier === "prejudge" ? "prejudge" : body?.tier === "prejudge-retry" ? "prejudge-retry" : "review";
       const cost = Number.isFinite(body?.cost_micro) ? Math.max(0, body.cost_micro) : 0;
       const budget = Number.isFinite(body?.budget_micro) ? Math.max(0, body.budget_micro) : 0;
       const limit = Number.isFinite(body?.per_caller) ? Math.max(0, body.per_caller) : 0;
@@ -347,7 +348,8 @@ export class Ledger {
       const ck = `fr:${day}:${tier}:${who}`;
       const used = (await st.get<number>(ck)) ?? 0;
       if (used >= limit) return json(429, { reason: "per_caller", used, limit });
-      if (cost <= 0 || spent + cost > budget) return json(429, { reason: "budget", spent_micro: spent, budget_micro: budget });
+      // A free review always costs something; the pre-judge's give-back count is a count only, never the budget's.
+      if ((cost <= 0 && tier !== "prejudge-retry") || spent + cost > budget) return json(429, { reason: "budget", spent_micro: spent, budget_micro: budget });
       const token = `${day}|${crypto.randomUUID()}`;
       await st.put(ck, used + 1);
       await st.put(spentKey, (spent += cost));
@@ -420,7 +422,7 @@ export class Ledger {
     if (action === "cutoff") {
       // body: a CutOff (cutoffs.ts) -> counts it for today ("oot_<model>") and keeps it in the last 100, newest last.
       const model = typeof body?.model === "string" && /^[\x20-\x7e]{1,120}$/.test(body.model) ? body.model : "";
-      const where = body?.where === "judge" ? "judge" : body?.where === "review" ? "review" : "";
+      const where = body?.where === "judge" ? "judge" : body?.where === "review" ? "review" : body?.where === "prejudge" ? "prejudge" : "";
       if (!model || !where) return json(400, { error: "Bad cut-off note." });
       const n = (x: unknown) => (Number.isFinite(x) ? Math.max(0, Math.floor(x as number)) : null);
       const day = nowIso.slice(0, 10);

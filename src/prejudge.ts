@@ -13,9 +13,11 @@
 // Free inside the free reviews' allowance (his decision, Nov 3, 10:02: "free inside the allowance"): a few per caller
 // per UTC day, inside the same shared daily budget, counted at a small list price. A paid review that uses the brief
 // gives that caller the pre-judge back (once). Off unless PREJUDGE_ENABLED is "true" and free reviews have a budget.
-// A writer that can't be reached (a provider error) gives the use back; one that answered with an unusable or cut-off
-// brief, or took too long, doesn't: the question can cause those, so one address can't spend the shared budget with
-// them (the fresh read's F1, Nov 21).
+// After a failed writer, the use comes back only when the failure was the provider's (unreachable, busy, an error on its
+// side or ours, a timeout), at most PREJUDGE_GIVEBACKS_PER_DAY times per caller; an answer the parser refuses, a cut-off
+// answer, or a refusal the question can cause (a moderation 403, a region, a 400) counts it. The budget comes back only
+// when the provider refused before writing anything. So one address can't spend the shared budget with failures (the
+// fresh reads' F1 and N1, Nov 21).
 
 import { LIMITS, canonicalJson, sha256Hex, validateCriteria } from "./logic.ts";
 import { verifyReceipt, type Receipt } from "./receipt.ts";
@@ -72,7 +74,9 @@ export async function prejudgePromptSha256(): Promise<string> {
   return sha256Hex(`${PREJUDGE_FORMAT_VERSION}\n${PREJUDGE_SYSTEM}\n${PREJUDGE_MESSAGE_FORMAT}`);
 }
 
-type PrejudgeEnv = { PREJUDGE_ENABLED?: string; PREJUDGE_WRITERS?: string; PREJUDGE_PER_DAY?: string; PREJUDGE_COST_USD?: string; MODEL_POOL?: string; OPT_IN_MODELS?: string };
+type PrejudgeEnv = { PREJUDGE_ENABLED?: string; PREJUDGE_WRITERS?: string; PREJUDGE_PER_DAY?: string; PREJUDGE_GIVEBACKS_PER_DAY?: string; PREJUDGE_COST_USD?: string; MODEL_POOL?: string; OPT_IN_MODELS?: string };
+
+export const DEFAULT_PREJUDGE_GIVEBACKS_PER_DAY = 2;
 
 export function prejudgeConfig(env: PrejudgeEnv) {
   // Only models the service knows (the pool and the opt-in list), under the ids its panels use, so keeping the writer
@@ -82,9 +86,11 @@ export function prejudgeConfig(env: PrejudgeEnv) {
   const writers = listed.filter((m) => known.includes(m));
   const n = Number(String(env.PREJUDGE_PER_DAY ?? "").trim());
   const perDay = String(env.PREJUDGE_PER_DAY ?? "").trim() !== "" && Number.isFinite(n) && n >= 0 ? Math.floor(n) : DEFAULT_PREJUDGE_PER_DAY;
+  const g = Number(String(env.PREJUDGE_GIVEBACKS_PER_DAY ?? "").trim());
+  const givebacksPerDay = String(env.PREJUDGE_GIVEBACKS_PER_DAY ?? "").trim() !== "" && Number.isFinite(g) && g >= 0 ? Math.floor(g) : DEFAULT_PREJUDGE_GIVEBACKS_PER_DAY;
   const usd = Number(String(env.PREJUDGE_COST_USD ?? DEFAULT_PREJUDGE_COST_USD).trim());
   const costMicro = Number.isFinite(usd) && usd > 0 ? Math.round(usd * 1_000_000) : Math.round(Number(DEFAULT_PREJUDGE_COST_USD) * 1_000_000);
-  return { enabled: env.PREJUDGE_ENABLED === "true" && writers.length > 0 && perDay > 0, writers, unknownWriters: listed.filter((m) => !known.includes(m)), perDay, costMicro };
+  return { enabled: env.PREJUDGE_ENABLED === "true" && writers.length > 0 && perDay > 0, writers, unknownWriters: listed.filter((m) => !known.includes(m)), perDay, givebacksPerDay, costMicro };
 }
 
 export type PrejudgeInput = { question: string; writer?: string };
@@ -223,7 +229,7 @@ export function prejudgeInfo(env: PrejudgeEnv, freeBudgetSet: boolean) {
     writer_note: "The writer is one of these small models, at random unless you name one. It sees your question only, never the work, and it can't sit on the panel of a review that uses its brief: if your review's default panel holds the writer, name a panel without it (or use \"rotate\").",
     per_address_per_day: cfg.perDay,
     shared_daily_limit: "Inside the free reviews' daily budget: once that's used up, the pre-judge pauses until 00:00 UTC too.",
-    failures: "If the writer can't be reached (a provider error), your pre-judge isn't used. If it answered but its brief can't be used, or it took too long, it counts: a shorter or simpler question usually works.",
+    failures: `If the writer's provider fails (unreachable, busy, an error on its side, too slow), your pre-judge isn't used, up to ${cfg.givebacksPerDay} times a day per address. If the writer answered but its brief can't be used, or the provider refused the question itself, it counts: a shorter or simpler question usually works.`,
     earn_back: "A paid review (through the paywall, not a free or team review) that uses a brief gives the address that asked for the brief its pre-judge back, once, the same UTC day.",
     limits: PREJUDGE_LIMITS,
     hashing: "question_sha256 is sha256 of the exact question text; brief_sha256 is sha256 of the canonical JSON {task, criteria}, criteria null when there are none.",
@@ -237,9 +243,12 @@ export function prejudgeInfo(env: PrejudgeEnv, freeBudgetSet: boolean) {
 
 // ---------- the writer's call (through review.ts runOneReviewer, with its retries, timeouts and slot reports) ----------
 
-export const PREJUDGE_CALL_TIMEOUT_MS = 60_000;
-export const PREJUDGE_BUDGET_MS = 90_000;
-export const PREJUDGE_MAX_TOKENS = 4000; // the largest answer the parser accepts: about 12,000 characters, near 3,000 tokens
+export const PREJUDGE_CALL_TIMEOUT_MS = 100_000; // as reviews (REVIEWER_CALL_TIMEOUT_MS)
+export const PREJUDGE_BUDGET_MS = 150_000;
+// The largest answer the parser accepts is about 12,000 characters: near 3,000 tokens in English, more in Chinese,
+// Japanese or Korean (fresh read of e5153fa, N3), so the budget is a review's (REVIEWER_MAX_TOKENS); unused tokens cost
+// nothing.
+export const PREJUDGE_MAX_TOKENS = 8000;
 
 export function prejudgeHow(question: string): ReviewerHow {
   return {

@@ -92,14 +92,15 @@ const payHeader = (n: number, value = "50000") =>
       },
     }),
   ).toString("base64");
-function fakeFacilitator() {
+function fakeFacilitator(settle: "ok" | "fail" = "ok") {
   const orig = globalThis.fetch;
   globalThis.fetch = (async (u: any, init: any) => {
     const url = String(u);
     const body = init?.body ? JSON.parse(init.body) : {};
     const payer = body?.paymentPayload?.payload?.authorization?.from;
     if (url.endsWith("/verify")) return new Response(JSON.stringify({ isValid: true, payer }), { status: 200 });
-    if (url.endsWith("/settle")) return new Response(JSON.stringify({ success: true, transaction: "0x" + "cd".repeat(32), network: "base-sepolia", payer }), { status: 200 });
+    if (url.endsWith("/settle"))
+      return new Response(JSON.stringify(settle === "ok" ? { success: true, transaction: "0x" + "cd".repeat(32), network: "base-sepolia", payer } : { success: false, errorReason: "insufficient_funds", transaction: "", network: "base-sepolia", payer }), { status: 200 });
     throw new Error(`no network in these tests: ${url}`);
   }) as any;
   return { restore: () => void (globalThis.fetch = orig) };
@@ -186,6 +187,8 @@ test("reviewCommitment's exclude: a named or default panel holding the writer is
     reviewCommitment("review-3", { MODEL_POOL: "claude-sonnet-5-5,openai/gpt-6-luna,google/gemini-4-argon" } as any, "rotate", undefined, 0, ["openai/gpt-6-luna"]),
     /brief's writer, openai\/gpt-6-luna, is left out of this panel/,
   );
+  // Any other refusal stands as it is (fresh read of e5153fa, N5).
+  await assert.rejects(reviewCommitment("review", {}, ["made-up-model"] as any, undefined, 0, ["claude-haiku-5-5"]), (e: any) => !/brief's writer/.test(e.message));
 });
 
 test("checkPrejudge: only this service's signature, only for this brief", async () => {
@@ -298,15 +301,57 @@ t("the writer's failures: an unusable or cut-off answer counts the use; a provid
   assert.equal((await call(e, "/prejudge", { question })).status, 429, "the cut-off one counted");
   const cutLines = cap.lines.filter((l) => l.includes("ran_out_of_tokens"));
   assert.ok(cutLines.length > 0 && cutLines.every((l) => l.includes('"where":"prejudge"')), cutLines.join("\n"));
-  // A provider error (overloaded, every try): the question can't cause it, so the use comes back; the budget keeps
-  // the try's cost (G5).
+  // A provider error (overloaded, every try): the question can't cause it, so the use comes back, and the budget too,
+  // since nothing was written (fresh read N1).
   e = env({ ...ON, PREJUDGE_PER_DAY: "1", FREE_REVIEW_DAILY_BUDGET_USD: "0.01" });
   const down = await call(e, "/prejudge", { question }, { "x-test-fake-mix": "500:1" });
   assert.equal(down.status, 502, JSON.stringify(down.body));
   assert.match(down.body.error, /couldn't be reached.*wasn't used/s);
-  const after = await call(e, "/prejudge", { question }, { "cf-connecting-ip": "198.51.100.2" });
-  assert.equal(after.status, 429, "the budget kept the failed try's cost");
-  assert.match(after.body.error, /used up for everyone/);
+  assert.equal((await call(e, "/prejudge", { question }, { "cf-connecting-ip": "198.51.100.2" })).status, 200, "the budget came back: another address fits");
+  // ... at most PREJUDGE_GIVEBACKS_PER_DAY times a day per address (default 2); after that a failure counts.
+  e = env({ ...ON, PREJUDGE_PER_DAY: "1" });
+  for (let i = 0; i < 2; i++) assert.match((await call(e, "/prejudge", { question }, { "x-test-fake-mix": "500:1" })).body.error, /wasn't used/);
+  const third = await call(e, "/prejudge", { question }, { "x-test-fake-mix": "500:1" });
+  assert.equal(third.status, 502);
+  assert.match(third.body.error, /today's 2 failed pre-judges given back to your address are used, so this one counts/);
+  assert.equal((await call(e, "/prejudge", { question })).status, 429, "the third failure counted");
+  // The provider's answers come from stand-ins in this process (nothing leaves the machine).
+  const orig = globalThis.fetch;
+  const answer = (status: number, error: object) => (async () => new Response(JSON.stringify({ error }), { status, headers: { "content-type": "application/json" } })) as any;
+  try {
+    // A timeout: usually a slow provider, so the use comes back (within the cap); the budget keeps the try's cost.
+    globalThis.fetch = (async () => {
+      throw new DOMException("The operation timed out.", "TimeoutError");
+    }) as any;
+    e = env({ ...ON, PREJUDGE_PER_DAY: "1", FAKE_AI: "false", FREE_REVIEW_DAILY_BUDGET_USD: "0.01" });
+    const slow = await call(e, "/prejudge", { question });
+    assert.equal(slow.status, 502, JSON.stringify(slow.body));
+    assert.match(slow.body.error, /took too long \(its AI provider was slow\).*wasn't used/s);
+    globalThis.fetch = orig;
+    e.FAKE_AI = "true";
+    const other = await call(e, "/prejudge", { question }, { "cf-connecting-ip": "198.51.100.2" });
+    assert.equal(other.status, 429, "the budget kept the timed-out try's cost");
+    // A moderation refusal (OpenRouter's 403 for flagged input): the question causes it, so the use counts.
+    globalThis.fetch = answer(403, { code: 403, message: "Your input was flagged by the moderation", metadata: { reasons: ["x"], flagged_input: "..." } });
+    e = env({ ...ON, PREJUDGE_PER_DAY: "1", FAKE_AI: "false", PREJUDGE_WRITERS: "openai/gpt-6-luna" });
+    const flagged = await call(e, "/prejudge", { question });
+    assert.equal(flagged.status, 502, JSON.stringify(flagged.body));
+    assert.match(flagged.body.error, /refused the request \(403\).*counts as one of today's free pre-judges/s);
+    globalThis.fetch = orig;
+    e.FAKE_AI = "true";
+    assert.equal((await call(e, "/prejudge", { question })).status, 429, "the flagged one counted");
+    // Our own account refused (a 403 worded as an account problem): the use and the budget come back.
+    globalThis.fetch = answer(403, { code: 403, message: "This account has been suspended." });
+    e = env({ ...ON, PREJUDGE_PER_DAY: "1", FAKE_AI: "false", PREJUDGE_WRITERS: "openai/gpt-6-luna" });
+    const ours = await call(e, "/prejudge", { question });
+    assert.equal(ours.status, 502, JSON.stringify(ours.body));
+    assert.match(ours.body.error, /couldn't be reached.*wasn't used/s);
+    globalThis.fetch = orig;
+    e.FAKE_AI = "true";
+    assert.equal((await call(e, "/prejudge", { question })).status, 200, "given back");
+  } finally {
+    globalThis.fetch = orig;
+  }
 });
 
 t("a review that uses the brief: its receipt records the question's and the brief's hashes and the writer", async () => {
@@ -416,6 +461,18 @@ t("the earn-back: a review paid through the paywall gives the pre-judge back, on
   } finally {
     f.restore();
   }
+  // A payment that fails to settle: the customer pays nothing, and nothing comes back (fresh read of e5153fa, F3 b).
+  const bad = fakeFacilitator("fail");
+  try {
+    const e = env({ ...ON, PREJUDGE_PER_DAY: "1", PAYMENTS_ENABLED: "true" });
+    const pj = (await call(e, "/prejudge", { question })).body;
+    const unpaid = await call(e, "/review", { task: pj.brief.task, output, prejudge: pj.receipt }, { "x-payment": payHeader(5) });
+    assert.equal(unpaid.status, 402, JSON.stringify(unpaid.body));
+    await settleWait();
+    assert.equal((await call(e, "/prejudge", { question })).status, 429, "an unsettled payment gives nothing back");
+  } finally {
+    bad.restore();
+  }
 });
 
 // ---------- after the free fresh read of b59cd88 (Nov 21): its guards G4 to G8 and its findings, as tests ----------
@@ -514,4 +571,27 @@ t("one address's unusable answers can't spend the shared free budget (the fresh 
   const e = env({ ...ON, PREJUDGE_PER_DAY: "1", FREE_REVIEW_DAILY_BUDGET_USD: "0.06" });
   for (let i = 0; i < 6; i++) await call(e, "/prejudge", { question: `${question} BROKEN-WRITER` });
   assert.equal((await call(e, "/free/review", { task: question, output }, { "cf-connecting-ip": "198.51.100.2" })).status, 200, "another address still gets its free review");
+});
+
+t("a writer's cut-off reaches the ledger's cut-off records, labeled as the pre-judge's (fresh read of e5153fa, N2)", async () => {
+  const ADMIN = "a".repeat(40); // a test fixture, as in routes.test.ts
+  const e = env({ ...ON, ADMIN_TOKEN: ADMIN });
+  assert.equal((await call(e, "/prejudge", { question }, { "x-test-fake-mix": "cut:1" })).status, 502);
+  await settleWait();
+  const stats = await call(e, "/admin/stats", undefined, { authorization: `Bearer ${ADMIN}` });
+  assert.equal(stats.status, 200, JSON.stringify(stats.body));
+  const recent = stats.body.ran_out_of_tokens_recent ?? [];
+  assert.ok(recent.length > 0 && recent.every((x: any) => x.where === "prejudge" && x.model === "claude-haiku-5-5"), JSON.stringify(recent));
+});
+
+t("writers the service doesn't know are named in the logs (fresh read of e5153fa, N4)", async () => {
+  const cap = captureLogs();
+  let r;
+  try {
+    r = await call(env({ ...ON, PREJUDGE_WRITERS: "claude-haiku-5.5" }), "/prejudge", { question });
+  } finally {
+    cap.restore();
+  }
+  assert.equal(r.status, 503, "no known writer: off");
+  assert.ok(cap.lines.some((l) => l.includes("doesn't know, left out: claude-haiku-5.5")), cap.lines.join("\n"));
 });

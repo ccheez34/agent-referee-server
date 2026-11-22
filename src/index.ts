@@ -442,6 +442,16 @@ const paidRoute = async (c: any, next: any) => {
     if ("stage" in o && o.stage === "settle")
       await inBackground(c, recordSettleFailure(c.env, payer, `${c.req.path}: ${o.detail}`, { micro: paymentMicro(c.req.header("x-payment")), strike: o.kind === "payer_problem" }));
     if (o.kind === "facilitator_problem") await inBackground(c, recordEvent(c.env, o.credit ? "credit_problem" : "facilitator_problem", `${o.stage} ${c.req.path}: ${o.detail}`));
+    // The pre-judge's earn-back (handleReview marks it): only once the payment settled. The allowance's reference can
+    // be given back only once, for its own UTC day; the budget keeps the writer's cost.
+    const earnBack = c.get("prejudgeEarnBack");
+    if (o.kind === "settled" && typeof earnBack === "string" && c.env.LEDGER)
+      await inBackground(
+        c,
+        ledgerJson(c.env, undefined, "free-review", { release_token: earnBack, refund_budget: false }).then((back: any) => {
+          if (back?.released) stat(c, "prejudge_earned_back");
+        }),
+      );
   }
   return r;
 };
@@ -1283,18 +1293,9 @@ async function handleReview(c: any, tier: ReviewTier) {
   console.log(`review ${tier} ok in ${Date.now() - started}ms: ${votes.map((v) => `${v.model}=${v.verdict}`).join(" ")}`);
   await record("record_ok");
   // A review paid through the paywall that uses a pre-judge's brief gives the address that asked for the brief its
-  // pre-judge back, once (the allowance's own reference can be given back only once, for its own UTC day; the budget
-  // keeps the writer's cost). Not for team reviews, nor while payments are off (no one paid). In the background, so
-  // the ledger's round trip stays off the payment's path.
-  if (!c.get("team") && c.env.PAYMENTS_ENABLED !== "false" && input.prejudge?.allowance_ref && c.env.LEDGER) {
-    const ref = input.prejudge.allowance_ref;
-    void inBackground(
-      c,
-      ledgerJson(c.env, undefined, "free-review", { release_token: ref, refund_budget: false }).then((back: any) => {
-        if (back?.released) stat(c, "prejudge_earned_back");
-      }),
-    );
-  }
+  // pre-judge back, once: marked here, given back by paidRoute after the payment settled (never for a payment that
+  // failed to settle, a team review, or while payments are off, when paidRoute doesn't run the paywall).
+  if (!c.get("team") && c.env.PAYMENTS_ENABLED !== "false" && input.prejudge?.allowance_ref) c.set("prejudgeEarnBack", input.prejudge.allowance_ref);
   if (!c.get("team")) stat(c, `paid_ok_${tier.replace("-", "")}`);
   const payload = await reviewPayload({
     tier,
@@ -1870,6 +1871,8 @@ app.post("/free/review-3", (c) => handleFreeReview(c, "review-3"));
 
 async function handlePrejudge(c: any) {
   const cfg = prejudgeConfig(c.env);
+  // Model ids, never secrets: a typo here turns the pre-judge off, so the operator's logs say why (fresh read N4).
+  if (cfg.unknownWriters.length) console.error(`prejudge: PREJUDGE_WRITERS names models the service doesn't know, left out: ${cfg.unknownWriters.join(", ")}`);
   const free = freeReviewConfig(c.env);
   if (!cfg.enabled || !free.budgetMicro) return err(503, "The pre-judge isn't available right now. You can send a review without a brief.");
   if (await paidPausedNow(c.env)) return err(503, PAUSED_MSG);
@@ -1932,8 +1935,10 @@ async function handlePrejudge(c: any) {
   let called = false; // set once the writer may have been called (and cost money)
   let settled: PromiseSettledResult<any>;
   const started = Date.now();
-  // What each try did (runOneReviewer's onCall): an answer (usable or not), a cut-off, a timeout, or a provider error.
+  // What each try did (runOneReviewer's onCall): an answer (usable or not), a cut-off, a timeout, or a provider error;
+  // and whether the provider said our own account was refused (onAccountProblem).
   const tries: { outcome: string; status?: number }[] = [];
+  const accountTrouble = new Set<string>();
   try {
     const slots = await acquireSlots(c.env, [writer], { leaseMs: PREJUDGE_BUDGET_MS + 30_000, waitMs: GATE_MAX_WAIT_MS });
     if (!slots.ok) {
@@ -1952,7 +1957,10 @@ async function handlePrejudge(c: any) {
           how: prejudgeHow(v.value.question),
           observe: (o) => lease.observe(0, o),
           onCutOff: (cut) => void inBackground(c, recordCutOff(c.env, cut)),
-          onAccountProblem: (who, problem) => void inBackground(c, recordAccountProblem(c.env, who, problem)),
+          onAccountProblem: (who, problem) => {
+            accountTrouble.add(problem);
+            void inBackground(c, recordAccountProblem(c.env, who, problem));
+          },
           // Counts and the model only: the first real-cost figures for any route (ADDENDUM-2, point 6). Never the question.
           onCall: (call) => {
             tries.push({ outcome: call.outcome, ...(call.status !== undefined ? { status: call.status } : {}) });
@@ -1973,19 +1981,38 @@ async function handlePrejudge(c: any) {
     // 403, 404), or its envelope was unreadable. Those the question can't cause, so the caller gets the use back. An
     // answer (unusable, or cut off at the token limit), a timeout or a refusal of the request itself (other 4xx) can
     // follow from the question, so the use counts, and one address can't spend the shared budget with failures (F1).
-    const providerSide = (x: { outcome: string; status?: number }) =>
-      x.outcome === "network" || x.outcome === "unreadable" || (x.outcome === "error" && x.status !== undefined && (x.status === 429 || x.status >= 500 || [401, 403, 404].includes(x.status)));
-    const giveBack = lease.capHit() || tries.every(providerSide);
+    // An error status the question can't cause: busy (429), the provider's own failure (5xx), our account or key
+    // refused (401, a 400 or 403 the provider worded as an account problem), our model id unknown (404). A moderation
+    // 403, a region refusal or another 4xx can follow from the question.
+    const providerError = (x: { outcome: string; status?: number }) =>
+      x.outcome === "error" && x.status !== undefined && (x.status === 429 || x.status >= 500 || x.status === 401 || x.status === 404 || ((x.status === 400 || x.status === 403) && accountTrouble.has("account")));
+    const byQuestion = (x: { outcome: string; status?: number }) => x.outcome === "answered" || x.outcome === "cut_off" || (x.outcome === "error" && !providerError(x));
+    const cause = tries.some((x) => x.outcome === "answered" || x.outcome === "cut_off") ? "answer" : tries.some(byQuestion) ? "refused" : tries.some((x) => x.outcome === "timeout") ? "slow" : "provider";
+    // The budget comes back only when no try got further than an error status: nothing was written, nothing billed.
+    const nothingWritten = tries.length > 0 && tries.every(providerError);
+    let giveBack = lease.capHit();
+    let capped = false;
+    if (!giveBack && (cause === "provider" || cause === "slow")) {
+      // At most PREJUDGE_GIVEBACKS_PER_DAY per caller per UTC day (the ledger's own count for them, costing nothing):
+      // a failure classed wrongly can't become a loop. If it can't be counted, the use counts.
+      const g = await ledgerJson(c.env, undefined, "free-review", { caller, tier: "prejudge-retry", cost_micro: 0, budget_micro: free.budgetMicro, per_caller: cfg.givebacksPerDay }, true).catch(() => null);
+      giveBack = !!g && g.__status !== 429 && typeof g.token === "string";
+      capped = !giveBack;
+    }
     const kinds = tries.map((x) => (x.status !== undefined ? `${x.outcome} ${x.status}` : x.outcome)).join(", ") || "no call";
     // Kinds only: the provider's or the parser's words can quote the question (F5).
-    console.error(`prejudge failed after ${Date.now() - started}ms: ${kinds}; the use ${giveBack ? "given back" : "counted"}`);
-    // The budget comes back only when the provider refused at its account limit (nothing spent).
-    if (giveBack) await release(lease.capHit());
+    console.error(`prejudge failed after ${Date.now() - started}ms: ${kinds}; the use ${giveBack ? "given back" : "counted"}${capped ? " (today's give-backs used)" : ""}`);
+    if (giveBack) await release(lease.capHit() || nothingWritten);
     stat(c, giveBack ? "prejudge_failed" : "prejudge_unusable");
     if (lease.capHit()) return busy(600, "the AI provider's account limit was reached; the pre-judge resumes when it's lifted. Your pre-judge wasn't used.");
-    if (giveBack) return err(502, "The pre-judge's writer couldn't be reached (its AI provider failed or was busy). Your pre-judge wasn't used; try again in a minute, or send your review without a brief.");
-    const why = tries.some((x) => x.outcome === "timeout") && !tries.some((x) => x.outcome === "answered" || x.outcome === "cut_off") ? "it took too long" : msg.slice(0, 200);
-    return err(502, `The pre-judge's writer didn't return a usable brief (${why}). This counts as one of today's free pre-judges, since the writer worked on it; a shorter or simpler question usually works, or send your review without a brief.`);
+    const after = "or send your review without a brief.";
+    if (giveBack)
+      return err(502, `The pre-judge's writer ${cause === "slow" ? "took too long (its AI provider was slow)" : "couldn't be reached (its AI provider failed or was busy)"}. Your pre-judge wasn't used; try again in a minute, ${after}`);
+    if (capped)
+      return err(502, `The pre-judge's writer ${cause === "slow" ? "took too long" : "couldn't be reached"} again, and today's ${cfg.givebacksPerDay} failed pre-judges given back to your address are used, so this one counts. Try again later, ${after}`);
+    if (cause === "refused")
+      return err(502, `The writer's AI provider refused the request (${tries.filter(byQuestion).map((x) => x.status).join(", ")}), which the question can cause (its moderation, for example). This counts as one of today's free pre-judges; change the question, ${after}`);
+    return err(502, `The pre-judge's writer answered, but its brief couldn't be used (${msg.slice(0, 200)}). This counts as one of today's free pre-judges; a shorter or simpler question usually works, ${after}`);
   }
   const vote: any = settled.value;
   const draft: PrejudgeDraft = { task: vote.task, ...(vote.criteria ? { criteria: vote.criteria } : {}), changes: vote.changes, please_confirm: vote.please_confirm };
