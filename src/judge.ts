@@ -252,10 +252,11 @@ export function trialedJudges(env: { TRIALED_JUDGES?: string }): string[] {
 }
 /**
  * 2.0's point 1, for the tiers priced on average cost (review, review-3; judge, judge-2, judge-3 for a trialed new
- * model): a new model is taken only while its price on the day is at or under the dearest priced model the tier already
- * takes, on input and on output (for reviews, Opus 5.5 today: $4 / $20), so naming it can't cost more than naming one of
- * those. null when it's taken; otherwise the reason, for a refusal before payment. A model that isn't new is never
- * refused here.
+ * model): a new model is taken only while one model the tier already takes costs at least as much on the day, on input
+ * and on output both (for reviews, Opus 5.5 today: $4 / $20), so naming it can't cost more than naming that one. The
+ * same model must cover both prices: the dearest input and the dearest output can belong to different models, and a new
+ * model at both would be dearer than each (1.0's F1). null when it's taken; otherwise the reason, for a refusal before
+ * payment. A model that isn't new is never refused here.
  */
 export function newModelPriceProblem(env: { MODEL_POOL?: string; NEW_MODELS?: string }, model: string, tier: string, at: number = Date.now(), takes: string[] = modelPool(env)): string | null {
   if (!isNewModel(env, model)) return null;
@@ -264,11 +265,10 @@ export function newModelPriceProblem(env: { MODEL_POOL?: string; NEW_MODELS?: st
   // takes: the models the tier already takes (the reviewers' pool by default; a judge tier passes the judges' pool).
   const rows = takes.map((m) => priceOn(m, at)).filter((r): r is PriceRow => !!r);
   if (!rows.length) return `${model} isn't taken on ${tier} for now: no model of the pool has a recorded price to compare it with.`;
-  const maxIn = Math.max(...rows.map((r) => r.in));
-  const maxOut = Math.max(...rows.map((r) => r.out));
-  if (row.in > maxIn || row.out > maxOut)
-    return `${model} isn't taken on ${tier} for now: its price (${priceText(row)}) is above the dearest model this tier already takes ($${maxIn} / $${maxOut}).`;
-  return null;
+  if (rows.some((r) => row.in <= r.in && row.out <= r.out)) return null;
+  // The refusal names the dearest ones: each priced model no other is at or above on both prices.
+  const dearest = [...new Set(rows.filter((r) => !rows.some((o) => o.in >= r.in && o.out >= r.out && (o.in > r.in || o.out > r.out))).map((r) => `$${r.in} / $${r.out}`))];
+  return `${model} isn't taken on ${tier} for now: its price (${priceText(row)}) is above ${dearest.length > 1 ? "each of the dearest models" : "the dearest model"} this tier already takes (${dearest.join(", ")}).`;
 }
 
 /** OpenRouter models outside Google and OpenAI are only sent to hosts that don't collect request data. */

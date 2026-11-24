@@ -359,6 +359,19 @@ test("the money rule on review and review-3: a new model is taken while its pric
   const cheapPool = { MODEL_POOL: [SONNET, LUNA, FLASH].join(",") };
   assert.match(String(newModelPriceProblem(cheapPool, NEON, "review-3", NOV_24)), /above the dearest model this tier already takes \(\$2 \/ \$10\)/);
   assert.equal(newModelPriceProblem(cheapPool, HYDROGEN, "review-3", NOV_24), null);
+  // One model must cover both prices (1.0's F1): with a pool of $4 / $10 and $1 / $20, a new model at $3 / $15 or at
+  // $4 / $20 is dearer than each of them at every mix of input and output, though under the two maxima.
+  await withPrice("google/pool-a", [{ from: "2026-11-01", in: 4, out: 10, source: "test" }], () =>
+    withPrice("google/pool-b", [{ from: "2026-11-01", in: 1, out: 20, source: "test" }], () =>
+      withPrice("google/new-n", [{ from: "2026-11-01", in: 3, out: 15, source: "test" }, { from: "2026-11-10", in: 4, out: 20, source: "test" }, { from: "2026-11-20", in: 4, out: 10, source: "test" }, { from: "2026-11-22", in: 1, out: 20, source: "test" }, { from: "2026-11-23", in: 1, out: 10, source: "test" }], () => {
+        const env = { MODEL_POOL: "google/pool-a,google/pool-b", NEW_MODELS: "google/new-n" };
+        const why = (d: string) => newModelPriceProblem(env, "google/new-n", "review", at(d));
+        assert.match(String(why("2026-11-05T00:00:00Z")), /its price \(\$3 \/ \$15 per million tokens \(input \/ output\)\) is above each of the dearest models this tier already takes \(\$4 \/ \$10, \$1 \/ \$20\)\.$/);
+        assert.match(String(why("2026-11-15T00:00:00Z")), /its price \(\$4 \/ \$20 .* is above each of the dearest models this tier already takes \(\$4 \/ \$10, \$1 \/ \$20\)/);
+        assert.equal(why("2026-11-21T00:00:00Z"), null, "at pool-a's own price");
+        assert.equal(why("2026-11-22T12:00:00Z"), null, "at pool-b's own price");
+        assert.equal(why("2026-11-24T00:00:00Z"), null, "under both");
+      })));
   // A pool with no priced model at all: nothing to compare with, so refused.
   assert.match(String(newModelPriceProblem({ MODEL_POOL: "google/unpriced-a" }, NEON, "review", NOV_24)), /no model of the pool has a recorded price/);
 });
