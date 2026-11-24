@@ -48,13 +48,17 @@ export const MODEL_PRICES: Record<string, PriceRow[]> = {
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
 const dayStart = (d: string) => Date.parse(`${d}T00:00:00Z`);
 
-/** The row that applies to this model at this time (ms since 1970), or null if none does. */
+/**
+ * The row that applies to this model at this time (ms since 1970), or null if none does: the row with the latest "from"
+ * that has started, unless its own "until" has passed. An older row never comes back once a later one has started, so
+ * after an announced end with no next price the model is unpriced, not back at an old price.
+ */
 export function priceOn(model: string, at: number = Date.now()): PriceRow | null {
-  let found: PriceRow | null = null;
+  let latest: PriceRow | null = null;
   for (const row of MODEL_PRICES[model] ?? []) {
-    if (dayStart(row.from) <= at && (row.until === undefined || at < dayStart(row.until))) found = row;
+    if (dayStart(row.from) <= at && (!latest || dayStart(row.from) >= dayStart(latest.from))) latest = row;
   }
-  return found;
+  return latest && (latest.until === undefined || at < dayStart(latest.until)) ? latest : null;
 }
 
 /** Whether a model has any price row at all (the settings check at start asks this of every new model). */

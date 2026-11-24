@@ -298,7 +298,7 @@ test("new models: one judges only once TRIALED_JUDGES lists it, and then only wh
 
 // ---------- 2.0's point 1: the money path ----------
 
-test("the price table: well formed, every pool and new model priced today, and each dated change applies from its day", () => {
+test("the price table: well formed, every pool and new model priced today, and each dated change applies from its day", async () => {
   assert.deepEqual(priceTableProblems(), []);
   assert.deepEqual(priceTableProblems({ x: [{ from: "2026-13-01", in: 1, out: 1, source: "s" }, { from: "2026-01-01", in: 0, out: 1, source: "" }] }).length, 4);
   for (const m of [...modelPool({}).filter((x) => x !== HAIKU), ...NEW]) {
@@ -318,9 +318,22 @@ test("the price table: well formed, every pool and new model priced today, and e
   assert.deepEqual([priceOn(NEON, DEC_1)!.in, priceOn(NEON, DEC_1)!.out], [3, 15]);
   assert.deepEqual([priceOn(HYDROGEN, DEC_1)!.in, priceOn(HYDROGEN, DEC_1)!.out], [1.5, 7.5]);
   // an announced end with no next price: unpriced from that day
-  withPrice("google/stand-in", [{ from: "2026-11-01", until: "2026-12-01", in: 1, out: 5, source: "test" }], () => {
+  await withPrice("google/stand-in", [{ from: "2026-11-01", until: "2026-12-01", in: 1, out: 5, source: "test" }], () => {
     assert.ok(priceOn("google/stand-in", at("2026-11-30T23:59:59Z")));
     assert.equal(priceOn("google/stand-in", DEC_1), null);
+  });
+  // and a later row's announced end doesn't bring an older row back: unpriced, never the old price (so a new model is refused)
+  await withPrice("google/stand-in", [{ from: "2026-10-01", in: 1, out: 5, source: "test" }, { from: "2026-11-01", until: "2026-12-01", in: 2, out: 10, source: "test" }], () => {
+    assert.equal(priceOn("google/stand-in", at("2026-10-31T23:59:59Z"))!.in, 1);
+    assert.equal(priceOn("google/stand-in", at("2026-11-30T23:59:59Z"))!.in, 2);
+    assert.equal(priceOn("google/stand-in", DEC_1), null);
+    assert.match(newModelPriceProblem({ NEW_MODELS: "google/stand-in" }, "google/stand-in", "review-3", DEC_1)!, /no recorded price for today/);
+    assert.equal(newModelPriceProblem({ NEW_MODELS: "google/stand-in" }, "google/stand-in", "review-3", at("2026-11-30T23:59:59Z")), null);
+  });
+  // rows out of order (the table's own check refuses them; priceOn doesn't lean on it): still the latest row that has started
+  await withPrice("google/stand-in", [{ from: "2026-11-01", in: 2, out: 10, source: "test" }, { from: "2026-10-01", in: 1, out: 5, source: "test" }], () => {
+    assert.equal(priceOn("google/stand-in", at("2026-11-30T23:59:59Z"))!.in, 2);
+    assert.equal(priceOn("google/stand-in", at("2026-10-31T23:59:59Z"))!.in, 1);
   });
 });
 
