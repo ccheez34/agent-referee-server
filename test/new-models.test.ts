@@ -389,6 +389,26 @@ test("the money rule on review and review-3: a new model is taken while its pric
   assert.match(String(newModelPriceProblem({ MODEL_POOL: "google/unpriced-a" }, NEON, "review", NOV_24)), /no model of the pool has a recorded price/);
 });
 
+test("the money rule compares a new model with what this request can take: on a long input a light model's price doesn't cover it (the paid review's finding)", async () => {
+  // A pool whose dearest model is a light one. A short input may take it, so its price covers the new model. A long input
+  // can't (light models are left out of long reviews), and the new model is then dearer than every model it could name.
+  const LIGHT = "google/pool-light";
+  await withPrice(LIGHT, [{ from: "2026-11-01", in: 9, out: 45, source: "test" }], () =>
+    withPrice("google/new-n", [{ from: "2026-11-01", in: 3, out: 15, source: "test" }], async () => {
+      const env = { ...OPEN, MODEL_POOL: `${LIGHT},${SONNET},${LUNA}`, LIGHT_REVIEW_MODELS: LIGHT, LONG_REVIEW_CHARS: "6000", NEW_MODELS: "google/new-n" };
+      const panel = [SONNET, LUNA, "google/new-n"];
+      assert.deepEqual((await reviewCommitment("review-3", env, panel, undefined, 6000, NOV_24)).models, panel, "a short input: the light model's price covers it");
+      await assert.rejects(
+        reviewCommitment("review-3", env, panel, undefined, 6001, NOV_24),
+        /google\/new-n isn't taken on review-3 for now: its price \(\$3 \/ \$15 per million tokens \(input \/ output\)\) is above the dearest model this tier already takes \(\$2 \/ \$10\)\.$/,
+      );
+      await assert.rejects(reviewCommitment("review", env, ["google/new-n"], undefined, 6001, NOV_24), /google\/new-n isn't taken on review for now: its price/);
+      // A pool whose dearest model isn't a light one: a long input changes nothing.
+      const env2 = { ...env, MODEL_POOL: `${OPUS},${SONNET},${LUNA},${HAIKU}`, LIGHT_REVIEW_MODELS: HAIKU };
+      assert.deepEqual((await reviewCommitment("review-3", env2, panel, undefined, 12000, NOV_24)).models, panel);
+    }));
+});
+
 routeTest("new models: the routes list them (GET /reviewers and GET /judge), each list in its own field", async () => {
   const env = { ...keys, ...SHIPPED };
   const r = await (await app.fetch(new Request("https://x/reviewers"), env, ctx)).json();

@@ -264,7 +264,8 @@ export function newModelPriceProblem(env: { MODEL_POOL?: string; NEW_MODELS?: st
   if (!isNewModel(env, model)) return null;
   const row = priceOn(model, at);
   if (!row) return `${model} isn't taken on ${tier} for now: it has no recorded price for today.`;
-  // takes: the models the tier already takes (the reviewers' pool by default; a judge tier passes the judges' pool).
+  // takes: the models the request could take on the tier. A review passes its pool, which leaves the light models out on
+  // a long input (review.ts); a judge tier passes the judges' pool. The default is the reviewers' whole pool.
   const rows = takes.map((m) => priceOn(m, at)).filter((r): r is PriceRow => !!r);
   if (!rows.length) return `${model} isn't taken on ${tier} for now: no model of the pool has a recorded price to compare it with.`;
   if (rows.some((r) => row.in <= r.in && row.out <= r.out)) return null;

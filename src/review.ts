@@ -145,9 +145,10 @@ export async function reviewCommitment(
   // gets the same answer. They're off for the public until NEW_MODELS_ENABLED; a team-allowance call may name one.
   const news = [...new Set(namedModels(panel).filter((m) => isNewModel(env, m)))];
   if (news.length && !newModelsOpen(env) && caller.team !== true) throw new Error(newModelsNotOpen(news));
-  // And each is taken only while its price is at or under the dearest model this tier already takes.
+  // And each is taken only while its price is at or under the dearest model this request could take: the pool, without
+  // the light models on a long input (a model the request can't name can't be the one that covers the new model's price).
   for (const m of news) {
-    const why = newModelPriceProblem(env, m, tier, at);
+    const why = newModelPriceProblem(env, m, tier, at, pool);
     if (why) throw new Error(why);
   }
   return {
