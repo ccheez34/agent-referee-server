@@ -240,13 +240,15 @@ export function newModels(env: { NEW_MODELS?: string }): string[] {
 export const isNewModel = (env: { NEW_MODELS?: string }, model: string) => newModels(env).includes(model);
 /**
  * New models ship switched off: until NEW_MODELS_ENABLED is exactly "true" (its own deploy, after the trials), a public
- * or free request that names one is refused before payment. While it's off, only a team-allowance call (the owner's own
- * sessions, /team/review and /team/review-3) may name one: that is how the trials run.
+ * or free review request (review, review-3) that names one is refused before payment. While it's off, only a
+ * team-allowance call (the owner's own sessions, /team/review and /team/review-3) may name one: that is how the trials
+ * run. The switch is the reviews'. Judging has its own: TRIALED_JUDGES (below), which doesn't wait for this one.
  */
 export const newModelsOpen = (env: { NEW_MODELS_ENABLED?: string }) => env.NEW_MODELS_ENABLED === "true";
 export const newModelsNotOpen = (models: string[]) =>
   `${models.join(", ")} ${models.length > 1 ? "are new models that aren't" : "is a new model that isn't"} open yet: the service is trying ${models.length > 1 ? "them" : "it"} first. GET /reviewers lists new_models and says when they open.`;
-/** New models that passed a judge trial (its yes adds each one): the only new models that may judge. */
+/** New models that passed a judge trial (its yes adds each one, in a deploy of its own): the only new models that may
+ * judge, named by the agents of a match, public matches included. Empty as shipped, so no new model judges. */
 export function trialedJudges(env: { TRIALED_JUDGES?: string }): string[] {
   return splitModels(env.TRIALED_JUDGES);
 }
