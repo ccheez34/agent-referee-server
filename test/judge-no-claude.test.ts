@@ -656,8 +656,10 @@ routeTest("re-read R3: llms.txt gives judge-3's closed reason once", async () =>
   assert.doesNotMatch(line(await txt(appEnv(THIRD))), /closed/, "open with a third company");
 });
 
-routeTest("re-read R5: GET /reviewers is byte for byte main 2aa89f2's, each with its own wrangler.jsonc settings", async () => {
-  const snap = await readFile(new URL("./fixtures/reviewers-main-2aa89f2.json", import.meta.url), "utf8");
+routeTest("re-read R5: GET /reviewers is byte for byte its snapshot, each with its own wrangler.jsonc settings", async () => {
+  // The snapshot was main 2aa89f2's until the panels' new models (PLAN revision 4), which added three things and changed
+  // nothing else: new_models, new_models_note, and the multi-part panel line now naming new models as refused.
+  const snap = await readFile(new URL("./fixtures/reviewers-new-models.json", import.meta.url), "utf8");
   const res = await app.fetch(new Request("https://x/reviewers"), { ...(await shippedVars()) }, ctx);
   // A deliberate change to reviews or their settings must regenerate the snapshot (and say why).
   assert.equal(await res.text(), snap);

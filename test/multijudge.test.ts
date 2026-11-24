@@ -11,7 +11,7 @@ import {
   MULTI_JUDGE_TIMEOUT_MS, MULTI_JUDGE_BUDGET_MS, MULTI_JUDGE_CALL_TIMEOUT_MS, MULTI_JUDGE_DEFAULT_PRICES,
   buildMultiJudgeMessage, multiJudgeCommitment, multiJudgeHow, multiJudgePromptSha, sidePieceRecords, sidePiecesSha256, validateMultiSubmit,
 } from "../src/multijudge.ts";
-import { multiMaxTokens, multiModels, MultiClosedError, MULTI_SYSTEM } from "../src/multipart.ts";
+import { multiMaxTokens, multiModels, panelWorstCaseUsd, MultiClosedError, MULTI_SYSTEM } from "../src/multipart.ts";
 
 const kp = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"])) as CryptoKeyPair;
 const b64 = (b: ArrayBuffer) => Buffer.from(b).toString("base64");
@@ -448,18 +448,19 @@ test("the v5-multi prompt: fingerprint, boundary rules, side/piece references, l
 });
 
 test("worst case per match stays under both seats' price: every judge at full max_tokens on both tries, full-size CJK input", () => {
-  // Per million tokens, input / output (as in multipart.test.ts, checked Oct 28).
-  const PRICE_PER_M: Record<string, [number, number]> = { [OPUS]: [4, 20], [SONNET]: [2, 10], [LUNA]: [0.1, 0.5], [ARGON]: [2, 10], [FLASH]: [0.75, 3.75] };
+  // The prices are the code's dated table (src/prices.ts) and the formula is the code's (panelWorstCaseUsd): today, and
+  // each day the table knows a change (Argon on Dec 1, Flash on Jan 1). The judges' widest list is used: Claude judges
+  // on, so Sonnet counts. Unlike the multi-part reviews, these tiers hold with Argon at $4 / $20: both seats pay.
   for (const tier of ["judge-3x2", "judge-3x3"] as const) {
     const n = tier === "judge-3x2" ? 2 : 3;
     const price = 2 * Number(MULTI_JUDGE_DEFAULT_PRICES[tier].replace("$", ""));
     const inputTokens = 2 * n * MULTI_JUDGE_LIMITS.maxPiece + 4000 /* rules */ + 200 /* title */ + MULTI_JUDGE_SYSTEM.length + 500;
-    const { eligible } = multiModels({});
-    const byCompany = new Map<string, string[]>();
-    for (const x of eligible) byCompany.set(companyOf(x), [...(byCompany.get(companyOf(x)) ?? []), x]);
-    let worst = 0;
-    for (const ms of byCompany.values()) worst += Math.max(...ms.map((x) => (2 * (inputTokens * PRICE_PER_M[x][0] + multiMaxTokens(x) * PRICE_PER_M[x][1])) / 1e6));
-    assert.ok(worst < price, `${tier}: worst case $${worst.toFixed(3)} is not under $${price}`);
+    const { eligible } = multiModels({ CLAUDE_JUDGES_ENABLED: "true" }, "judge");
+    assert.deepEqual(eligible, [SONNET, LUNA, ARGON, FLASH]);
+    for (const at of [Date.now(), Date.parse("2026-11-24T12:00:00Z"), Date.parse("2026-12-01T00:00:00Z"), Date.parse("2027-01-01T00:00:00Z")]) {
+      const worst = panelWorstCaseUsd(eligible, inputTokens, at);
+      assert.ok(worst !== null && worst < price, `${tier} at ${new Date(at).toISOString()}: worst case ${worst === null ? "unknown" : `$${worst.toFixed(3)}`} is not under $${price}`);
+    }
   }
 });
 

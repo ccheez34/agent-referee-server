@@ -12,7 +12,7 @@
 import { LIMITS, canonicalJson, panelShapeError, sha256Hex, validateCriteria } from "./logic.ts";
 import { ProviderCapError, accountOf, accountProblem, classifyStatus, rateInfo, type AccountProblem, type CallObservation } from "./providers.ts";
 import type { CutOff } from "./cutoffs.ts";
-import { allowedModels, answerTokens, answerText, callModel, callUsage, choosePanel, modelPool, viaOpenRouter, JUDGE_TEMPERATURE, type Confidence, type Criterion, type JudgeKeys, type PanelEnv, type PanelRequest, type PanelSelection } from "./judge.ts";
+import { allowedModels, newModelPriceProblem, answerTokens, answerText, callModel, callUsage, choosePanel, modelPool, viaOpenRouter, JUDGE_TEMPERATURE, type Confidence, type Criterion, type JudgeKeys, type PanelEnv, type PanelRequest, type PanelSelection } from "./judge.ts";
 
 export type ReviewTier = "review" | "review-3";
 export const REVIEW_TIERS: ReviewTier[] = ["review", "review-3"];
@@ -118,10 +118,11 @@ export function longReviewRule(env: LongEnv) {
 
 export async function reviewCommitment(
   tier: ReviewTier,
-  env: PanelEnv & LongEnv & { REVIEW_MODEL?: string; MODEL_POOL?: string; OPT_IN_MODELS?: string },
+  env: PanelEnv & LongEnv & { REVIEW_MODEL?: string; MODEL_POOL?: string; OPT_IN_MODELS?: string; NEW_MODELS?: string },
   panel?: PanelRequest,
   rand?: () => number,
   inputChars = 0,
+  at: number = Date.now(),
 ): Promise<ReviewCommitment> {
   const rule = longReviewRule(env);
   const long = inputChars > rule.max_chars_for_light_models;
@@ -138,6 +139,11 @@ export async function reviewCommitment(
   }
   // Throws a readable Error if the request names a model outside the pool.
   const picked = panel ? choosePanel(panel, REVIEW_SIZE[tier], pool, rand, allowedModels(env)) : undefined;
+  // A new model is taken only while its price is at or under the dearest model this tier already takes (judge.ts).
+  for (const m of picked?.models ?? []) {
+    const why = newModelPriceProblem(env, m, tier, at);
+    if (why) throw new Error(why);
+  }
   return {
     ...(picked ? { panel_selection: picked.selection } : {}),
     models: picked ? picked.models : reviewModels(tier, env),

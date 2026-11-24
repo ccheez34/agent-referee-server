@@ -6,7 +6,8 @@ import { KEY_RE, MEDIATOR, MAX_SERIES_GAMES, doublePrice, idForKey, isJudgeTier,
 import { MatchRoom } from "./match.ts";
 import { Ledger, ledgerShardName, shardLimit } from "./ledger.ts";
 import { SCOPE_NOTE, landingHtml, llmsTxt, wantsHtml } from "./landing.ts";
-import { JUDGE_ADVISORY, JUDGE_HUMAN_REVIEW, JUDGE_MESSAGE_FORMAT, JUDGE_SYSTEM, allowedModels, claudeJudgesOn, commitsClaudeWhileOff, judgeAllowed, judgeCommitment, judgeExcludedList, judgePool, judgeTierClosed, judgeTierWaitsForCompany, missingJudgeKey, modelPool, optInModels, panelModels, tierCommitment, tierModels, type JudgeTierName } from "./judge.ts";
+import { newModelsProblems } from "./settings.ts";
+import { JUDGE_ADVISORY, JUDGE_HUMAN_REVIEW, JUDGE_MESSAGE_FORMAT, JUDGE_SYSTEM, allowedModels, claudeJudgesOn, commitsClaudeWhileOff, judgeAllowed, judgeCommitment, judgeExcludedList, judgePool, judgeTierClosed, judgeTierWaitsForCompany, missingJudgeKey, modelPool, isNewModel, newModels, optInModels, panelModels, tierCommitment, tierModels, type JudgeTierName } from "./judge.ts";
 import type { Env } from "./types.ts";
 import { payaiToken } from "./payai.ts";
 import { signReceipt } from "./receipt.ts";
@@ -58,6 +59,23 @@ app.use("*", async (c, next) => {
     for (const [k, v] of Object.entries(CORS)) res.headers.set(k, v);
     c.res = res;
   }
+});
+
+// The settings' new models, checked before anything is served (PLAN revision 4 of the panels' new models, 2.0's point
+// 3): a bad entry stops the service, with the entry named. /health still answers and names it, so a deploy's live check
+// shows why.
+const settingsChecked = new WeakMap<object, string[]>();
+/** The settings' problems for this env, worked out once (an isolate serves every request with the same env object). */
+function settingsProblemsOf(env: Env): string[] {
+  let p = settingsChecked.get(env);
+  if (!p) settingsChecked.set(env, (p = newModelsProblems(env)));
+  return p;
+}
+app.use("*", async (c, next) => {
+  if (c.req.path === "/health") return next();
+  const problems = settingsProblemsOf(c.env);
+  if (problems.length) return c.json({ error: "The service's settings have a problem, so it isn't serving requests for now. Nothing was charged.", settings_problems: problems }, 503);
+  await next();
 });
 
 const ID_RE = /^[a-f0-9]{24}$/;
@@ -902,7 +920,8 @@ app.get("/health", async (c) => {
   if (pause.auto) verdict.reasons.push(`auto_paused: ${pause.auto}`), (verdict.degraded = true);
   const paused = paidPaused(env) || pause.paid;
   const reviewsPaused = env.REVIEWS_PAUSED === "true" || pause.reviews;
-  const ok = signing && records !== "error";
+  const settingsProblems = settingsProblemsOf(env);
+  const ok = signing && records !== "error" && !settingsProblems.length;
   const allJudges = Object.values(judges).every((v) => v === "ok" || v === "closed");
   const status = !ok ? "down" : verdict.degraded || !allJudges || badlyClosed ? "degraded" : paused || reviewsPaused ? "paused" : "ok";
   const body = {
@@ -911,8 +930,10 @@ app.get("/health", async (c) => {
     reasons: [...verdict.reasons, ...(allJudges ? [] : ["judge_key_missing"]), ...(badlyClosed ? ["judge_closed"] : [])],
     legal: publicLegal(verdict.legal), // F10: the public sees only that a legal alert is on; the detail is in /admin/stats
     warnings: publicWarnings(verdict.warnings), // the region lists' detail is in /admin/stats
+    ...(settingsProblems.length ? { settings_problems: settingsProblems } : {}),
     checks: {
       receipts_signing: signing ? "ok" : "missing key",
+      settings: settingsProblems.length ? "problem" : "ok",
       records,
       payments: env.PAYMENTS_ENABLED === "false" ? "off" : paused || usdcPaused(env) ? "paused" : "on",
       reviews: reviewsPaused || paused ? "paused" : "on",
@@ -1139,8 +1160,10 @@ app.on("GET", ["/judge", "/compare"], async (c) => { // GET /compare: the same p
       },
     },
     model_pool: judgePool(c.env),
-    opt_in_models: judgeAllowed(c.env).filter((m) => !judgePool(c.env).includes(m)),
+    opt_in_models: judgeAllowed(c.env).filter((m) => !judgePool(c.env).includes(m) && !isNewModel(c.env, m)),
     opt_in_note: JUDGE_OPT_IN_NOTE,
+    new_models: judgeAllowed(c.env).filter((m) => isNewModel(c.env, m)),
+    new_models_note: JUDGE_NEW_MODELS_NOTE,
     // Models that may not judge, named or drawn, until they pass a judge trial (JUDGE_EXCLUDE).
     ...(judgeExcludedList(c.env).length ? { not_judging_for_now: { models: judgeExcludedList(c.env), why: "They didn't finish long answers reliably in live tests. Naming one is refused before payment; each comes back after it passes a judge trial." } } : {}),
     choosing_the_panel: PANEL_CHOICE_HELP,
@@ -1181,6 +1204,11 @@ const OPT_IN_NOTE =
   "opt_in_models come from companies outside model_pool (Mistral, EU; DeepSeek, Qwen/Alibaba, Kimi/Moonshot and GLM/Z.ai, China). Agents may name them in an exact list, an agreed set or a judge-3 pick, but they are never drawn at random: rotate and the drawn third judge use model_pool only. Their requests go through OpenRouter only to hosts that don't collect request data; submissions still reach whichever host runs the model, so leave secrets and personal data out.";
 
 // GET /reviewers keeps OPT_IN_NOTE byte for byte; the judges' pool can differ from the reviewers', so they get their own note.
+/** What GET /reviewers says about new_models (a field of its own, so opt_in_note and the lists keep their form). */
+const NEW_MODELS_NOTE =
+  "new_models are models from a company already in model_pool, too new to have a record here. Agents may name them on review and review-3 (an exact list, an agreed set or a pick) while each one's price is at or under the dearest model those tiers already take; they're never drawn by \"rotate\" and never a default, don't judge until they pass a judge trial, and aren't taken on the multi-part tiers until their live cost test.";
+const JUDGE_NEW_MODELS_NOTE =
+  "new_models here are the new models (GET /reviewers) that passed a judge trial: only they may judge. The others aren't offered as judges, named or drawn.";
 const JUDGE_OPT_IN_NOTE =
   "model_pool here is the judges' own pool (JUDGE_MODEL_POOL), which can differ from the reviewers' (GET /reviewers). opt_in_models are models agents may name in an exact list, an agreed set or a judge-3 pick, but they are never drawn at random: rotate and the drawn third judge use model_pool only. Requests to models outside OpenAI and Google go through OpenRouter only to hosts that don't collect request data; submissions still reach whichever host runs the model, so leave secrets and personal data out.";
 
@@ -1885,6 +1913,8 @@ app.get("/reviewers", async (c) => {
     model_pool: modelPool(c.env),
     opt_in_models: optInModels(c.env),
     opt_in_note: OPT_IN_NOTE,
+    new_models: newModels(c.env),
+    new_models_note: NEW_MODELS_NOTE,
     choosing_the_reviewers: PANEL_CHOICE_HELP.replace("on POST /matches (judge-2, judge-3)", "in the review request (review: 1 model, review-3: 3)").replace(/; judge-3 only: .*? majority\./, "."),
     how_votes_combine: "review: the single reviewer's verdict. review-3: a verdict with 2 or more of the 3 votes wins, and cannot_assess counts as a vote like any other (pass+pass+cannot_assess = pass; pass+cannot_assess+cannot_assess = cannot_assess; pass+fail+cannot_assess = split). Otherwise the result is split. Reviewers run in parallel and never see each other's verdicts.",
     writing_the_task: "task is what the work was supposed to do: the instructions or spec the agent was given, with its requirements (for example \"Write a function that retries a request up to 4 times, waiting 1-8 s between tries, and never runs longer than 240 s\"). It is not a message to the reviewers. Phrased as \"check this output for X\", a reviewer may judge whether the output IS a check for X, and fail it. Put any claims you want verified into the task as requirements.",
@@ -1918,7 +1948,7 @@ async function multiPartInfo(env: Env) {
     limits: { task: `10 to ${REVIEW_LIMITS.maxTask}`, piece_text: `1 to ${MULTI_LIMITS.maxPiece}`, all_pieces: MULTI_LIMITS.maxTotal, piece_name: `optional, 1 to ${MULTI_LIMITS.maxName} printable characters, no line breaks`, body_bytes: MULTI_LIMITS.maxBodyBytes, counting: "characters are UTF-16 code units (JavaScript .length)" },
     eligible_models: m.eligible,
     drawn_from: m.drawable,
-    panel: 'Default and "rotate": one model from each of three companies, drawn from drawn_from. An exact list or agreed sets must name eligible models from three different companies. Light models (Haiku) and opt-in models are refused.',
+    panel: 'Default and "rotate": one model from each of three companies, drawn from drawn_from. An exact list or agreed sets must name eligible models from three different companies. Light models (Haiku) and opt-in models are refused, and so are new models (new_models, above) until their live cost test.',
     max_tokens: Object.fromEntries(m.eligible.map((x) => [x, multiMaxTokens(x, env)])),
     ...(multiExcluded(env).includes("claude-opus-5-5")
       ? {

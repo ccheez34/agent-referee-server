@@ -52,6 +52,7 @@ import {
   judgeAllowed,
   judgePool,
   namedModels,
+  newModelPriceProblem,
   runOneJudge,
   decide,
   votePick,
@@ -408,6 +409,11 @@ export class MatchRoom {
         } catch (e: any) {
           if (e instanceof PanelShortError) return bad(503, `${tier} is closed for now: ${e.message}`);
           return bad(400, String(e?.message ?? e));
+        }
+        // A trialed new model judges only while its price is at or under the dearest model of the judges' pool.
+        for (const m of picked.models) {
+          const why = newModelPriceProblem(this.env, m, tier, Date.now(), judgePool(this.env));
+          if (why) return bad(400, why);
         }
         const missing = missingJudgeKey(this.env, picked.models);
         if (missing) return bad(503, "This judge tier is temporarily unavailable.");

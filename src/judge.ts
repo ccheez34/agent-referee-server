@@ -12,6 +12,7 @@
 import { sha256Hex } from "./logic.ts";
 import { fakeModelResponse, type FakeAi } from "./fakeai.ts";
 import { ProviderCapError, accountOf, accountProblem, classifyStatus, rateInfo, type AccountProblem, type CallObservation } from "./providers.ts";
+import { priceOn, priceText, type PriceRow } from "./prices.ts";
 export { panelShapeError } from "./logic.ts";
 
 export type JudgeTierName = "judge" | "judge-2" | "judge-3" | "judge-3x2" | "judge-3x3";
@@ -218,9 +219,47 @@ export const DEFAULT_OPT_IN_MODELS = "mistralai/mistral-large-4-0,deepseek/deeps
 export function optInModels(env: { OPT_IN_MODELS?: string }): string[] {
   return splitModels(env.OPT_IN_MODELS ?? DEFAULT_OPT_IN_MODELS);
 }
-/** Every model agents may name: the default pool plus the opt-in models. */
-export function allowedModels(env: { MODEL_POOL?: string; OPT_IN_MODELS?: string }): string[] {
-  return [...new Set([...modelPool(env), ...optInModels(env)])];
+/** Every model agents may name: the default pool, the opt-in models and the new models (each tier adds its own rules). */
+export function allowedModels(env: { MODEL_POOL?: string; OPT_IN_MODELS?: string; NEW_MODELS?: string }): string[] {
+  return [...new Set([...modelPool(env), ...optInModels(env), ...newModels(env)])];
+}
+
+// ---------- new models (PLAN revision 4 of the panels' new models, with 2.0's five points) ----------
+
+/**
+ * New models: from a company already in the pool, too new for a record here. Agents may name them on review and review-3
+ * (an exact list, an agreed set, or a pick) while their price is at or under the dearest model those tiers already take
+ * (newModelPriceProblem). They're never drawn ("rotate" draws from modelPool only), never a default, never a judge until
+ * a judge trial puts them in TRIALED_JUDGES, and in this version never on the multi-part tiers.
+ */
+export const DEFAULT_NEW_MODELS = "google/gemini-4-carbon,google/gemini-4-neon,google/gemini-4-hydrogen,google/gemini-3.8-flash";
+export function newModels(env: { NEW_MODELS?: string }): string[] {
+  return splitModels(env.NEW_MODELS ?? DEFAULT_NEW_MODELS);
+}
+export const isNewModel = (env: { NEW_MODELS?: string }, model: string) => newModels(env).includes(model);
+/** New models that passed a judge trial (its yes adds each one): the only new models that may judge. */
+export function trialedJudges(env: { TRIALED_JUDGES?: string }): string[] {
+  return splitModels(env.TRIALED_JUDGES);
+}
+/**
+ * 2.0's point 1, for the tiers priced on average cost (review, review-3; judge, judge-2, judge-3 for a trialed new
+ * model): a new model is taken only while its price on the day is at or under the dearest priced model the tier already
+ * takes, on input and on output (for reviews, Opus 5.5 today: $4 / $20), so naming it can't cost more than naming one of
+ * those. null when it's taken; otherwise the reason, for a refusal before payment. A model that isn't new is never
+ * refused here.
+ */
+export function newModelPriceProblem(env: { MODEL_POOL?: string; NEW_MODELS?: string }, model: string, tier: string, at: number = Date.now(), takes: string[] = modelPool(env)): string | null {
+  if (!isNewModel(env, model)) return null;
+  const row = priceOn(model, at);
+  if (!row) return `${model} isn't taken on ${tier} for now: it has no recorded price for today.`;
+  // takes: the models the tier already takes (the reviewers' pool by default; a judge tier passes the judges' pool).
+  const rows = takes.map((m) => priceOn(m, at)).filter((r): r is PriceRow => !!r);
+  if (!rows.length) return `${model} isn't taken on ${tier} for now: no model of the pool has a recorded price to compare it with.`;
+  const maxIn = Math.max(...rows.map((r) => r.in));
+  const maxOut = Math.max(...rows.map((r) => r.out));
+  if (row.in > maxIn || row.out > maxOut)
+    return `${model} isn't taken on ${tier} for now: its price (${priceText(row)}) is above the dearest model this tier already takes ($${maxIn} / $${maxOut}).`;
+  return null;
 }
 
 /** OpenRouter models outside Google and OpenAI are only sent to hosts that don't collect request data. */
@@ -349,7 +388,7 @@ export function tierModels(env: PanelEnv, tier: JudgeTierName): string[] {
 // ccheez34, Oct 30, 16:57: "no claude on any judge panel until the lawyer approves". Anthropic's Usage Policy of Nov 12,
 // 2026 adds "Legal status and adjudication" as a high-risk area. Reviews aren't judge panels and don't change.
 
-export type JudgeEnv = PanelEnv & { CLAUDE_JUDGES_ENABLED?: string; JUDGE_MODEL_POOL?: string; MODEL_POOL?: string; OPT_IN_MODELS?: string; JUDGE_EXCLUDE?: string };
+export type JudgeEnv = PanelEnv & { CLAUDE_JUDGES_ENABLED?: string; JUDGE_MODEL_POOL?: string; MODEL_POOL?: string; OPT_IN_MODELS?: string; JUDGE_EXCLUDE?: string; NEW_MODELS?: string; TRIALED_JUDGES?: string };
 
 /** Claude models may judge only when the operator sets CLAUDE_JUDGES_ENABLED to exactly "true" (after the lawyer). */
 export const claudeJudgesOn = (env: { CLAUDE_JUDGES_ENABLED?: string }) => env.CLAUDE_JUDGES_ENABLED === "true";
@@ -359,17 +398,19 @@ export const KNOWN_COMPANIES = ["anthropic", "openai", "google", "mistralai", "d
 /** Models that may not judge until they pass a judge trial (README, "Judge trials"): JUDGE_EXCLUDE, comma-separated. */
 export const judgeExcludedList = (env: JudgeEnv) => splitModels(env.JUDGE_EXCLUDE);
 export const judgeExcluded = (env: JudgeEnv, model: string) => judgeExcludedList(env).includes(model);
+/** A new model judges only once its judge trial lists it in TRIALED_JUDGES: off because it's new, by construction. */
+export const newUntrialed = (env: JudgeEnv, model: string) => isNewModel(env, model) && !trialedJudges(env).includes(model);
 const mayJudge = (env: JudgeEnv, model: string) =>
-  KNOWN_COMPANIES.includes(companyOf(model)) && (claudeJudgesOn(env) || !isClaudeModel(model)) && !judgeExcluded(env, model);
+  KNOWN_COMPANIES.includes(companyOf(model)) && (claudeJudgesOn(env) || !isClaudeModel(model)) && !judgeExcluded(env, model) && !newUntrialed(env, model);
 
 /** What judge draws use: JUDGE_MODEL_POOL (else MODEL_POOL's list), known companies only, without Anthropic while the
  * switch is off. MODEL_POOL itself, which the reviews use, never changes. */
 export function judgePool(env: JudgeEnv): string[] {
   return splitModels(env.JUDGE_MODEL_POOL || env.MODEL_POOL || DEFAULT_MODEL_POOL).filter((m) => mayJudge(env, m));
 }
-/** What agents may name as judges: the judge pool plus the opt-in models, under the same rule. */
+/** What agents may name as judges: the judge pool plus the opt-in models and the trialed new models, under the same rule. */
 export function judgeAllowed(env: JudgeEnv): string[] {
-  return [...new Set([...judgePool(env), ...optInModels(env).filter((m) => mayJudge(env, m))])];
+  return [...new Set([...judgePool(env), ...optInModels(env).filter((m) => mayJudge(env, m)), ...newModels(env).filter((m) => mayJudge(env, m))])];
 }
 
 export const CLAUDE_JUDGES_OFF = "Claude models aren't offered as judges for now. Name models from other companies; GET /judge lists them.";
@@ -381,7 +422,7 @@ export class JudgeClosedError extends Error {}
  * behaviour). A Claude model in its list closes it, and so does a list with fewer companies than seats. */
 export function judgeTierClosed(env: JudgeEnv, tier: "judge" | "judge-2" | "judge-3"): string | null {
   // A default model that hasn't passed its judge trial closes the tier whatever the Claude switch says.
-  if (tierModels(env, tier).some((m) => judgeExcluded(env, m))) return `${tier} is closed for now: a default judge model hasn't passed its judge trial yet.`;
+  if (tierModels(env, tier).some((m) => judgeExcluded(env, m) || newUntrialed(env, m))) return `${tier} is closed for now: a default judge model hasn't passed its judge trial yet.`;
   if (claudeJudgesOn(env)) return null;
   const models = tierModels(env, tier);
   if (models.some(isClaudeModel)) return `${tier} is closed for now: Claude judges are off for now.`;

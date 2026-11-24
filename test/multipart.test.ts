@@ -4,13 +4,14 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   MULTI_LIMITS, MULTI_MAX_TOKENS, MULTI_SYSTEM, MULTI_MESSAGE_FORMAT, MULTI_FORMAT_VERSION, MODEL_OUTPUT_LIMITS, MultiClosedError, MULTI_PIECES, MULTI_DEFAULT_PRICES, MULTI_DEFAULT_MAX_TOKENS, LIVE_TEST_LONGEST_ANSWERS,
-  boundaryToken, buildMultiMessage, multiCommitment, multiMaxTokens, multiModels, multiPromptSha, multiReviewPayload, multiReviewerHow,
+  boundaryToken, buildMultiMessage, multiCommitment, multiMaxTokens, multiModels, multiPromptSha, multiReviewPayload, multiReviewerHow, multiReviewCostsUsd,
   pieceRecords, piecesSha256, readJsonCapped, validateMultiReview, TOO_BIG, type MultiInput,
 } from "../src/multipart.ts";
 import { runOneReviewer, callUsage, REVIEW_SYSTEM, REVIEW_LIMITS, type ReviewerCall } from "../src/review.ts";
 import { canonicalJson, sha256Hex } from "../src/logic.ts";
 import { signReceipt, verifyReceipt } from "../src/receipt.ts";
 import { companyOf } from "../src/judge.ts";
+import { priceOn } from "../src/prices.ts";
 import { verifyReviewOutcome, verifySignature } from "agent-referee-client";
 
 const task = "Write the handoff for the next session: what is live, what is open, and the rules.";
@@ -489,27 +490,19 @@ test("by default Opus is left out of these tiers (worst-case cost), Sonnet revie
   assert.ok(multiModels(ALL).eligible.includes(OPUS), 'MULTI_PART_EXCLUDE="" allows Opus again');
 });
 
-/** Per million tokens, input / output, as checked Oct 28 (see research/checks/multi-part-live-2026-10-28/COST-AND-SPEED.md). */
-const PRICE_PER_M: Record<string, [number, number]> = { [OPUS]: [4, 20], [SONNET]: [2, 10], [LUNA]: [0.1, 0.5], [ARGON]: [2, 10], [FLASH]: [0.75, 3.75] };
-
-test("worst case stays under the price: every reviewer at full max_tokens on both tries, full-size CJK input (1 token per character)", () => {
+test("the price against the worst case (every reviewer at full max_tokens on both tries, full-size CJK input) and against what an agent can force", () => {
+  // The prices are the code's dated table (src/prices.ts) and the formulas are the code's (multiReviewCostsUsd), so this
+  // is about the day the tests run. Through Nov 30, 2026 the worst case is under the price (option B). From Dec 1 it
+  // isn't, with Argon at $4 / $20: the owner accepted that on Oct 30 ("a price increase is okay until profit gets closer
+  // to 0"), so from then on what an agent can force is the measure. test/new-models.test.ts checks each day by date.
   for (const tier of ["review-3x3", "review-3x2"] as const) {
     const price = Number(MULTI_DEFAULT_PRICES[tier].replace("$", ""));
-    const chars = Math.min(MULTI_LIMITS.maxTotal, MULTI_PIECES[tier] * MULTI_LIMITS.maxPiece);
-    // pieces + task + instructions (system prompt plus the message's own wording, rounded up), at 1 token per character
-    const inputTokens = chars + REVIEW_LIMITS.maxTask + MULTI_SYSTEM.length + 500;
     const { drawable, eligible } = multiModels({});
-    const byCompany = new Map<string, string[]>();
-    for (const x of eligible) byCompany.set(companyOf(x), [...(byCompany.get(companyOf(x)) ?? []), x]);
-    let worst = 0;
-    for (const ms of byCompany.values()) {
-      worst += Math.max(...ms.map((x) => {
-        assert.ok(PRICE_PER_M[x], `no recorded price for ${x}: add it to PRICE_PER_M`);
-        return (2 * (inputTokens * PRICE_PER_M[x][0] + multiMaxTokens(x) * PRICE_PER_M[x][1])) / 1e6;
-      }));
-    }
+    for (const x of eligible) assert.ok(priceOn(x), `no recorded price for ${x} today: add it to src/prices.ts`);
+    const { worst, forced } = multiReviewCostsUsd(tier, {});
     assert.ok(drawable.length >= 3);
-    assert.ok(worst < price, `${tier}: worst case $${worst.toFixed(3)} is not under $${price}`);
+    assert.ok(forced !== null && forced < 0.6 * price, `${tier}: what an agent can force, ${forced === null ? "unknown" : `$${forced.toFixed(3)}`}, is not under 60% of $${price}`);
+    if (Date.now() < Date.parse("2026-12-01T00:00:00Z")) assert.ok(worst !== null && worst < price, `${tier}: worst case ${worst === null ? "unknown" : `$${worst.toFixed(3)}`} is not under $${price}`);
   }
 });
 

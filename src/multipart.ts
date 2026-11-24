@@ -11,6 +11,7 @@
 
 import { LIMITS, canonicalJson, panelShapeError, randomToken, sha256Hex, validateCriteria } from "./logic.ts";
 import { allowedModels, choosePanel, companyOf, judgeAllowed, judgePool, modelPool, optInModels, JUDGE_TEMPERATURE, type Criterion, type JudgeEnv, type PanelRequest, type PanelSelection } from "./judge.ts";
+import { priceOn } from "./prices.ts";
 import { REVIEW_LIMITS, decideReview, longReviewRule, parseReviewCapped, type ReviewCommitment, type ReviewVote, type ReviewerHow } from "./review.ts";
 
 export type MultiTier = "review-3x2" | "review-3x3";
@@ -153,6 +154,47 @@ export function multiModels(env: MultiEnv & JudgeEnv, who: "review" | "judge" = 
   return { drawable, eligible, missing, poolCompanies: companies.length };
 }
 
+// ---------- what a panel can cost on a day (the prices are src/prices.ts's dated rows) ----------
+// Two measures, and the owner's rule for each (ccheez34):
+// - The worst case: one seat per company, each company's dearest model, every call with the longest input and all of the
+//   model's answer room, on both tries. Option B (Oct 28, 2026) set the multi-part prices above it.
+// - What an agent can force: the longest input, each reviewer answering once, as long as its longest answer in the live
+//   cost test. A provider's price rise is judged on this: "a price increase is okay until profit gets closer to 0" and
+//   "argon can stay ... price increase is okay" (Oct 30, 2026, on Argon's price doubling on Dec 1). So from Dec 1 the
+//   multi-part reviews' worst case is over their prices with Argon on the panel, by his decision, and what an agent can
+//   force stays under them. Leaving Argon out (MULTI_PART_EXCLUDE) or raising the prices stays his to choose.
+// Both are null when a model has no price that day: an unknown cost is never under a price.
+
+/** The worst case, in dollars, for a panel drawn from these models at a time. */
+export function panelWorstCaseUsd(models: string[], inputTokens: number, at: number = Date.now(), env: { MULTI_PART_MAX_TOKENS?: string } = {}): number | null {
+  return panelCostUsd(models, inputTokens, at, (m) => MULTI_MAX_TRIES * multiMaxTokens(m, env), MULTI_MAX_TRIES);
+}
+/** What an agent can force, in dollars (null too when a model has no longest answer recorded from the live cost test). */
+export function panelForcedCaseUsd(models: string[], inputTokens: number, at: number = Date.now()): number | null {
+  return panelCostUsd(models, inputTokens, at, (m) => LIVE_TEST_LONGEST_ANSWERS[m] ?? null, 1);
+}
+function panelCostUsd(models: string[], inputTokens: number, at: number, outputTokens: (m: string) => number | null, tries: number): number | null {
+  const dearest = new Map<string, number>();
+  for (const m of models) {
+    const row = priceOn(m, at);
+    const out = outputTokens(m);
+    if (!row || out === null) return null;
+    const cost = (tries * inputTokens * row.in + out * row.out) / 1e6;
+    dearest.set(companyOf(m), Math.max(dearest.get(companyOf(m)) ?? 0, cost));
+  }
+  return [...dearest.values()].reduce((a, b) => a + b, 0);
+}
+/** A multi-part review's longest input in tokens, at 1 token per character (CJK): the pieces, the longest task, and the
+ * instructions (the system prompt plus the message's own wording, rounded up). */
+export function multiReviewInputTokens(tier: MultiTier): number {
+  return Math.min(MULTI_LIMITS.maxTotal, MULTI_PIECES[tier] * MULTI_LIMITS.maxPiece) + REVIEW_LIMITS.maxTask + MULTI_SYSTEM.length + 500;
+}
+/** A multi-part review's two measures at a time, over the models eligible with these settings. */
+export function multiReviewCostsUsd(tier: MultiTier, env: MultiEnv & JudgeEnv = {}, at: number = Date.now()): { worst: number | null; forced: number | null } {
+  const { eligible } = multiModels(env);
+  return { worst: panelWorstCaseUsd(eligible, multiReviewInputTokens(tier), at, env), forced: panelForcedCaseUsd(eligible, multiReviewInputTokens(tier), at) };
+}
+
 /** Thrown when the tiers can't seat three companies right now (answered 503 before payment). */
 export class MultiClosedError extends Error {}
 
@@ -172,7 +214,7 @@ export function pickMultiPanel(env: MultiEnv, panel: PanelRequest | undefined, r
   const notEligible = (ms: string[]) => [...new Set(ms.filter((m) => !eligible.includes(m)))];
   const threeCompanies = (ms: string[]) => ms.length === MULTI_SIZE && new Set(ms.map(companyOf)).size === MULTI_SIZE;
   const notEligibleMsg = (bad: string[]) =>
-    `Not eligible for ${tiers}: ${bad.join(", ")}. These tiers use only ${eligible.join(", ")}: light models and models the operator has taken off these tiers are refused, and opt-in models only work once the operator has made them eligible. ${who === "review" ? "GET /reviewers" : "GET /judge"} lists them.`;
+    `Not eligible for ${tiers}: ${bad.join(", ")}. These tiers use only ${eligible.join(", ")}: light models and models the operator has taken off these tiers are refused, opt-in models only work once the operator has made them eligible, and new models aren't taken on these tiers until their live cost test. ${who === "review" ? "GET /reviewers" : "GET /judge"} lists them.`;
   const companyMsg = `A multi-part ${who === "review" ? "review" : "judge panel"} needs three models from three different AI companies (for example ${who === "review" ? "one Anthropic, one OpenAI, one Google" : "one OpenAI, one Google, one Mistral"}).`;
   if (panel === undefined || panel === "rotate") return choosePanel("rotate", MULTI_SIZE, drawable, rand);
   if (Array.isArray(panel) && (panel as unknown[]).every((x) => typeof x === "string")) {
