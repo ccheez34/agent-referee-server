@@ -7,7 +7,7 @@ import { MatchRoom } from "./match.ts";
 import { Ledger, ledgerShardName, shardLimit } from "./ledger.ts";
 import { SCOPE_NOTE, landingHtml, llmsTxt, wantsHtml } from "./landing.ts";
 import { newModelsProblems } from "./settings.ts";
-import { JUDGE_ADVISORY, JUDGE_HUMAN_REVIEW, JUDGE_MESSAGE_FORMAT, JUDGE_SYSTEM, allowedModels, claudeJudgesOn, commitsClaudeWhileOff, judgeAllowed, judgeCommitment, judgeExcludedList, judgePool, judgeTierClosed, judgeTierWaitsForCompany, missingJudgeKey, modelPool, isNewModel, newModels, optInModels, panelModels, tierCommitment, tierModels, type JudgeTierName } from "./judge.ts";
+import { JUDGE_ADVISORY, JUDGE_HUMAN_REVIEW, JUDGE_MESSAGE_FORMAT, JUDGE_SYSTEM, allowedModels, claudeJudgesOn, commitsClaudeWhileOff, judgeAllowed, judgeCommitment, judgeExcludedList, judgePool, judgeTierClosed, judgeTierWaitsForCompany, missingJudgeKey, modelPool, isNewModel, newModels, newModelsOpen, optInModels, panelModels, tierCommitment, tierModels, type JudgeTierName } from "./judge.ts";
 import type { Env } from "./types.ts";
 import { payaiToken } from "./payai.ts";
 import { signReceipt } from "./receipt.ts";
@@ -480,7 +480,8 @@ async function reviewGuard(c: any, next: any) {
   if (!v.ok) return err(400, `${v.error} Nothing was charged.`);
   let commitment;
   try {
-    commitment = await reviewCommitment(tier, c.env, v.value.panel, undefined, v.value.task.length + v.value.output.length);
+    // A team-allowance call may name a new model before they're open to everyone (review.ts, judge.ts newModelsOpen).
+    commitment = await reviewCommitment(tier, c.env, v.value.panel, undefined, v.value.task.length + v.value.output.length, Date.now(), { team: !!team });
   } catch (e: any) {
     return err(400, `${String(e?.message ?? e)} Nothing was charged.`);
   }
@@ -1206,7 +1207,7 @@ const OPT_IN_NOTE =
 // GET /reviewers keeps OPT_IN_NOTE byte for byte; the judges' pool can differ from the reviewers', so they get their own note.
 /** What GET /reviewers says about new_models (a field of its own, so opt_in_note and the lists keep their form). */
 const NEW_MODELS_NOTE =
-  "new_models are models from a company already in model_pool, too new to have a record here. Agents may name them on review and review-3 (an exact list, an agreed set or a pick) while each one's price is at or under the dearest model those tiers already take; they're never drawn by \"rotate\" and never a default, don't judge until they pass a judge trial, and aren't taken on the multi-part tiers until their live cost test.";
+  "new_models are models from a company already in model_pool, too new to have a record here. While new_models_open is false they aren't offered yet: the service is trying them first, and a request that names one is refused before payment. Once it's true, agents may name them on review and review-3 (an exact list, an agreed set or a pick) while each one's price is at or under the dearest model those tiers already take. They're never drawn by \"rotate\" and never a default, don't judge until they pass a judge trial, and aren't taken on the multi-part tiers until their live cost test.";
 const JUDGE_NEW_MODELS_NOTE =
   "new_models here are the new models (GET /reviewers) that passed a judge trial: only they may judge. The others aren't offered as judges, named or drawn.";
 const JUDGE_OPT_IN_NOTE =
@@ -1914,6 +1915,7 @@ app.get("/reviewers", async (c) => {
     opt_in_models: optInModels(c.env),
     opt_in_note: OPT_IN_NOTE,
     new_models: newModels(c.env),
+    new_models_open: newModelsOpen(c.env),
     new_models_note: NEW_MODELS_NOTE,
     choosing_the_reviewers: PANEL_CHOICE_HELP.replace("on POST /matches (judge-2, judge-3)", "in the review request (review: 1 model, review-3: 3)").replace(/; judge-3 only: .*? majority\./, "."),
     how_votes_combine: "review: the single reviewer's verdict. review-3: a verdict with 2 or more of the 3 votes wins, and cannot_assess counts as a vote like any other (pass+pass+cannot_assess = pass; pass+cannot_assess+cannot_assess = cannot_assess; pass+fail+cannot_assess = split). Otherwise the result is split. Reviewers run in parallel and never see each other's verdicts.",

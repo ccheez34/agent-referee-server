@@ -12,7 +12,7 @@
 import { LIMITS, canonicalJson, panelShapeError, sha256Hex, validateCriteria } from "./logic.ts";
 import { ProviderCapError, accountOf, accountProblem, classifyStatus, rateInfo, type AccountProblem, type CallObservation } from "./providers.ts";
 import type { CutOff } from "./cutoffs.ts";
-import { allowedModels, newModelPriceProblem, answerTokens, answerText, callModel, callUsage, choosePanel, modelPool, viaOpenRouter, JUDGE_TEMPERATURE, type Confidence, type Criterion, type JudgeKeys, type PanelEnv, type PanelRequest, type PanelSelection } from "./judge.ts";
+import { allowedModels, isNewModel, namedModels, newModelPriceProblem, newModelsNotOpen, newModelsOpen, answerTokens, answerText, callModel, callUsage, choosePanel, modelPool, viaOpenRouter, JUDGE_TEMPERATURE, type Confidence, type Criterion, type JudgeKeys, type PanelEnv, type PanelRequest, type PanelSelection } from "./judge.ts";
 
 export type ReviewTier = "review" | "review-3";
 export const REVIEW_TIERS: ReviewTier[] = ["review", "review-3"];
@@ -118,11 +118,13 @@ export function longReviewRule(env: LongEnv) {
 
 export async function reviewCommitment(
   tier: ReviewTier,
-  env: PanelEnv & LongEnv & { REVIEW_MODEL?: string; MODEL_POOL?: string; OPT_IN_MODELS?: string; NEW_MODELS?: string },
+  env: PanelEnv & LongEnv & { REVIEW_MODEL?: string; MODEL_POOL?: string; OPT_IN_MODELS?: string; NEW_MODELS?: string; NEW_MODELS_ENABLED?: string },
   panel?: PanelRequest,
   rand?: () => number,
   inputChars = 0,
   at: number = Date.now(),
+  /** team: a team-allowance call (the owner's own sessions), which may name a new model before they're open. */
+  caller: { team?: boolean } = {},
 ): Promise<ReviewCommitment> {
   const rule = longReviewRule(env);
   const long = inputChars > rule.max_chars_for_light_models;
@@ -139,8 +141,12 @@ export async function reviewCommitment(
   }
   // Throws a readable Error if the request names a model outside the pool.
   const picked = panel ? choosePanel(panel, REVIEW_SIZE[tier], pool, rand, allowedModels(env)) : undefined;
-  // A new model is taken only while its price is at or under the dearest model this tier already takes (judge.ts).
-  for (const m of picked?.models ?? []) {
+  // New models (judge.ts). Every model the request names is checked, not only a drawn set, so the same request always
+  // gets the same answer. They're off for the public until NEW_MODELS_ENABLED; a team-allowance call may name one.
+  const news = [...new Set(namedModels(panel).filter((m) => isNewModel(env, m)))];
+  if (news.length && !newModelsOpen(env) && caller.team !== true) throw new Error(newModelsNotOpen(news));
+  // And each is taken only while its price is at or under the dearest model this tier already takes.
+  for (const m of news) {
     const why = newModelPriceProblem(env, m, tier, at);
     if (why) throw new Error(why);
   }

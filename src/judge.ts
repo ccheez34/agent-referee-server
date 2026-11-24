@@ -228,8 +228,9 @@ export function allowedModels(env: { MODEL_POOL?: string; OPT_IN_MODELS?: string
 
 /**
  * New models: from a company already in the pool, too new for a record here. Agents may name them on review and review-3
- * (an exact list, an agreed set, or a pick) while their price is at or under the dearest model those tiers already take
- * (newModelPriceProblem). They're never drawn ("rotate" draws from modelPool only), never a default, never a judge until
+ * (an exact list, an agreed set, or a pick) once they're open (newModelsOpen, below; the owner's own sessions before
+ * that), while their price is at or under the dearest model those tiers already take (newModelPriceProblem). They're
+ * never drawn ("rotate" draws from modelPool only), never a default, never a judge until
  * a judge trial puts them in TRIALED_JUDGES, and in this version never on the multi-part tiers.
  */
 export const DEFAULT_NEW_MODELS = "google/gemini-4-carbon,google/gemini-4-neon,google/gemini-4-hydrogen,google/gemini-3.8-flash";
@@ -237,6 +238,14 @@ export function newModels(env: { NEW_MODELS?: string }): string[] {
   return splitModels(env.NEW_MODELS ?? DEFAULT_NEW_MODELS);
 }
 export const isNewModel = (env: { NEW_MODELS?: string }, model: string) => newModels(env).includes(model);
+/**
+ * New models ship switched off: until NEW_MODELS_ENABLED is exactly "true" (its own deploy, after the trials), a public
+ * or free request that names one is refused before payment. While it's off, only a team-allowance call (the owner's own
+ * sessions, /team/review and /team/review-3) may name one: that is how the trials run.
+ */
+export const newModelsOpen = (env: { NEW_MODELS_ENABLED?: string }) => env.NEW_MODELS_ENABLED === "true";
+export const newModelsNotOpen = (models: string[]) =>
+  `${models.join(", ")} ${models.length > 1 ? "are new models that aren't" : "is a new model that isn't"} open yet: the service is trying ${models.length > 1 ? "them" : "it"} first. GET /reviewers lists new_models and says when they open.`;
 /** New models that passed a judge trial (its yes adds each one): the only new models that may judge. */
 export function trialedJudges(env: { TRIALED_JUDGES?: string }): string[] {
   return splitModels(env.TRIALED_JUDGES);

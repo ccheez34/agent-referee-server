@@ -1,18 +1,21 @@
 // New models (src/judge.ts NEW_MODELS; PLAN revision 4 of the panels' new models, with 2.0's five points): a model from
 // a company already in the pool, too new for a record here. A request may name it on review and review-3 while its price
 // is at or under the dearest model those tiers already take; it's never drawn, never a default, never a judge until a
-// judge trial lists it, and not taken on the multi-part tiers. Bad settings stop the service, with the entry named.
+// judge trial lists it, and not taken on the multi-part tiers. It ships switched off: until NEW_MODELS_ENABLED is "true"
+// only a team-allowance call may name one. Bad settings stop the service, with the entry named.
 // The price table (src/prices.ts) has dated rows, and the multi-part reviews' two cost measures are checked against the
 // prices on each day it knows a change. Route tests need the installed dependencies, as in routes.test.ts.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { MatchRoom } from "../src/match.ts";
-import { Health } from "../src/health.ts";
+import { Health, _resetHealthCaches } from "../src/health.ts";
+import { Gate } from "../src/gate.ts";
+import { Ledger } from "../src/ledger.ts";
 import { _clearSnapshots } from "../src/gateclient.ts";
 import { randomToken } from "../src/logic.ts";
 import {
   DEFAULT_MODEL_POOL, DEFAULT_NEW_MODELS, DEFAULT_OPT_IN_MODELS, allowedModels, choosePanel, companyOf, defaultJudgeModels, isNewModel, judgeAllowed, judgePool, judgeTierClosed,
-  modelPool, newModelPriceProblem, newModels, newUntrialed, optInModels, trialedJudges,
+  modelPool, newModelPriceProblem, newModels, newModelsNotOpen, newModelsOpen, newUntrialed, optInModels, trialedJudges,
 } from "../src/judge.ts";
 import { defaultModelsBySetting, newModelsProblems } from "../src/settings.ts";
 import { DEFAULT_REVIEW_3_MODELS, reviewCommitment, reviewModels } from "../src/review.ts";
@@ -41,6 +44,10 @@ const MISTRAL = "mistralai/mistral-large-4-0", KIMI = "moonshotai/kimi-k3";
 const NEW = [CARBON, NEON, HYDROGEN, FLASH38];
 /** The judge settings wrangler.jsonc ships (as in judge-no-claude.test.ts). */
 const SHIPPED = { JUDGE_MODEL: FLASH, JUDGE_MODEL_POOL: [LUNA, ARGON, FLASH].join(","), JUDGE_EXCLUDE: MISTRAL, PANEL_2_MODELS: [LUNA, ARGON].join(","), PANEL_3_MODELS: [LUNA, FLASH].join(","), REVIEW_3_MODELS: [OPUS, LUNA, FLASH].join(",") };
+
+/** New models open to every caller (the switch on), and a team-allowance caller (who may name one while it's off). */
+const OPEN = { NEW_MODELS_ENABLED: "true" };
+const TEAM_CALL = { team: true };
 
 const at = (iso: string) => Date.parse(iso);
 const NOV_24 = at("2026-11-24T12:00:00Z");
@@ -84,20 +91,44 @@ test("new models: the default list is Carbon, Neon, Hydrogen and 3.8 Flash; NEW_
   assert.deepEqual(newModelsProblems(SHIPPED), []);
 });
 
-test("new models: a request may name one on review and review-3 (an exact list, an agreed set), and the receipt's selection says so", async () => {
+test("new models, once open: a request may name one on review and review-3 (an exact list, an agreed set), and the receipt's selection says so", async () => {
   for (const m of NEW) {
     assert.ok(allowedModels({}).includes(m));
-    const one = await reviewCommitment("review", {}, [m], undefined, 0, NOV_24);
+    const one = await reviewCommitment("review", OPEN, [m], undefined, 0, NOV_24);
     assert.deepEqual(one.models, [m]);
     assert.equal(one.panel_selection?.mode, "custom");
-    const three = await reviewCommitment("review-3", {}, [OPUS, LUNA, m], undefined, 0, NOV_24);
+    const three = await reviewCommitment("review-3", OPEN, [OPUS, LUNA, m], undefined, 0, NOV_24);
     assert.deepEqual(three.models, [OPUS, LUNA, m]);
   }
-  const set = await reviewCommitment("review-3", {}, [[SONNET, LUNA, NEON], [OPUS, LUNA, HYDROGEN]], () => 0.99, 0, NOV_24);
+  const set = await reviewCommitment("review-3", OPEN, [[SONNET, LUNA, NEON], [OPUS, LUNA, HYDROGEN]], () => 0.99, 0, NOV_24);
   assert.deepEqual(set.models, [OPUS, LUNA, HYDROGEN]);
   assert.equal(set.panel_selection?.mode, "random_set");
-  // With new models off, naming one is refused as outside the pool, as before this change.
-  await assert.rejects(reviewCommitment("review", { NEW_MODELS: "" }, [NEON], undefined, 0, NOV_24), /Not in the approved model pool: google\/gemini-4-neon/);
+  // With new models off altogether (NEW_MODELS ""), naming one is refused as outside the pool, as before this change.
+  await assert.rejects(reviewCommitment("review", { ...OPEN, NEW_MODELS: "" }, [NEON], undefined, 0, NOV_24), /Not in the approved model pool: google\/gemini-4-neon/);
+});
+
+test("new models ship switched off: until NEW_MODELS_ENABLED is exactly \"true\", only a team-allowance call may name one", async () => {
+  assert.equal(newModelsOpen({}), false);
+  assert.equal(newModelsOpen(OPEN), true);
+  for (const v of ["TRUE", "True", "1", "yes", "on", " true", "false", ""]) assert.equal(newModelsOpen({ NEW_MODELS_ENABLED: v }), false, JSON.stringify(v));
+  for (const env of [{}, { NEW_MODELS_ENABLED: "false" }, { NEW_MODELS_ENABLED: "TRUE" }, { NEW_MODELS_ENABLED: "1" }]) {
+    // A public (or free) request: refused, with the reason, in every panel form that names one.
+    await assert.rejects(reviewCommitment("review", env, [NEON], undefined, 0, NOV_24), /^Error: google\/gemini-4-neon is a new model that isn't open yet: the service is trying it first\. GET \/reviewers lists new_models and says when they open\.$/);
+    await assert.rejects(reviewCommitment("review-3", env, [OPUS, LUNA, CARBON], undefined, 0, NOV_24), /google\/gemini-4-carbon is a new model that isn't open yet/);
+    await assert.rejects(reviewCommitment("review-3", env, [OPUS, LUNA, HYDROGEN], undefined, 0, NOV_24, {}), /isn't open yet/);
+    await assert.rejects(reviewCommitment("review-3", env, [OPUS, LUNA, HYDROGEN], undefined, 0, NOV_24, { team: false }), /isn't open yet/);
+    // An agreed set that names one is refused whichever set the draw would take: every named model is checked.
+    for (const r of [0, 0.5, 0.99])
+      await assert.rejects(reviewCommitment("review-3", env, [[SONNET, LUNA, ARGON], [OPUS, LUNA, HYDROGEN], [OPUS, LUNA, FLASH38]], () => r, 0, NOV_24), /google\/gemini-4-hydrogen, google\/gemini-3\.8-flash are new models that aren't open yet: the service is trying them first/);
+    // A team-allowance call (the owner's own sessions): taken, for the trials.
+    for (const m of NEW) assert.deepEqual((await reviewCommitment("review-3", env, [OPUS, LUNA, m], undefined, 0, NOV_24, TEAM_CALL)).models, [OPUS, LUNA, m]);
+    assert.deepEqual((await reviewCommitment("review", env, [NEON], undefined, 0, NOV_24, TEAM_CALL)).models, [NEON]);
+    // Requests that name none are as before, for everyone.
+    assert.deepEqual((await reviewCommitment("review-3", env, [OPUS, LUNA, ARGON], undefined, 0, NOV_24)).models, [OPUS, LUNA, ARGON]);
+    assert.deepEqual((await reviewCommitment("review-3", env, undefined, undefined, 0, NOV_24)).models, [OPUS, LUNA, FLASH]);
+    assert.equal((await reviewCommitment("review-3", env, "rotate", undefined, 0, NOV_24)).models.length, 3);
+  }
+  assert.equal(newModelsNotOpen([NEON]), "google/gemini-4-neon is a new model that isn't open yet: the service is trying it first. GET /reviewers lists new_models and says when they open.");
 });
 
 test("new models: never drawn (the draw's candidates are the pool alone, checked on the candidate list) and never a default", async () => {
@@ -252,6 +283,13 @@ test("new models: one judges only once TRIALED_JUDGES lists it, and then only wh
   assert.match(dear.body.error, /google\/gemini-4-neon isn't taken on judge-2 for now: its price \(\$3 \/ \$15 per million tokens \(input \/ output\)\) is above the dearest model this tier already takes \(\$2 \/ \$10\)/);
   const later = await atTime(DEC_1, () => create(w, { tier: "judge-2", panel: [LUNA, NEON] }));
   assert.equal(later.status, 201, JSON.stringify(later.body));
+  // Every named model is checked, not only a drawn set: agreed sets with one too-dear judge are refused every time
+  // (30 tries: a check of the drawn set alone would let about half of them through).
+  for (let i = 0; i < 30; i++) {
+    const sets = await atTime(NOV_24, () => create(w, { tier: "judge-2", panel: [[LUNA, ARGON], [LUNA, NEON]] }));
+    assert.equal(sets.status, 400, JSON.stringify(sets.body));
+    assert.match(sets.body.error, /google\/gemini-4-neon isn't taken on judge-2 for now/);
+  }
   // A default that names an untrialed new model can't be reached (the settings check stops the service); the tier's own
   // rule closes it too.
   assert.match(String(judgeTierClosed({ ...SHIPPED, JUDGE_MODEL: NEON }, "judge")), /hasn't passed its judge trial/);
@@ -295,7 +333,7 @@ test("the money rule on review and review-3: a new model is taken while its pric
   const DEAR = "google/stand-in-dear";
   for (const [i, o] of [[4, 25], [5, 20], [5, 25]]) {
     await withPrice(DEAR, [{ from: "2026-11-01", in: i, out: o, source: "test" }], async () => {
-      const env = { NEW_MODELS: DEAR };
+      const env = { ...OPEN, NEW_MODELS: DEAR };
       assert.deepEqual(newModelsProblems(env), []);
       assert.match(String(newModelPriceProblem(env, DEAR, "review-3", NOV_24)), new RegExp(`its price \\(\\$${i} / \\$${o} per million tokens \\(input / output\\)\\) is above the dearest model this tier already takes \\(\\$4 / \\$20\\)`));
       await assert.rejects(reviewCommitment("review-3", env, [OPUS, LUNA, DEAR], undefined, 0, NOV_24), /google\/stand-in-dear isn't taken on review-3 for now: its price/);
@@ -305,9 +343,13 @@ test("the money rule on review and review-3: a new model is taken while its pric
   // On the day: a stand-in at $2 / $10 that doubles to $5 / $25 is taken the day before and refused from its day.
   const RISES = "google/stand-in-rises";
   await withPrice(RISES, [{ from: "2026-11-01", in: 2, out: 10, source: "test" }, { from: "2026-12-01", in: 5, out: 25, source: "test" }], async () => {
-    const env = { NEW_MODELS: RISES };
+    const env = { ...OPEN, NEW_MODELS: RISES };
     assert.deepEqual((await reviewCommitment("review", env, [RISES], undefined, 0, at("2026-11-30T23:59:59Z"))).models, [RISES]);
     await assert.rejects(reviewCommitment("review", env, [RISES], undefined, 0, DEC_1), /isn't taken on review for now: its price \(\$5 \/ \$25/);
+    // The money rule binds a team-allowance call too (with the switch off), and every named model, not only a drawn set.
+    await assert.rejects(reviewCommitment("review", { NEW_MODELS: RISES }, [RISES], undefined, 0, DEC_1, TEAM_CALL), /isn't taken on review for now: its price/);
+    for (const r of [0, 0.99])
+      await assert.rejects(reviewCommitment("review-3", env, [[OPUS, LUNA, ARGON], [OPUS, LUNA, RISES]], () => r, 0, DEC_1), /google\/stand-in-rises isn't taken on review-3 for now/);
   });
   // No price that day: refused (an unknown cost is never taken).
   await withPrice(RISES, [{ from: "2026-11-01", until: "2026-12-01", in: 2, out: 10, source: "test" }], async () => {
@@ -325,7 +367,10 @@ routeTest("new models: the routes list them (GET /reviewers and GET /judge), eac
   const env = { ...keys, ...SHIPPED };
   const r = await (await app.fetch(new Request("https://x/reviewers"), env, ctx)).json();
   assert.deepEqual(r.new_models, NEW);
+  assert.equal(r.new_models_open, false, "shipped switched off");
+  assert.match(r.new_models_note, /While new_models_open is false they aren't offered yet: the service is trying them first, and a request that names one is refused before payment\./);
   assert.match(r.new_models_note, /never drawn by "rotate" and never a default, don't judge until they pass a judge trial, and aren't taken on the multi-part tiers/);
+  assert.equal((await (await app.fetch(new Request("https://x/reviewers"), { ...env, ...OPEN }, ctx)).json()).new_models_open, true);
   for (const m of NEW) assert.ok(!r.model_pool.includes(m) && !r.opt_in_models.includes(m), `${m} in another list`);
   assert.deepEqual(r.opt_in_models, optInModels({}), "opt_in_models keeps its form");
   const j = await (await app.fetch(new Request("https://x/judge"), env, ctx)).json();
@@ -337,6 +382,81 @@ routeTest("new models: the routes list them (GET /reviewers and GET /judge), eac
   assert.ok(!trialed.opt_in_models.includes(HYDROGEN) && !trialed.model_pool.includes(HYDROGEN));
   const off = await (await app.fetch(new Request("https://x/reviewers"), { ...env, NEW_MODELS: "" }, ctx)).json();
   assert.deepEqual(off.new_models, []);
+});
+
+// ---------- shipped switched off: the routes ----------
+
+/** A whole service for route tests, as in routes.test.ts: fake AI answers, no payments, its own storage. */
+function memFull() {
+  const d = new Map<string, unknown>();
+  return { storage: { async get(k: string) { return structuredClone(d.get(k)); }, async put(k: string, v: unknown) { d.set(k, structuredClone(v)); }, async delete(k: any) { for (const x of [k].flat()) d.delete(x); return true; }, async list(o: { prefix?: string } = {}) { return new Map([...d.keys()].filter((k) => k.startsWith(o.prefix ?? "")).sort().map((k) => [k, structuredClone(d.get(k))])); }, async deleteAll() { d.clear(); }, async setAlarm() {} } };
+}
+const TEAM_TOKEN = "t".repeat(40);
+function service(extra: Record<string, unknown> = {}) {
+  _clearSnapshots();
+  _resetHealthCaches();
+  const e: any = {
+    ...keys, ...SHIPPED,
+    PAY_TO: "0x0000000000000000000000000000000000000001", NETWORK: "base-sepolia", PAYMENTS_ENABLED: "false", STAGING: "true",
+    FAKE_AI: "true", FAKE_AI_DELAY_MS: "1-5", ANTHROPIC_API_KEY: "fake", OPENROUTER_API_KEY: "fake",
+    FREE_REVIEW_DAILY_BUDGET_USD: "3.00",
+    TEAM_TOKEN, TEAM_MEMBERS: "1.0,2.0,3.0,4.0,5.0", TEAM_MEMBER_DAILY_USD: "5.00", TEAM_DAILY_USD: "8.00",
+    GATES: ns(() => new Gate(memFull() as any)),
+    HEALTH: ns(() => new Health(memFull() as any)),
+    ...extra,
+  };
+  e.LEDGER = ns(() => new Ledger(memFull() as any, e));
+  e.MATCHES = ns(() => new MatchRoom(memFull() as any, e));
+  return e;
+}
+const post = async (e: any, path: string, body: unknown, headers: Record<string, string> = {}) => {
+  const res = await app.fetch(new Request(`https://x${path}`, { method: "POST", headers: { "content-type": "application/json", "cf-connecting-ip": "203.0.113.7", ...headers }, body: JSON.stringify(body) }), e, ctx);
+  return { status: res.status, body: (await res.json().catch(() => null)) as any };
+};
+const asTeam = { "x-team-token": TEAM_TOKEN, "x-team-member": "5.0" };
+const WORK = { task: "Add 2 and 2 and give only the number.", output: "4" };
+
+routeTest("shipped switched off, on the routes: a public or free request naming a new model is refused before anything runs; a team-allowance call runs it; the switch opens it", async () => {
+  const off = service();
+  // Public, paid route: refused before payment and before any AI call, with the reason.
+  for (const [path, panel] of [["/review", [NEON]], ["/review-3", [OPUS, LUNA, CARBON]], ["/review-3", [[OPUS, LUNA, ARGON], [OPUS, LUNA, HYDROGEN]]]] as const) {
+    const r = await post(off, path, { ...WORK, panel });
+    assert.equal(r.status, 400, `${path}: ${JSON.stringify(r.body)}`);
+    assert.match(r.body.error, /new model that isn't open yet: the service is trying it first\. GET \/reviewers lists new_models and says when they open\. Nothing was charged\.$/);
+  }
+  // Free route: the same, and the free review isn't used up.
+  const free = await post(off, "/free/review", { ...WORK, panel: [NEON] });
+  assert.equal(free.status, 400, JSON.stringify(free.body));
+  assert.match(free.body.error, /google\/gemini-4-neon is a new model that isn't open yet.* Your free review wasn't used\.$/);
+  // The hosted MCP server's route follows the public rule too (it's off here: no INTERNAL_TOKEN), so nothing to name.
+  // The same service still serves requests that name none.
+  assert.equal((await post(off, "/review", WORK)).status, 200);
+  // A team-allowance call: it runs, the new model sits where it was named, and the receipt says so.
+  for (const m of NEW) {
+    const t = await post(off, "/team/review-3", { ...WORK, panel: [OPUS, LUNA, m] }, asTeam);
+    assert.equal(t.status, 200, `${m}: ${JSON.stringify(t.body).slice(0, 300)}`);
+    assert.deepEqual(t.body.receipt.payload.reviewers.models, [OPUS, LUNA, m]);
+    assert.equal(t.body.receipt.payload.funding, "team");
+    assert.equal(t.body.receipt.payload.votes[2].model, m);
+  }
+  const solo = await post(off, "/team/review", { ...WORK, panel: [HYDROGEN] }, asTeam);
+  assert.equal(solo.status, 200, JSON.stringify(solo.body).slice(0, 300));
+  assert.deepEqual(solo.body.receipt.payload.reviewers.models, [HYDROGEN]);
+  // A team token that doesn't match never opens it (401, as for any team call).
+  assert.equal((await post(off, "/team/review", { ...WORK, panel: [NEON] }, { "x-team-token": "x".repeat(40), "x-team-member": "5.0" })).status, 401);
+  // The team's multi-part routes refuse a new model like anyone's (not taken on those tiers at all).
+  const pieces = [{ text: "piece one" }, { text: "piece two" }];
+  const multi = await post(service({ MULTI_PART_ENABLED: "true" }), "/team/review-3x2", { task: WORK.task, pieces, panel: [SONNET, LUNA, NEON] }, asTeam);
+  assert.equal(multi.status, 400, JSON.stringify(multi.body).slice(0, 300));
+  assert.match(multi.body.error, /Not eligible for multi-part reviews: google\/gemini-4-neon/);
+  // Switched on (its own deploy): the public and the free routes take it.
+  const on = service(OPEN);
+  const open = await post(on, "/review-3", { ...WORK, panel: [OPUS, LUNA, NEON] });
+  assert.equal(open.status, 200, JSON.stringify(open.body).slice(0, 300));
+  assert.deepEqual(open.body.receipt.payload.reviewers.models, [OPUS, LUNA, NEON]);
+  assert.equal((await post(on, "/free/review", { ...WORK, panel: [NEON] })).status, 200);
+  // "TRUE" isn't "true": still off.
+  assert.equal((await post(service({ NEW_MODELS_ENABLED: "TRUE" }), "/review", { ...WORK, panel: [NEON] })).status, 400);
 });
 
 // ---------- the multi-part tiers ----------

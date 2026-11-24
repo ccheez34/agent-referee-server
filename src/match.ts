@@ -410,8 +410,9 @@ export class MatchRoom {
           if (e instanceof PanelShortError) return bad(503, `${tier} is closed for now: ${e.message}`);
           return bad(400, String(e?.message ?? e));
         }
-        // A trialed new model judges only while its price is at or under the dearest model of the judges' pool.
-        for (const m of picked.models) {
+        // A trialed new model judges only while its price is at or under the dearest model of the judges' pool (every
+        // model the request names is checked, not only a drawn set).
+        for (const m of new Set(namedModels(input.panel))) {
           const why = newModelPriceProblem(this.env, m, tier, Date.now(), judgePool(this.env));
           if (why) return bad(400, why);
         }
