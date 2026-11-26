@@ -5,7 +5,9 @@ import { Health, _resetHealthCaches } from "../src/health.ts";
 import { Ledger } from "../src/ledger.ts";
 import { MatchRoom } from "../src/match.ts";
 import { _clearSnapshots } from "../src/gateclient.ts";
-import { NOTICE_VERSION } from "../src/consent.ts";
+import { NOTICE_VERSION, listedCompanies } from "../src/consent.ts";
+import { allowedModels, companyOf, judgeAllowed } from "../src/judge.ts";
+import { readFile } from "node:fs/promises";
 import { canonicalJson } from "../src/review.ts";
 
 let app: any = null;
@@ -55,7 +57,6 @@ function env(extra: Record<string, unknown> = {}) {
   e.MATCHES = ns(() => new MatchRoom(mem() as any, e));
   return e;
 }
-const PAUSED = {};
 const ctx = { waitUntil() {}, passThroughOnException() {} };
 const raw = (e: any, path: string, body?: unknown, headers: Record<string, string> = {}) =>
   app.fetch(new Request(`https://x${path}`, body === undefined ? { headers } : { method: "POST", headers: { "content-type": "application/json", "cf-connecting-ip": "203.0.113.7", "cf-ipcountry": "US", ...headers }, body: JSON.stringify(body) }), e, ctx);
@@ -182,4 +183,69 @@ t("GET /consent and GET /reviewers tell an agent the version before it sends any
   assert.equal(rv.body.consent.version, V);
   assert.equal(rv.body.consent.required, true);
   assert.equal((await call(env(), "/consent")).body.required, false);
+});
+
+t("round 1 (Sonnet, Luna): the routes the first tests missed, each answers 428 first, and with payments on never 402", async () => {
+  const e = env({ ...ON, PAYMENTS_ENABLED: "true", ADMIN_TOKEN: "a".repeat(40) });
+  const three = { task: "Three pieces.", pieces: [{ text: "a" }, { text: "b" }, { text: "c" }] };
+  for (const [path, b, h] of [
+    ["/review-3x3", three, {}],
+    ["/review-3x3", three, { "x-payment": "e30=" }],
+    ["/team/review-3", review, team],
+    ["/team/review-3x3", three, team],
+  ] as const) isNotice(await call(e, path, b, h as any), path);
+  // a paid judge seat and judge-match creation, with payments on: the notice, never a payment request
+  const off = env({ ...ON, CONSENT_REQUIRED: "false" });
+  const m = await call(off, "/matches", { tier: "judge-3", seats: ["a", "b"], rules: "Pick the shorter answer." });
+  assert.equal(m.status, 201, JSON.stringify(m.body).slice(0, 200));
+  const on = { ...off, CONSENT_REQUIRED: "true", PAYMENTS_ENABLED: "true" };
+  const seat = await call(on, "/join/judge-3", { match_id: m.body.match_id ?? m.body.id, seat: "a" });
+  isNotice(seat, "a paid judge seat with payments on");
+  const seatPaid = await call(on, "/join/judge-3", { match_id: m.body.match_id ?? m.body.id, seat: "a" }, { "x-payment": "e30=" });
+  isNotice(seatPaid, "a paid judge seat with a payment header");
+  isNotice(await call(on, "/matches", { tier: "judge-3", seats: ["a", "b"], rules: "Pick the shorter answer." }), "judge-match creation with payments on");
+  // with consent, the same seat goes on to the paywall
+  assert.equal((await call(on, "/join/judge-3", { match_id: m.body.match_id ?? m.body.id, seat: "a" }, { "x-consent": V })).status, 402);
+});
+
+t("round 1: the hosted MCP server's free route asks too, and takes the header tag", async () => {
+  const e = env({ ...ON, INTERNAL_TOKEN: "i".repeat(40), EXT_FREE_DAILY_BUDGET_USD: "3.00" });
+  const h = { "x-internal-auth": "i".repeat(40), "x-caller-id": "chatgpt-user-1" };
+  isNotice(await call(e, "/internal/free/review", review, h), "/internal/free/review");
+  isNotice(await call(e, "/internal/free/review-3", review, h), "/internal/free/review-3");
+  const ok = await call(e, "/internal/free/review", review, { ...h, "x-consent": V });
+  assert.notEqual(ok.status, 428, JSON.stringify(ok.body).slice(0, 200));
+});
+
+t("round 1: tiers with no AI never ask (rps, weighted, draw), and with consent off the match routes are unchanged", async () => {
+  const e = env(ON);
+  assert.equal((await call(e, "/matches", { tier: "weighted", seats: ["a", "b"], weights: { a: 1, b: 1 } })).status, 201);
+  assert.equal((await call(e, "/matches", { tier: "draw", seats: ["a", "b"], options: ["x", "y"] })).status, 201);
+  const off = env();
+  const m = await call(off, "/matches", { tier: "judge-3", seats: ["a", "b"], rules: "Pick the shorter answer." });
+  assert.equal(m.status, 201);
+  assert.equal((await call(off, "/join/judge-3", { match_id: m.body.match_id ?? m.body.id, seat: "a" })).status, 200);
+});
+
+t("round 1: the header tag works on matches, seats and guests too", async () => {
+  const e = env(ON);
+  const h = { "x-consent": V };
+  const inv = await call(e, "/matches", { tier: "judge-3", seats: ["a", "b"], rules: "Pick the shorter answer.", host_pays: "a" }, h);
+  assert.equal(inv.status, 201, JSON.stringify(inv.body).slice(0, 200));
+  const iid = inv.body.match_id ?? inv.body.id;
+  const host = await call(e, "/host/join/judge-3", { match_id: iid, seat: "a" }, h);
+  assert.equal(host.status, 200, JSON.stringify(host.body).slice(0, 200));
+  const token = host.body.invite?.invite_token ?? inv.body.invite?.invite_token;
+  assert.equal((await call(e, "/invite/join", { match_id: iid, invite_token: token, seat: "b" }, h)).status, 200);
+});
+
+t("round 1 (Sonnet): every company a model may come from is named in the notice, for the defaults and wrangler.jsonc", async () => {
+  const src = await readFile(new URL("../wrangler.jsonc", import.meta.url), "utf8");
+  const vars: Record<string, string> = {};
+  for (const m of src.matchAll(/"([A-Z_]+)":\s*"([^"]*)"/g)) if (!(m[1] in vars)) vars[m[1]] = m[2];
+  for (const env of [{}, vars]) {
+    const models = [...allowedModels(env), ...judgeAllowed(env as any)];
+    const missing = [...new Set(models.map(companyOf))].filter((k) => !listedCompanies().includes(k));
+    assert.deepEqual(missing, [], "add these companies to consent.ts COMPANIES (and bump NOTICE_VERSION)");
+  }
 });

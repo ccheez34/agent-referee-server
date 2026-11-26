@@ -16,7 +16,14 @@ const COMPANIES: Record<string, { name: string; based: string }> = {
   openai: { name: "OpenAI", based: "United States" },
   google: { name: "Google", based: "United States" },
   deepseek: { name: "DeepSeek", based: "China" },
+  mistralai: { name: "Mistral AI", based: "France" },
+  qwen: { name: "Alibaba Cloud (Qwen)", based: "China" },
+  moonshotai: { name: "Moonshot AI", based: "China" },
+  "z-ai": { name: "Zhipu AI (Z.ai)", based: "China" },
 };
+/** Every company a model of the service may come from must be listed above (test/consent.test.ts checks the defaults
+ * and wrangler.jsonc); an unlisted one still shows, by its OpenRouter name, so nothing is hidden. */
+export const listedCompanies = () => Object.keys(COMPANIES);
 
 /** What Agent Referee itself keeps (src/review.ts reviewPayload: hashes only; src/match.ts: delete_at, 7 days). */
 export const SERVICE_KEEPING =
@@ -41,7 +48,7 @@ export function companiesFor(models: string[]) {
   const seen = new Map<string, { company: string; based: string }>();
   for (const m of models) {
     const k = companyOf(m);
-    const co = COMPANIES[k] ?? { name: k, based: "unknown" };
+    const co = COMPANIES[k] ?? { name: k, based: "not listed in this notice: see that company's own terms" };
     if (!seen.has(k)) seen.set(k, { company: co.name, based: co.based });
   }
   return [...seen.values()];

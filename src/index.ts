@@ -666,6 +666,7 @@ async function judgeJoinGuard(c: any, next: any) {
   if (models.length) {
     const consent = consentCheck(c, body, models, "Nothing was charged.");
     if (consent) return consent;
+    c.set("consent", consentTag(c, body));
   }
   // A match committed to a Claude judge before Claude judges were switched off is never judged (match.ts,
   // startJudging), so nobody new pays to join it (judge-tier spec v2.1, §7). If its status can't be read right now,
