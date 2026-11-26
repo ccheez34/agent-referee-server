@@ -5,7 +5,8 @@ import { Health, _resetHealthCaches } from "../src/health.ts";
 import { Ledger } from "../src/ledger.ts";
 import { MatchRoom } from "../src/match.ts";
 import { _clearSnapshots } from "../src/gateclient.ts";
-import { NOTICE_VERSION, listedCompanies } from "../src/consent.ts";
+import { NOTICE_VERSION, consentCheck, listedCompanies, noticeText } from "../src/consent.ts";
+import { createHash } from "node:crypto";
 import { allowedModels, companyOf, judgeAllowed } from "../src/judge.ts";
 import { readFile } from "node:fs/promises";
 import { canonicalJson } from "../src/review.ts";
@@ -185,7 +186,7 @@ t("GET /consent and GET /reviewers tell an agent the version before it sends any
   assert.equal((await call(env(), "/consent")).body.required, false);
 });
 
-t("round 1 (Sonnet, Luna): the routes the first tests missed, each answers 428 first, and with payments on never 402", async () => {
+t("review-3x3, team review-3 and -3x3, paid judge seats and judge-match creation: 428 first, and with payments on never 402", async () => {
   const e = env({ ...ON, PAYMENTS_ENABLED: "true", ADMIN_TOKEN: "a".repeat(40) });
   const three = { task: "Three pieces.", pieces: [{ text: "a" }, { text: "b" }, { text: "c" }] };
   for (const [path, b, h] of [
@@ -208,16 +209,18 @@ t("round 1 (Sonnet, Luna): the routes the first tests missed, each answers 428 f
   assert.equal((await call(on, "/join/judge-3", { match_id: m.body.match_id ?? m.body.id, seat: "a" }, { "x-consent": V })).status, 402);
 });
 
-t("round 1: the hosted MCP server's free route asks too, and takes the header tag", async () => {
+t("the hosted MCP server's free route asks too, before its allowance, and takes the header tag into the receipt", async () => {
   const e = env({ ...ON, INTERNAL_TOKEN: "i".repeat(40), EXT_FREE_DAILY_BUDGET_USD: "3.00" });
   const h = { "x-internal-auth": "i".repeat(40), "x-caller-id": "chatgpt-user-1" };
   isNotice(await call(e, "/internal/free/review", review, h), "/internal/free/review");
-  isNotice(await call(e, "/internal/free/review-3", review, h), "/internal/free/review-3");
-  const ok = await call(e, "/internal/free/review", review, { ...h, "x-consent": V });
-  assert.notEqual(ok.status, 428, JSON.stringify(ok.body).slice(0, 200));
+  // asked several times over: the caller's one free review-3 of the day is still there afterwards
+  for (let i = 0; i < 4; i++) isNotice(await call(e, "/internal/free/review-3", review, h), "/internal/free/review-3");
+  const ok = await call(e, "/internal/free/review-3", review, { ...h, "x-consent": V });
+  assert.equal(ok.status, 200, JSON.stringify(ok.body).slice(0, 200));
+  assert.equal(ok.body.receipt.payload.consent_version, V);
 });
 
-t("round 1: tiers with no AI never ask (rps, weighted, draw), and with consent off the match routes are unchanged", async () => {
+t("tiers with no AI never ask (rps, weighted, draw), and with consent off the match routes are unchanged", async () => {
   const e = env(ON);
   assert.equal((await call(e, "/matches", { tier: "weighted", seats: ["a", "b"], weights: { a: 1, b: 1 } })).status, 201);
   assert.equal((await call(e, "/matches", { tier: "draw", seats: ["a", "b"], options: ["x", "y"] })).status, 201);
@@ -227,7 +230,7 @@ t("round 1: tiers with no AI never ask (rps, weighted, draw), and with consent o
   assert.equal((await call(off, "/join/judge-3", { match_id: m.body.match_id ?? m.body.id, seat: "a" })).status, 200);
 });
 
-t("round 1: the header tag works on matches, seats and guests too", async () => {
+t("the header tag works on matches, seats and guests too", async () => {
   const e = env(ON);
   const h = { "x-consent": V };
   const inv = await call(e, "/matches", { tier: "judge-3", seats: ["a", "b"], rules: "Pick the shorter answer.", host_pays: "a" }, h);
@@ -239,7 +242,7 @@ t("round 1: the header tag works on matches, seats and guests too", async () => 
   assert.equal((await call(e, "/invite/join", { match_id: iid, invite_token: token, seat: "b" }, h)).status, 200);
 });
 
-t("round 1 (Sonnet): every company a model may come from is named in the notice, for the defaults and wrangler.jsonc", async () => {
+t("every company a model may come from is named in the notice, for the defaults and wrangler.jsonc", async () => {
   const src = await readFile(new URL("../wrangler.jsonc", import.meta.url), "utf8");
   const vars: Record<string, string> = {};
   for (const m of src.matchAll(/"([A-Z_]+)":\s*"([^"]*)"/g)) if (!(m[1] in vars)) vars[m[1]] = m[2];
@@ -248,4 +251,35 @@ t("round 1 (Sonnet): every company a model may come from is named in the notice,
     const missing = [...new Set(models.map(companyOf))].filter((k) => !listedCompanies().includes(k));
     assert.deepEqual(missing, [], "add these companies to consent.ts COMPANIES (and bump NOTICE_VERSION)");
   }
+});
+
+t("a 428 leaves the team allowance untouched", async () => {
+  const e = env(ON);
+  const before = (await call(e, "/team/allowance", undefined, team)).body.team;
+  for (let i = 0; i < 3; i++) isNotice(await call(e, "/team/review-3", review, team), "team review-3");
+  const after = (await call(e, "/team/allowance", undefined, team)).body.team;
+  assert.deepEqual(after, before);
+});
+
+t("GET /consent covers the opt-in and new models agents may name, not only the pool", async () => {
+  const nb = (await call(env(ON), "/consent")).body;
+  assert.ok(nb.models.includes("deepseek/deepseek-v4-pro-0813"), "an opt-in model");
+  assert.ok(nb.models.includes("google/gemini-4-neon"), "a new model");
+  assert.ok(nb.read_by.some((x: any) => x.company === "DeepSeek"));
+});
+
+t("a panel with a model from a company the notice doesn't name is refused, never sent under the notice", () => {
+  const c = { env: { CONSENT_REQUIRED: "true" }, req: { header: () => V } };
+  const r = consentCheck(c, { consent: V }, ["claude-sonnet-5-5", "acme/model-1"], "Nothing was charged.");
+  assert.ok(r, "refused");
+  assert.equal(r!.status, 503);
+  assert.equal(consentCheck(c, { consent: V }, ["claude-sonnet-5-5", "openai/gpt-6-luna"], ""), null);
+});
+
+// The notice's text is pinned to its version: change the companies or the words, and this fails until NOTICE_VERSION
+// is bumped and the new version's fingerprint added here (so everyone is asked again).
+const NOTICE_FINGERPRINTS: Record<string, string> = { "2026-11-30.1": "ef6e91f0b7b272f917875954abc3934b807f167203023838a5abbc5b2e206a1d" };
+t("the notice's text can't change without a new NOTICE_VERSION", () => {
+  const sha = createHash("sha256").update(noticeText()).digest("hex");
+  assert.equal(NOTICE_FINGERPRINTS[V], sha, `notice text changed: bump NOTICE_VERSION and pin "${sha}" for the new version`);
 });

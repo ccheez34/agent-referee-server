@@ -22,7 +22,7 @@ const COMPANIES: Record<string, { name: string; based: string }> = {
   "z-ai": { name: "Zhipu AI (Z.ai)", based: "China" },
 };
 /** Every company a model of the service may come from must be listed above (test/consent.test.ts checks the defaults
- * and wrangler.jsonc); an unlisted one still shows, by its OpenRouter name, so nothing is hidden. */
+ * and wrangler.jsonc); a call whose panel has an unlisted one is refused (consentCheck), never sent under this notice. */
 export const listedCompanies = () => Object.keys(COMPANIES);
 
 /** What Agent Referee itself keeps (src/review.ts reviewPayload: hashes only; src/match.ts: delete_at, 7 days). */
@@ -48,7 +48,7 @@ export function companiesFor(models: string[]) {
   const seen = new Map<string, { company: string; based: string }>();
   for (const m of models) {
     const k = companyOf(m);
-    const co = COMPANIES[k] ?? { name: k, based: "not listed in this notice: see that company's own terms" };
+    const co = COMPANIES[k] ?? { name: k, based: "not listed" };
     if (!seen.has(k)) seen.set(k, { company: co.name, based: co.based });
   }
   return [...seen.values()];
@@ -66,12 +66,23 @@ export function notice(models: string[]) {
   };
 }
 
+/** The notice's words and companies, apart from the per-call model list: a test pins its sha256 to NOTICE_VERSION,
+ * so a change to the text without a new version fails the tests. */
+export const noticeText = () => JSON.stringify({ companies: COMPANIES, keeps: SERVICE_KEEPING, companies_keep: COMPANY_KEEPING, sender: SENDER_CLAUSE });
+
 /**
  * Null when the call may go on (consent off, or the current version given); otherwise the 428 answer.
  * `suffix` is the route's own "nothing was charged" sentence.
  */
 export function consentCheck(c: any, body: unknown, models: string[], suffix: string): Response | null {
   if (!consentRequired(c.env)) return null;
+  // Fail closed: a model from a company this notice doesn't name is never sent text under it (round 2, Luna).
+  const unlisted = [...new Set(models.map(companyOf))].filter((k) => !(k in COMPANIES));
+  if (unlisted.length)
+    return new Response(
+      JSON.stringify({ error: "notice_incomplete", message: `This panel includes a model from a company the consent notice doesn't name yet (${unlisted.join(", ")}). Choose other models. ${suffix}`.trim() }),
+      { status: 503, headers: { "content-type": "application/json", "cache-control": "no-store" } },
+    );
   const tag = consentTag(c, body);
   if (tag === NOTICE_VERSION) return null;
   const why = tag
