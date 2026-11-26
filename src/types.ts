@@ -64,6 +64,7 @@ export interface Env {
   MULTI_PART_MAX_TOKENS?: string; // "model=n,model=n": lower a model's max_tokens on the multi-part tiers (cost test, spec 4.3)
   OPT_IN_MODELS?: string; // models agents may name but that are never drawn at random (default: judge.ts DEFAULT_OPT_IN_MODELS; "" turns them off)
   NEW_MODELS?: string; // new models from a company already in the pool: named on review and review-3 while priced at or under the dearest pool model; never drawn, never a default (default: judge.ts DEFAULT_NEW_MODELS; "" turns them off)
+  CONSENT_REQUIRED?: string; // "true": model-bound calls need the current notice version (consent.ts); off until the clients send it
   NEW_MODELS_ENABLED?: string; // "true" opens the new models to every caller; until then only team-allowance calls may name one (new features ship switched off)
   TRIALED_JUDGES?: string; // new models that passed a judge trial, the only ones that may judge (default: none)
   MODEL_POOL?: string; // models agents may choose for panels and reviews, comma separated (default: judge.ts DEFAULT_MODEL_POOL)

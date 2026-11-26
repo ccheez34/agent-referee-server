@@ -74,6 +74,10 @@
     // drawn by "rotate", never a default, never a judge or a multi-part seat until their own trials. Off: remove this line
     // (or any value but "true"), then deploy.
     "NEW_MODELS_ENABLED": "true",
+    // The consent step (src/consent.ts; 4.0's 1250, 5.0's 1557): "true" answers a model-bound call without the current
+    // notice version with 428 and the notice, before the paywall. Off until the clients, the MCP servers and the Action
+    // send the tag (2.0's half) and the terms are published (ccheez34's); then set "true" and deploy.
+    "CONSENT_REQUIRED": "false",
     // Concurrent AI calls per provider pool (code defaults: Opus 6, Sonnet 12, Haiku 12, OpenRouter 20).
     // Live starts from what the launch-day stress test ran at once with no 429s: 20 reviews (Sonnet) and 10 review-3s
     // (10 Opus + 20 OpenRouter calls). The Phase 2b ramp checks Sonnet above that; lower a pool if it shows "throttled".

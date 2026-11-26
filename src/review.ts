@@ -442,6 +442,8 @@ export async function reviewPayload(opts: {
   /** "free": the operator paid for this review (the free daily allowance), so there is no payer. "team": the
    * operator's own team allowance paid for it (no payer either). */
   funding?: "free" | "team";
+  /** The notice version the caller agreed to (consent.ts), when the consent step is on. */
+  consent_version?: string;
 }) {
   const decision = decideReview(opts.commitment.decision_rule, opts.votes.map((v) => v.verdict));
   return {
@@ -453,6 +455,7 @@ export async function reviewPayload(opts: {
     network: opts.network,
     payer: opts.payer ?? null,
     ...(opts.funding ? { funding: opts.funding } : {}),
+    ...(opts.consent_version ? { consent_version: opts.consent_version } : {}),
     title: opts.input.title,
     task_sha256: await sha256Hex(opts.input.task),
     output_sha256: await sha256Hex(opts.input.output),

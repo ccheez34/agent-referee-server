@@ -259,7 +259,7 @@ export type MultiInput = { task: string; pieces: Piece[]; title?: string; criter
 
 /** Control, format (zero-width, bidi), line and paragraph separator characters: not allowed in a piece name. */
 const NOT_PRINTABLE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
-const TOP_KEYS = new Set(["task", "pieces", "title", "criteria", "panel", "allow_secrets"]); // allow_secrets: the content screen (screen.ts)
+const TOP_KEYS = new Set(["task", "pieces", "title", "criteria", "panel", "allow_secrets", "consent"]); // allow_secrets: the content screen (screen.ts); consent: consent.ts
 
 export function validateMultiReview(body: any, tier: MultiTier): { ok: true; value: MultiInput } | { ok: false; error: string } {
   const n = MULTI_PIECES[tier];
@@ -468,6 +468,8 @@ export async function multiReviewPayload(opts: {
   id?: string;
   /** "team": the operator's own team allowance paid for it (no payer). Multi-part reviews are never free. */
   funding?: "team";
+  /** The notice version the caller agreed to (consent.ts), when the consent step is on. */
+  consent_version?: string;
 }) {
   const decision = decideReview(opts.commitment.decision_rule, opts.votes.map((v) => v.verdict));
   const pieces = await pieceRecords(opts.input.pieces);
@@ -481,6 +483,7 @@ export async function multiReviewPayload(opts: {
     network: opts.network,
     payer: opts.payer ?? null,
     ...(opts.funding ? { funding: opts.funding } : {}),
+    ...(opts.consent_version ? { consent_version: opts.consent_version } : {}),
     title: opts.input.title,
     task_sha256: await sha256Hex(opts.input.task),
     pieces,

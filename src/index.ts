@@ -32,6 +32,8 @@ import {
   MULTI_JUDGE_RECEIPT_FORMAT, MULTI_JUDGE_SYSTEM, MULTI_JUDGE_TIMEOUT_MS, MULTI_JUDGE_TIERS, isMultiJudgeTier, multiJudgePromptSha,
 } from "./multijudge.ts";
 
+import { NOTICE_VERSION, consentCheck, consentRecorded, consentRequired, consentTag, notice } from "./consent.ts";
+
 export { MatchRoom, Ledger, Gate, Health };
 
 const app = new Hono<{ Bindings: Env }>();
@@ -486,6 +488,10 @@ async function reviewGuard(c: any, next: any) {
     return err(400, `${String(e?.message ?? e)} Nothing was charged.`);
   }
   if (missingReviewKey(c.env, commitment.models)) return err(503, "Sealed review is temporarily unavailable. Nothing was charged.");
+  // The consent step, before the paywall and any model call (consent.ts): nothing is charged for the notice.
+  const consent = consentCheck(c, body, commitment.models, "Nothing was charged.");
+  if (consent) return consent;
+  c.set("consent", consentTag(c, body));
   const paying = c.env.PAYMENTS_ENABLED === "false" || !!c.req.header("x-payment") || !!team;
   // Counted once per paid review (the call carrying the payment), not again for the unpaid first call.
   const region = regionCheck(c, commitment.models, "Nothing was charged.", paying);
@@ -604,6 +610,10 @@ async function multiGuard(c: any, next: any) {
     return err(400, `${String(e?.message ?? e)} Nothing was charged.`);
   }
   if (missingReviewKey(c.env, commitment.models)) return err(503, "Sealed review is temporarily unavailable. Nothing was charged.");
+  // The consent step, before the paywall and any model call (consent.ts): nothing is charged for the notice.
+  const consent = consentCheck(c, body, commitment.models, "Nothing was charged.");
+  if (consent) return consent;
+  c.set("consent", consentTag(c, body));
   const paying = c.env.PAYMENTS_ENABLED === "false" || !!c.req.header("x-payment") || !!team;
   const region = regionCheck(c, commitment.models, "Nothing was charged.", paying);
   if (region) return region;
@@ -652,6 +662,11 @@ async function judgeJoinGuard(c: any, next: any) {
   // Counted once per paid seat (the call carrying the payment).
   const region = regionCheck(c, models, "Nothing was charged.", c.env.PAYMENTS_ENABLED === "false" || !!c.req.header("x-payment"), true);
   if (region) return region;
+  // The consent step (consent.ts), before the paywall: this seat's text goes to these judges.
+  if (models.length) {
+    const consent = consentCheck(c, body, models, "Nothing was charged.");
+    if (consent) return consent;
+  }
   // A match committed to a Claude judge before Claude judges were switched off is never judged (match.ts,
   // startJudging), so nobody new pays to join it (judge-tier spec v2.1, §7). If its status can't be read right now,
   // nobody pays either (review 1, finding 6); a match that doesn't exist goes on to the handler's own 404.
@@ -1313,6 +1328,7 @@ async function handleReview(c: any, tier: ReviewTier) {
     network: c.env.NETWORK,
     id: randomToken(12),
     ...(c.get("team") ? { funding: "team" as const } : {}),
+    consent_version: consentRecorded(c),
   });
   const receipt = await signReceipt(payload, c.env.SIGNING_KEY, c.env.PUBLIC_KEY);
   return c.json({
@@ -1424,7 +1440,7 @@ async function handleMultiReview(c: any, tier: MultiTier) {
     console.log(`review ${tier} ok in ${Date.now() - started}ms: ${votes.map((v) => `${v.model}=${v.verdict}${v.issues_dropped ? ` (dropped ${v.issues_dropped})` : ""}`).join(" ")}`);
     await record("record_ok");
     if (!c.get("team")) stat(c, `paid_ok_${tier.replace("-", "")}`);
-    const payload = await multiReviewPayload({ tier, input, commitment, votes, payer: c.get("team") ? undefined : payerFromPaymentHeader(c.req.header("x-payment")), network: c.env.NETWORK, id: randomToken(12), ...(c.get("team") ? { funding: "team" as const } : {}) });
+    const payload = await multiReviewPayload({ tier, input, commitment, votes, payer: c.get("team") ? undefined : payerFromPaymentHeader(c.req.header("x-payment")), network: c.env.NETWORK, id: randomToken(12), ...(c.get("team") ? { funding: "team" as const } : {}), consent_version: consentRecorded(c) });
     const receipt = await signReceipt(payload, c.env.SIGNING_KEY, c.env.PUBLIC_KEY);
     return c.json({
       review_id: payload.review_id,
@@ -1749,6 +1765,9 @@ async function handleFreeReview(c: any, tier: ReviewTier, ext?: { caller: string
     return err(400, `${String(e?.message ?? e)} Your free review wasn't used.`);
   }
   if (missingReviewKey(c.env, commitment.models)) return err(503, "Sealed review is temporarily unavailable. Your free review wasn't used.");
+  const consent = consentCheck(c, body, commitment.models, "Your free review wasn't used.");
+  if (consent) return consent;
+  c.set("consent", consentTag(c, body));
   // Not for ext: those requests come from the hosted MCP server's own location, not the person's. A legal pause
   // (PLAN 0.4, R1) applies to them all the same.
   if (!ext) {
@@ -1849,7 +1868,7 @@ async function handleFreeReview(c: any, tier: ReviewTier, ext?: { caller: string
   const votes = settled.map((r) => (r as PromiseFulfilledResult<any>).value);
   stat(c, `${p}ok_${t}`);
   console.log(`free review ${tier} ok in ${Date.now() - started}ms: ${votes.map((x) => `${x.model}=${x.verdict}`).join(" ")}`);
-  const payload = await reviewPayload({ tier, input, commitment, votes, network: c.env.NETWORK, id: randomToken(12), funding: "free" });
+  const payload = await reviewPayload({ tier, input, commitment, votes, network: c.env.NETWORK, id: randomToken(12), funding: "free", consent_version: consentRecorded(c) });
   const receipt = await signReceipt(payload, c.env.SIGNING_KEY, c.env.PUBLIC_KEY);
   return c.json({
     review_id: payload.review_id,
@@ -1901,6 +1920,9 @@ app.post("/internal/free/review", (c) => handleInternalFree(c, "review"));
 app.post("/internal/free/review-3", (c) => handleInternalFree(c, "review-3"));
 
 // What a review will use, published so an agent can check before paying (free).
+// The consent notice (consent.ts) for every model the service may use; a 428 answer gives the one for that call's panel.
+app.get("/consent", (c) => c.json({ required: consentRequired(c.env), ...notice([...new Set([...allowedModels(c.env), ...judgeAllowed(c.env)])]) }, 200, { "cache-control": "no-store" }));
+
 app.get("/reviewers", async (c) => {
   const rp = reviewPrices(c.env);
   return c.json({
@@ -1916,6 +1938,7 @@ app.get("/reviewers", async (c) => {
     opt_in_note: OPT_IN_NOTE,
     new_models: newModels(c.env),
     new_models_open: newModelsOpen(c.env),
+    consent: { required: consentRequired(c.env), version: NOTICE_VERSION, notice: "GET /consent", how: 'Send "consent": "<version>" in the JSON body (or the X-Consent header) on every call that sends text to a model, once the person you work for has agreed to the notice.' },
     new_models_note: NEW_MODELS_NOTE,
     choosing_the_reviewers: PANEL_CHOICE_HELP.replace("on POST /matches (judge-2, judge-3)", "in the review request (review: 1 model, review-3: 3)").replace(/; judge-3 only: .*? majority\./, "."),
     how_votes_combine: "review: the single reviewer's verdict. review-3: a verdict with 2 or more of the 3 votes wins, and cannot_assess counts as a vote like any other (pass+pass+cannot_assess = pass; pass+cannot_assess+cannot_assess = cannot_assess; pass+fail+cannot_assess = split). Otherwise the result is split. Reviewers run in parallel and never see each other's verdicts.",
@@ -1999,6 +2022,11 @@ app.post("/matches", async (c) => {
     const { rules, title, criteria, seats } = checked.value;
     const secret = await screenIntake(c, { rules, title, criteria, seats }, "No match was created and nothing was charged.", input?.allow_secrets === true);
     if (secret) return secret;
+    // The consent step (consent.ts): the creator's rules and labels go to the judges. The panel isn't drawn yet,
+    // so the notice names every company that may judge this tier (or the named panel's).
+    const named = Array.isArray(input?.panel) && input.panel.every((m: unknown) => typeof m === "string") ? (input.panel as string[]) : judgeAllowed(c.env);
+    const consent = consentCheck(c, input, named, "No match was created and nothing was charged.");
+    if (consent) return consent;
   }
   if (isMultiJudgeTier(input?.tier) && !(await multiJudgeOn(c))) return err(503, "The multi-part judge tiers (judge-3x2, judge-3x3) aren't open yet.");
   if (isJudgeTier(input?.tier) && missingJudgeKey(c.env, tierModels(c.env, input.tier as JudgeTierName)))
@@ -2068,6 +2096,11 @@ app.post("/invite/join", async (c) => {
   const info = await matchJudgeInfo(c, body.match_id, false);
   if (info.failed) return cantCheckMatch();
   if (info.own && commitsClaudeWhileOff(c.env, info.models)) return err(503, CLAUDE_MATCH_CLOSED);
+  // The guest's own consent (consent.ts): the host's can't speak for the guest's text.
+  if (info.models.length) {
+    const consent = consentCheck(c, body, info.models, "Nothing was changed.");
+    if (consent) return consent;
+  }
   return forward(c.env, body.match_id, "join", { role: "guest", invite_token: body.invite_token, seat: body.seat });
 });
 

@@ -659,6 +659,7 @@ routeTest("re-read R3: llms.txt gives judge-3's closed reason once", async () =>
 routeTest("re-read R5: GET /reviewers is byte for byte its snapshot, each with its own wrangler.jsonc settings", async () => {
   // The snapshot was main 2aa89f2's until the panels' new models (PLAN revision 4), which added three things and changed
   // nothing else: new_models, new_models_note, and the multi-part panel line now naming new models as refused.
+  // The consent step (consent.ts, Nov 26) added one key, consent, and changed nothing else (checked key by key).
   const snap = await readFile(new URL("./fixtures/reviewers-new-models.json", import.meta.url), "utf8");
   const res = await app.fetch(new Request("https://x/reviewers"), { ...(await shippedVars()) }, ctx);
   // A deliberate change to reviews or their settings must regenerate the snapshot (and say why).
