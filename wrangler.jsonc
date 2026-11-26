@@ -2,6 +2,7 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "agent-referee",
   "main": "src/index.ts",
+  "alias": { "x402/paywall": "./src/paywall-stub.ts" },
   "compatibility_date": "2026-10-01",
   // nodejs_compat for the payment libraries (viem etc.)
   "compatibility_flags": ["nodejs_compat"],
