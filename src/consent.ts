@@ -8,7 +8,7 @@
 import { companyOf } from "./judge.ts";
 
 /** Bump this whenever the companies, the keeping or the terms' wording change. */
-export const NOTICE_VERSION = "2026-11-30.1";
+export const NOTICE_VERSION = "2026-11-30.2";
 
 /** Each company the service can send text to, with where it's based (for the region-aware reader). */
 const COMPANIES: Record<string, { name: string; based: string }> = {
@@ -31,8 +31,10 @@ export const SERVICE_KEEPING =
   "A judged match's text is kept with the match for 7 days, then deleted with it.";
 export const COMPANY_KEEPING =
   "Each company named receives the text through its API (Anthropic directly, the others through OpenRouter) and handles it under its own API terms.";
+// His own-work clause of Nov 26 is withdrawn (his Nov 27, 03:48, 1.0's 0349: people at work send code their employer
+// owns). This is the team's suggestion until the lawyer words it and he confirms it.
 export const SENDER_CLAUSE =
-  "By agreeing you also confirm that you send only your own work, or work you are allowed to send.";
+  "By agreeing you also confirm that you own the work you send, or are allowed to send it.";
 
 export type ConsentEnv = { CONSENT_REQUIRED?: string };
 export const consentRequired = (env: ConsentEnv) => env.CONSENT_REQUIRED === "true";

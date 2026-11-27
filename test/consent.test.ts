@@ -80,7 +80,7 @@ function isNotice(r: { status: number; body: any }, what: string) {
   assert.equal(r.body.error, "consent_required", what);
   assert.equal(r.body.notice.version, V, what);
   assert.ok(Array.isArray(r.body.notice.read_by) && r.body.notice.read_by.length > 0, `${what}: names the companies`);
-  assert.match(r.body.notice.sender, /only your own work/, what);
+  assert.match(r.body.notice.sender, /own the work you send, or are allowed to send it/, what);
   assert.ok(r.body.message.includes(`"consent": "${V}"`), `${what}: says how to agree`);
 }
 
@@ -278,7 +278,10 @@ t("a panel with a model from a company the notice doesn't name is refused, never
 
 // The notice's text is pinned to its version: change the companies or the words, and this fails until NOTICE_VERSION
 // is bumped and the new version's fingerprint added here (so everyone is asked again).
-const NOTICE_FINGERPRINTS: Record<string, string> = { "2026-11-30.1": "ef6e91f0b7b272f917875954abc3934b807f167203023838a5abbc5b2e206a1d" };
+const NOTICE_FINGERPRINTS: Record<string, string> = {
+  "2026-11-30.1": "ef6e91f0b7b272f917875954abc3934b807f167203023838a5abbc5b2e206a1d", // his own-work clause (withdrawn Nov 27)
+  "2026-11-30.2": "bf2e6067baf216dce80d5fc1693856739c66c2a38bf63b82a00c075e306792c4", // own it or are allowed to send it (the team's suggestion)
+};
 t("the notice's text can't change without a new NOTICE_VERSION", () => {
   const sha = createHash("sha256").update(noticeText()).digest("hex");
   assert.equal(NOTICE_FINGERPRINTS[V], sha, `notice text changed: bump NOTICE_VERSION and pin "${sha}" for the new version`);
