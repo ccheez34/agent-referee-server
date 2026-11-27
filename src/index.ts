@@ -63,6 +63,22 @@ app.use("*", async (c, next) => {
   }
 });
 
+// The live-state GETs answer with cache-control: no-store, so no cache or zone rule in front of the Worker can serve an
+// old copy (5.0-D386: agentreferee.ai served a stale /reviewers after a deploy; 5.0's 1309 of Nov 24, card B of 2.0's
+// 1148). Set after the handler, on every answer of these paths, the 503s and 404s included.
+export const NO_STORE_PATHS = ["/reviewers", "/judge", "/compare", "/health", "/consent"];
+app.use("*", async (c, next) => {
+  await next();
+  if (c.req.method !== "GET" || !NO_STORE_PATHS.includes(c.req.path)) return;
+  try {
+    c.res.headers.set("cache-control", "no-store");
+  } catch {
+    const res = new Response(c.res.body, c.res);
+    res.headers.set("cache-control", "no-store");
+    c.res = res;
+  }
+});
+
 // The settings' new models, checked before anything is served (PLAN revision 4 of the panels' new models, 2.0's point
 // 3): a bad entry stops the service, with the entry named. /health still answers and names it, so a deploy's live check
 // shows why.

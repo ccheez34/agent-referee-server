@@ -41,7 +41,8 @@ jobs:
           set -o pipefail
           npm test 2>&1 | tee /tmp/test.txt
           # The counts as a notice, so a run's skips show without its log (GitHub keeps annotations).
-          echo "::notice::$(grep -E '^# (tests|pass|fail|skipped|cancelled) ' /tmp/test.txt | tr '\n' ' ')"
+          # Node 22's reporter prints "# tests 384", Node 24's "ℹ tests 384": both are counted (2.0-D1472).
+          echo "::notice::$(grep -E '^(# |ℹ )(tests|pass|fail|skipped|cancelled) ' /tmp/test.txt | tr '\n' ' ')"
           # Test files that skip when the app can't load must not pass quietly here, where everything is installed.
           if grep -E 'route tests skipped|tests skipped \(dependencies not installed' /tmp/test.txt; then
             echo "::error::a test file skipped its route tests in CI"; exit 1
