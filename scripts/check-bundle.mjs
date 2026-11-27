@@ -7,7 +7,8 @@ import { join } from "node:path";
 
 const out = mkdtempSync(join(tmpdir(), "ar-bundle-"));
 try {
-  execFileSync("npx", ["wrangler", "deploy", "--dry-run", "--outdir", out], { stdio: ["ignore", "ignore", "inherit"] });
+  // Windows has npx only as npx.cmd, which needs a shell (his PC, Nov 26: "spawnSync npx ENOENT"); the arguments are fixed.
+  execFileSync("npx", ["wrangler", "deploy", "--dry-run", "--outdir", out], { stdio: ["ignore", "ignore", "inherit"], shell: process.platform === "win32" });
   const js = readFileSync(join(out, "index.js"), "utf8");
   const banned = [/@metamask\//i, /@base-org\/account/i, /@cbhq\//i, /x402\/src\/paywall\/gen\/template/];
   const hits = banned.filter((re) => re.test(js)).map(String);
