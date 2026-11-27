@@ -85,6 +85,13 @@ type Round = {
   combined_hex?: string;
 };
 
+/** The creator's and each seat's consent notice version, or undefined when none was recorded (the step off). */
+export function consentVersionsOf(m: MatchState): { creator?: string; seats: Record<string, string> } | undefined {
+  const seats = Object.fromEntries(Object.entries(m.joined).filter(([, j]) => j.consent_version).map(([seat, j]) => [seat, j.consent_version!]));
+  if (!m.creator_consent_version && !Object.keys(seats).length) return undefined;
+  return { ...(m.creator_consent_version ? { creator: m.creator_consent_version } : {}), seats };
+}
+
 export type MatchState = {
   id: string;
   key?: string;
@@ -102,7 +109,8 @@ export type MatchState = {
   seat_wallets?: Record<string, string>; // optional seat locks: seat -> wallet that must pay for it
   host_pays?: string; // invite match: this seat pays for both; the other seat joins free with the invite token
   invite_hash?: string; // sha256 of the invite token (the token itself is only ever shown to the creator)
-  joined: Record<string, { token_hash: string; joined_at: number; paid: boolean; paid_by?: string; payment_hash?: string }>;
+  joined: Record<string, { token_hash: string; joined_at: number; paid: boolean; paid_by?: string; payment_hash?: string; consent_version?: string }>;
+  creator_consent_version?: string; // the consent notice version the match's creator agreed to (consent.ts), when the step is on
   phase: Phase;
   rounds: Round[];
   reveal_deadline?: number;
@@ -451,6 +459,7 @@ export class MatchRoom {
       criteria: input.criteria,
       panel: input.panel,
       host_pays: input.host_pays,
+      creator_consent_version: typeof body?.consent_version === "string" && body.consent_version.length <= 64 ? body.consent_version : undefined,
       judge,
       series: body.series, // only set by an internal rematch call; the public POST /matches never passes it
       joined: {},
@@ -512,6 +521,8 @@ export class MatchRoom {
       paid: !!body.paid,
       paid_by: body.payer,
       payment_hash: typeof body.payment_hash === "string" ? body.payment_hash : undefined,
+      // The consent notice version this seat agreed to (index.ts passes it only while the consent step is on).
+      consent_version: typeof body.consent_version === "string" && body.consent_version.length <= 64 ? body.consent_version : undefined,
     };
     const full = m.seats.every((s) => m.joined[s]);
     if (full) this.startPlay();
@@ -1050,6 +1061,9 @@ export class MatchRoom {
       // with the rest (judge-tier spec v2.1, §4). canonicalJson drops them for luck tiers, so those receipts don't change.
       advisory: isJudgeTier(m.tier) ? JUDGE_ADVISORY : undefined,
       human_review: isJudgeTier(m.tier) ? JUDGE_HUMAN_REVIEW : undefined,
+      // The consent step (consent.ts): the notice version the creator and each seat agreed to, signed with the rest.
+      // Absent while the step is off, so receipts then don't change.
+      consent_versions: consentVersionsOf(m),
       series: m.tally_after
         ? m.series
           ? { series_id: m.series.series_id, game: m.series.game, previous_match_id: m.series.previous_match_id, previous_receipt_sha256: m.series.previous_receipt_sha256, tally: m.tally_after, max_games: MAX_SERIES_GAMES }

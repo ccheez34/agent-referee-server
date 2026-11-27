@@ -283,3 +283,40 @@ t("the notice's text can't change without a new NOTICE_VERSION", () => {
   const sha = createHash("sha256").update(noticeText()).digest("hex");
   assert.equal(NOTICE_FINGERPRINTS[V], sha, `notice text changed: bump NOTICE_VERSION and pin "${sha}" for the new version`);
 });
+
+t("a judge match's receipt signs the creator's and each seat's notice version; with the step off it carries none", async () => {
+  for (const on of [true, false]) {
+    const e = env(on ? ON : {});
+    const created = await call(e, "/matches", { tier: "judge-3", seats: ["a", "b"], rules: "Pick the shorter answer.", ...(on ? { consent: V } : {}) });
+    assert.equal(created.status, 201, JSON.stringify(created.body).slice(0, 200));
+    const id = created.body.match_id ?? created.body.id;
+    const tok: Record<string, string> = {};
+    tok.a = (await call(e, "/join/judge-3", { match_id: id, seat: "a", ...(on ? { consent: V } : {}) })).body.seat_token;
+    tok.b = (await call(e, "/join/judge-3", { match_id: id, seat: "b" }, on ? { "x-consent": V } : {})).body.seat_token;
+    assert.ok(tok.a && tok.b, "both joined");
+    await call(e, `/matches/${id}/submit`, { seat: "a", seat_token: tok.a, position: "short" });
+    const done = await call(e, `/matches/${id}/submit`, { seat: "b", seat_token: tok.b, position: "a much longer answer" });
+    assert.equal(done.status, 200, JSON.stringify(done.body).slice(0, 300));
+    const receipt = done.body.match.receipt;
+    assert.ok(receipt, JSON.stringify(done.body.match).slice(0, 300));
+    if (on) {
+      assert.deepEqual(receipt.payload.consent_versions, { creator: V, seats: { a: V, b: V } });
+      assert.ok(await verified(receipt), "the signature covers consent_versions");
+    } else assert.equal(receipt.payload.consent_versions, undefined);
+  }
+});
+
+t("an invited guest's version is recorded beside the host's", async () => {
+  const e = env(ON);
+  const inv = await call(e, "/matches", { tier: "judge-3", seats: ["a", "b"], rules: "Pick the shorter answer.", host_pays: "a", consent: V });
+  const iid = inv.body.match_id ?? inv.body.id;
+  const host = await call(e, "/host/join/judge-3", { match_id: iid, seat: "a", consent: V });
+  const token = host.body.invite?.invite_token ?? inv.body.invite?.invite_token;
+  const g = await call(e, "/invite/join", { match_id: iid, invite_token: token, seat: "b", consent: V });
+  assert.equal(g.status, 200, JSON.stringify(g.body).slice(0, 200));
+  const room = e.MATCHES.objs.get(iid);
+  const m = (room as any).m;
+  assert.equal(m.creator_consent_version, V);
+  assert.equal(m.joined.a.consent_version, V);
+  assert.equal(m.joined.b.consent_version, V);
+});

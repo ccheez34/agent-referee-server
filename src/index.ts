@@ -2044,6 +2044,7 @@ app.post("/matches", async (c) => {
     const named = Array.isArray(input?.panel) && input.panel.every((m: unknown) => typeof m === "string") ? (input.panel as string[]) : judgeAllowed(c.env);
     const consent = consentCheck(c, input, named, "No match was created and nothing was charged.");
     if (consent) return consent;
+    (c as any).set("consent", consentTag(c, input));
   }
   if (isMultiJudgeTier(input?.tier) && !(await multiJudgeOn(c))) return err(503, "The multi-part judge tiers (judge-3x2, judge-3x3) aren't open yet.");
   if (isJudgeTier(input?.tier) && missingJudgeKey(c.env, tierModels(c.env, input.tier as JudgeTierName)))
@@ -2067,7 +2068,7 @@ app.post("/matches", async (c) => {
   }
   // With a shared key, both agents compute the same match id, so nobody has to pass an id around.
   const id = typeof input?.key === "string" && KEY_RE.test(input.key) ? await idForKey(input.key, demo) : randomToken(12);
-  const res = await forward(c.env, id, "create", { id, input });
+  const res = await forward(c.env, id, "create", { id, input, consent_version: consentRecorded(c) });
   if (res.status !== 201 || !input?.host_pays) return res;
   // Invite match: hand the creator a link to send the other agent. It's shown only here, once.
   const created: any = await res.json();
@@ -2117,8 +2118,9 @@ app.post("/invite/join", async (c) => {
   if (info.models.length) {
     const consent = consentCheck(c, body, info.models, "Nothing was changed.");
     if (consent) return consent;
+    (c as any).set("consent", consentTag(c, body));
   }
-  return forward(c.env, body.match_id, "join", { role: "guest", invite_token: body.invite_token, seat: body.seat });
+  return forward(c.env, body.match_id, "join", { role: "guest", invite_token: body.invite_token, seat: body.seat, consent_version: consentRecorded(c) });
 });
 
 app.get("/matches/:id", async (c) => {
@@ -2193,6 +2195,7 @@ function joinRoute(path: string, tier: Tier, role: "party" | "mediator" | "host"
       // seats that are normally paid wait for the table to fill, so no-shows cost nobody anything (demo seats behave the same)
       wait: paid && (demo || paymentsOn),
       payer,
+      consent_version: consentRecorded(c), // set by judgeJoinGuard while the consent step is on
     });
     // Record privacy rides on a paid join, so only the wallet's owner can change it.
     if (res.ok && payer && typeof body.private_record === "boolean" && c.env.LEDGER) {
