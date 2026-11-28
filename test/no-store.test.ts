@@ -35,6 +35,14 @@ test("the CI notice's grep counts Node 22's '# tests' and Node 24's 'ℹ tests' 
   const line = yml.split("\n").find((l) => l.includes("::notice::") && l.includes("grep -E"))!;
   const pattern = /grep -E '([^']+)'/.exec(line)![1];
   const sample = "# tests 384\n# pass 383\nℹ tests 384\nℹ pass 383\nℹ fail 0\nok 1 - x\n";
-  const out = execFileSync("grep", ["-E", pattern], { input: sample, encoding: "utf8" });
-  assert.equal(out.trim().split("\n").length, 5, out);
+  // CI runs on Linux, where the workflow's own grep is used; Windows has no grep (5.0-D450: his deploy run stopped here),
+  // so there the same extended pattern is read as a JavaScript regular expression, which means the same for this one
+  // (no "u" flag: it refuses escapes grep -E takes, so a harmless one would fail on Windows only; the review's point).
+  const matched = process.platform === "win32"
+    ? sample.split("\n").filter((l) => new RegExp(pattern).test(l))
+    : execFileSync("grep", ["-E", pattern], { input: sample, encoding: "utf8" }).trim().split("\n");
+  // Exactly the five count lines, not just five lines (the review-3's point): "ok 1 - x" and the empty last line stay out.
+  assert.deepEqual(matched, ["# tests 384", "# pass 383", "ℹ tests 384", "ℹ pass 383", "ℹ fail 0"], matched.join("\n"));
+  // Where grep is there, the regular expression must pick the same lines, so the Windows branch can't drift from it.
+  if (process.platform !== "win32") assert.deepEqual(sample.split("\n").filter((l) => new RegExp(pattern).test(l)), matched);
 });
